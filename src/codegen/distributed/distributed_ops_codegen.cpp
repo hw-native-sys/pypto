@@ -153,6 +153,7 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   INTERNAL_CHECK_SPAN(roles.has_value(), call->span_) << "Missing builtin collective operand roles";
   std::vector<std::string> context_handles;
   std::vector<std::string> context_exprs;
+  std::vector<bool> host_contexts;
   for (size_t index : roles->context_args) {
     auto type = ir::As<ir::DistributedTensorType>(call->args_[index]->GetType());
     INTERNAL_CHECK_SPAN(type, call->span_) << "Builtin collective remote operand must be distributed";
@@ -162,8 +163,10 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
     const auto handle = codegen.GetCommDomainHandleVar(buffer);
     context_handles.push_back(handle);
     // Host mappings need the accessor to keep the context alive through dispatch.
-    context_exprs.push_back(buffer->memory_source_ == "host" ? handle + ".device_context(" + rank_expr + ")"
-                                                             : handle + "[" + rank_expr + "].device_ctx");
+    const bool host_context = buffer->memory_source_ == "host";
+    host_contexts.push_back(host_context);
+    context_exprs.push_back(host_context ? handle + ".device_context(" + rank_expr + ")"
+                                         : "comm_context_arg(orch, " + handle + ", " + rank_expr + ")");
   }
   const auto& handle_var = context_handles.front();
   std::vector<std::string> ordering_handles;
@@ -192,16 +195,17 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       const std::string shape = codegen.FormatShapeTuple(dist_type->shape_);
       const std::string dtype_enum =
           "DataType." + DistributedCodegen::DataTypeToSimplerEnum(dist_type->dtype_);
-      codegen.Emit(ta_var + ".add_tensor(" + arg_handle + "[" + rank_expr + "].buffers[\"" + name +
-                   "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " + tag + ")");
+      codegen.Emit(ta_var + ".add_tensor(comm_domain_member(orch, " + arg_handle + ", " + rank_expr +
+                   ").buffers[\"" + name + "\"].tensor(shapes=" + shape + ", dtype=" + dtype_enum + "), " +
+                   tag + ")");
       continue;
     }
     if (ir::As<ir::TileType>(call->args_[i]->GetType())) {
       const std::string arg_name = codegen.GetExprAsCode(call->args_[i]);
       INTERNAL_CHECK_SPAN(!arg_name.empty(), call->span_)
           << "Internal error: builtin tensor collective tile arg must resolve to a Python name";
-      codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + arg_name + "\"]), " +
-                   tag + ")");
+      codegen.Emit("add_chip_tensor_arg(" + ta_var + ", orch._worker, tensors[\"" + arg_name + "\"], " + tag +
+                   ", callables, \"" + variant + "\", " + std::to_string(i) + ", rank=" + rank_expr + ")");
       continue;
     }
     if (ir::As<ir::ScalarType>(call->args_[i]->GetType())) {
@@ -215,15 +219,18 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   // Order this task against every domain it touches, including local-only
   // operands. Tokens stay after the real tensors and are not forwarded to AIV.
   for (const auto& handle : ordering_handles) {
-    codegen.Emit(ta_var + ".add_tensor(make_tensor_arg(orch._worker, tensors[\"" + handle + "_ord\"][" +
-                 rank_expr + "]), TensorArgType.INOUT)");
+    codegen.Emit(ta_var + ".add_tensor(comm_order_tensor(comm_context_arg(orch, " + handle + ", " +
+                 rank_expr + ")), TensorArgType.INOUT)");
   }
   if (emit_rank_count) {
-    codegen.Emit(ta_var + ".add_scalar(" + handle_var + "[" + rank_expr + "].domain_size)");
+    codegen.Emit(ta_var + ".add_scalar(len(" + handle_var + ".workers))");
   }
   // Contexts follow remote-operand order, even when several share a domain.
   // Entry templates and the managed CHIP kernel signatures use this same ABI.
-  for (const auto& context : context_exprs) codegen.Emit(ta_var + ".add_scalar(" + context + ")");
+  for (size_t i = 0; i < context_exprs.size(); ++i) {
+    codegen.Emit(ta_var + (host_contexts[i] ? ".add_scalar(" : ".add_domain_context(*") + context_exprs[i] +
+                 ")");
+  }
   // A genuine dynamic scalar argument (e.g. all_to_all_v's core_num) — a
   // reference to its actual runtime value, unlike the `core_num` out-of-band
   // *attr* parameter just below, which is always baked as a literal.

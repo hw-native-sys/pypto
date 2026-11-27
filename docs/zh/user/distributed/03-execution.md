@@ -93,10 +93,73 @@ with compiled.prepare() as rt:
 ### 常驻张量的所有权
 
 常驻参数只能用于 prepared worker。`DeviceTensor` 必须由执行它的同一个
-`DistributedWorker.alloc_tensor` 返回，`StackedDeviceTensor` 必须由该 worker
-的 `alloc_stacked_tensor` 返回。这些分配接口会在每个设备张量或分片上保留 Simpler
+`DistributedWorker.alloc_tensor` 返回；`StackedDeviceTensor` 也可由该 worker 的
+本地分配与远端域视图组合构造。这些接口会在每个设备张量或分片上保留 Simpler
 owner `Buffer`，使无地址 wire ABI 能构造有效的 Tensor descriptor。手工包装裸指针，
 或把常驻张量交给另一个 worker，都会被拒绝。
+
+## 远端部署
+
+通过 `compiled.prepare(deployment=...)` 传入 `DistributedDeployment`，将逻辑 rank
+放置到本地卡与 daemon 托管的远端卡。顺序为 `local_device_ids` 在前，
+`RemoteChipTarget(endpoint, device_id)` 在后。`rt.world_size` 包含两者。
+endpoint 只属于运行时配置，不写入编译产物元数据。
+
+首版远端路径支持 A3 Device-source Fabric 域（`a2a3`、
+`comm_profile="a3-fabric-v1"`）及对应模拟器配置（`a2a3sim`、
+`comm_profile="sim"`）。每张远端卡有独立 Simpler 会话；逻辑 rank 映射为
+Simpler 实际返回的 worker ID。
+
+### 设备 push/notify 派发组
+
+在 `@pl.jit.host` 编排函数中，通过显式 `pl.parallel` 表达需要交换数据、相互等待通知的卡：
+
+```python
+for rank in pl.parallel(pld.world_size()):
+    chip_step(window, device=rank)
+```
+
+每次迭代直接调用同一个 CHIP 入口，并指定独立的逻辑设备。标量表达式和 tensor
+视图用于构造逐卡参数，通信域在循环外分配。编译器生成组作用域，收集全部成员参数后，
+统一调用 Simpler 的 `submit_next_level_group`。参数构造和校验在组发布前完成；
+空迭代范围对应空提交。
+
+各 CHIP Task 内使用 `remote_store`、`notify` 和注册型 `defer_wait` 表达设备阶段，
+消费者依赖 waiter 的延迟完成 token。现有通信 fence pass 提供发布标记，A3 executor
+提供任务入口缓存处理。应用定义接收槽、信号 epoch、容量及各参与者等待的 peer 集合。
+成组接纳提供参与卡的执行机会，设备通知表达 payload 就绪。
+
+相互等待的设备阶段组织在每卡同一个 CHIP Task 内。每卡保持一个在途 L2 Task，
+使用同一卡的后续组在当前任务完成后调度；任务内通过独立接收槽和信号区分各块。
+
+首版组形式为独立迭代、每次迭代一个无条件直接 CHIP 调用。嵌套循环、条件分支、
+循环携带值和逐成员 TaskId 提交会得到编译诊断。普通 `pl.range` 使用现有提交行为。
+远端产物入口绑定版本为 2，使用组契约时重新编译产物。
+
+| API | 契约 |
+| --- | --- |
+| `rt.allocate_domain(name, window_size=..., buffers=..., members=None)` | 首个请求前建立保留的 Device 域。成员使用逻辑 rank，默认全部 rank。 |
+| `rt.bind_domain(compiled, name, domain)` | 将生成的作用域名称（如 `comm_d0`）绑定到该分配。完整且有序的 buffer 布局及成员必须匹配。 |
+| `with rt.request(domain): ...` | 在拷贝、HOST 决策、多次派发和回读期间持有 runtime 独占；退出前等待已接纳派发的句柄完成。 |
+| `rt.remote_tensor(domain, rank, buffer, shape, dtype, byte_offset=0)` | 借用远端成员指定 Device buffer 的视图，返回没有 `data_ptr` 的 `RemoteDeviceTensor`。 |
+| `rt.copy_remote_to(view, host)` / `rt.copy_remote_from(view, host)` | 请求作用域内同步分块拷贝 CPU 连续 tensor，shape 和 dtype 必须匹配。 |
+| `rt.copy_domain_to(domain, rank, buffer, host, byte_offset=0)` / `rt.copy_domain_from(...)` | 在请求作用域内上传或读取本地、远端成员的指定 buffer；rank 为逻辑部署 rank。 |
+| `rt.release_remote_tensor(view)` | 注销视图，不释放所属域的存储。 |
+
+使用 `simpler.task_interface.CommBufferSpec`，物理 buffer 大小按 64 字节对齐。
+`window_size` 表示应用 buffer 的窗口容量；PyPTO 自动追加保留的 64 字节
+`__pypto_order` buffer 并增大实际窗口。该成员本地 buffer 提供稳定的 DAG
+顺序，不依赖控制端 HOST 内存。绑定同一分配的各阶段必须声明相同的完整
+有序布局（含 padding）。生成的通信上下文携带域身份，由目标 L2 绑定自身设备指针。
+
+远端部署启用保留域执行，并禁用自动窗口重置。应用应在 `request()` 内显式
+初始化数据和状态。冲突请求由 Simpler 独占作用域拒绝；该作用域不新增 TCP
+连接。通信回收状态不确定时，runtime 保留资源，避免释放仍被 peer 使用的窗口。
+
+远端 tensor 存储来自保留的 Device 域 buffer。通过域复制接口上传数据，并使用
+`RemoteDeviceTensor` 视图作为参数。裸指针分配和内存查询接口面向本地卡；
+Simpler 通用远端分配接口提供 HOST staging，设备驻留由域视图表达。混合 `StackedDeviceTensor`
+可以包含本地分配的 `DeviceTensor` 与远端视图，其逻辑 rank 须与派发位置一致。
 
 ## DeviceTensor
 
@@ -320,6 +383,8 @@ Tensor 在创建域时按原始字节复制，不转换 dtype；来源至少包�
 
 ## 在程序之间共享外部表
 
+外部窗口参数适用于纯本地部署。本地和远端混合部署使用 `share_domain` 绑定编译产物的通信域布局。
+
 创建 worker 前准备普通输入与输出。两个 HOST 入口均以静态 `pld.DistributedTensor[[1, 65], pl.UINT8]` 声明表参数。初始化源按 members 顺序提供。本例每份源数据为 65 字节，每个物理槽占 128 字节。
 
 ```python
@@ -342,3 +407,15 @@ with DistributedWorker([prefill, decode]) as worker:
 默认的 `memory_source="device"` 通过 CHIP 任务填充窗口，无需传入 `window_sources`。
 A5 Host 域的异步远端 GET 需要指定 `workspace_engines=("urma",)`，底层运行时要求
 成员从 worker 0 开始连续排列。退出域的 `with` 块时会等待已接受的调用完成并释放分配。
+
+## 显式资源规划与普通 CPU 输入输出
+
+`compiled.domain_layouts(world_size=..., **scalars)` 在启动前查询成员、命名槽位、逻辑/物理字节数、偏移、存储来源和 workspace 引擎。动态尺寸提供整数绑定。`rt.prepare_domains(compiled, **scalars)` 按计划分配并绑定 Device、无 workspace engine 的域；计划中的窗口尺寸为应用 payload，运行时另加排序槽。
+
+`rt.share_domain(domain, [(artifact_a, scope_a), (artifact_b, scope_b)], **scalars)` 显式共享窗口，在发布绑定前核对全部产物的成员顺序和完整命名布局。本地与远端部署均使用该绑定。
+
+参数使用独立 Device 驻留域。`domain_tensor` 借用本地或远端 buffer，`stack_domain_tensor(..., shard_axis=...)` 创建输出分片，`alloc_stacked_tensor(host, domain=..., buffer=..., shard_axis=...)` 上传。`[round,rank,...]` 指定 `shard_axis=1`，保留 HOST 的 `x[round,rank]` 索引；正步长 view 保留 stride 和范围。显式复制要求 dense 设备 view，`copy_stacked_from` 恢复 HOST 原轴顺序。上传、运行和回读由同时持有通信域与参数域的 `request` 保护。
+
+remote 同步 `run()` 自动将普通连续 CPU 参数搬到独立 Device staging 域，全部输出下载成功后才发布到调用者。每次调用向各参与 rank 复制相关底层 storage；大权重适合显式驻留复用。跨卡冲突读写别名要求显式通信窗口，跨步 view 按字节跨度保守检查。异步 `submit()` 使用驻留参数，HOST 标量传入 Python 值。
+
+现有产物 manifest 增加生成源码哈希、布局与编译时 CommContext ABI，冷加载恢复；`validate_artifacts()` 检查源码，`prepare()` 再与 Simpler native 的 `COMM_CONTEXT_ABI` 核对。需联合重编兼容的 Simpler/PyPTO 扩展。

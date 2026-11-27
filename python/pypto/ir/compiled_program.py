@@ -59,7 +59,7 @@ from pypto.pypto_core.ir import (
     ParamDirection,
     Program,
 )
-from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
+from pypto.runtime.device_tensor import DeviceTensor, RemoteDeviceTensor, StackedDeviceTensor
 
 # Re-exported: these moved to a leaf module so a consumer of the metadata can
 # depend on it without depending on this module. See ``param_info``.
@@ -111,7 +111,8 @@ from .param_info import arg_shape_as_declared as _arg_shape_as_declared
 # Scalar params accept Python primitives or ctypes scalars (which are
 # coerced to the correct ctypes type internally).
 CallArg: TypeAlias = (
-    "torch.Tensor | DeviceTensor | StackedDeviceTensor | int | float | bool | ctypes._SimpleCData[Any]"
+    "torch.Tensor | DeviceTensor | RemoteDeviceTensor | StackedDeviceTensor | "
+    "int | float | bool | ctypes._SimpleCData[Any]"
 )
 
 if TYPE_CHECKING:
@@ -131,7 +132,9 @@ def _validate_fp4_carrier_shape(shape: Sequence[int], info: "_ParamInfo") -> Non
         )
 
 
-def _validate_resident_dtype(arg: DeviceTensor | StackedDeviceTensor, info: _ParamInfo) -> None:
+def _validate_resident_dtype(
+    arg: DeviceTensor | RemoteDeviceTensor | StackedDeviceTensor, info: _ParamInfo
+) -> None:
     """Check the mapped dtype, or the storage width of an unmapped NZ carrier."""
     expected_dtype = _to_torch_dtype(info.dtype)
     if expected_dtype is not None:
@@ -153,7 +156,7 @@ def _validate_resident_dtype(arg: DeviceTensor | StackedDeviceTensor, info: _Par
             )
 
 
-def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
+def _validate_device_tensor(arg: DeviceTensor | RemoteDeviceTensor, info: _ParamInfo) -> None:
     """Check a ``DeviceTensor`` arg against IR parameter metadata.
 
     Raises:

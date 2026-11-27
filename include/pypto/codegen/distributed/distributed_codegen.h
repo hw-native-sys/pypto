@@ -102,8 +102,9 @@ class DistributedCodegen : public CodegenBase {
   [[nodiscard]] std::string ResolveRankExpr(const ir::CallPtr& call) const;
 
   /// Lower a ``CommCtxType`` call argument. get_comm_ctx-derived locals map to
-  /// the runtime device_ctx expression for the current dispatch rank.
-  /// External HOST contexts contribute their domain to the ordering-token list.
+  /// a logical (domain, domain_rank) binding for Device scopes. Local Host
+  /// and external contexts use the device context accessor; external contexts
+  /// also contribute their domain to the ordering-token list.
   [[nodiscard]] std::string ResolveCommCtxArg(const ir::ExprPtr& arg, const std::string& rank_expr,
                                               const ir::Span& span, std::vector<size_t>& external_args) const;
 
@@ -312,6 +313,9 @@ class DistributedCodegen : public CodegenBase {
   bool requires_host_domain_ = false;
   bool is_worker_context_{false};
   int task_args_counter_{0};  // Counter for generating unique TaskArgs variable names
+  // One direct CHIP call site in an explicit HOST parallel loop is one group.
+  bool in_chip_group_{false};
+  int chip_group_call_count_{0};
 
   // HOST orchestrator alloc-hoisting state. Populated by
   // CollectHostOrchHoistableAllocs() before EmitFunction() runs on the HOST
@@ -344,6 +348,7 @@ class DistributedCodegen : public CodegenBase {
 
   std::unordered_set<std::string> emitted_builtin_variants_;
   std::vector<BuiltinNextLevelSpec> builtin_next_level_specs_;
+  std::vector<std::string> domain_layout_specs_;
 };
 
 }  // namespace codegen

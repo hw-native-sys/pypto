@@ -161,6 +161,8 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
               whose retained ``Buffer`` yields an address-free wire ``Tensor``
               (memory is caller-managed). The descriptor is built once per
               handle and reused.
+            - :class:`~pypto.runtime.RemoteDeviceTensor`: a prepared L3 view
+              retaining its domain's address-free Device Buffer identity.
             - simpler ``Tensor``: returned as-is, preserving its HOST or DEVICE
               address space. The caller retains its backing through completion.
 
@@ -171,6 +173,13 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
 
     if isinstance(arg, task_interface.Tensor):
         return arg
+    if isinstance(arg, device_tensor.RemoteDeviceTensor):
+        if not _validates_liveness_at_submit(worker):
+            raise TypeError("RemoteDeviceTensor requires an L3 DistributedWorker")
+        dtype = torch_interop.torch_dtype_to_datatype(arg.dtype)
+        return arg.buffer.tensor(
+            shapes=arg.shape, dtype=dtype, byte_offset=arg.byte_offset, strides=arg.strides
+        )
     if isinstance(arg, device_tensor.DeviceTensor):
         if arg.buffer is None:
             raise TypeError(
@@ -189,10 +198,15 @@ def make_tensor_arg(worker: Any, arg: Any) -> Any:
             dtype = task_interface.torch_dtype_to_datatype(arg.dtype)
         except KeyError as e:
             raise ValueError(f"Unsupported DeviceTensor dtype: {arg.dtype}") from e
+        strided = arg.strides != device_tensor._validate_strides(arg.shape, None)
         wire = (
-            arg.buffer.tensor(shapes=arg.shape, dtype=dtype, byte_offset=arg.byte_offset)
-            if arg.byte_offset
-            else arg.buffer.tensor(shapes=arg.shape, dtype=dtype)
+            arg.buffer.tensor(shapes=arg.shape, dtype=dtype, byte_offset=arg.byte_offset, strides=arg.strides)
+            if strided
+            else (
+                arg.buffer.tensor(shapes=arg.shape, dtype=dtype, byte_offset=arg.byte_offset)
+                if arg.byte_offset
+                else arg.buffer.tensor(shapes=arg.shape, dtype=dtype)
+            )
         )
         object.__setattr__(arg, _WIRE_TENSOR_ATTR, wire)
         return wire

@@ -865,8 +865,12 @@ def test_chip_tensor_transfer_slots_ignore_scalar_parameters():
             self.chip(data, n, gate)
 
     code = codegen.DistributedCodegen().generate(passes.convert_to_ssa()(Program))
-    assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INPUT, callables, "chip", 0\)', code)
-    assert re.search(r'add_chip_tensor_arg\([^\n]+TensorArgType.INOUT, callables, "chip", 1\)', code)
+    assert re.search(
+        r'add_chip_tensor_arg\([^\n]+TensorArgType.INPUT, callables, "chip", 0, rank=None\)', code
+    )
+    assert re.search(
+        r'add_chip_tensor_arg\([^\n]+TensorArgType.INOUT, callables, "chip", 1, rank=None\)', code
+    )
     assert code.count(".add_scalar(") == 1
     compile(code, "host_orch.py", "exec")
 

@@ -17,6 +17,18 @@ from .buffer import Buffer
 from .buffer_export import BufferExport
 from .task_interface import Tensor
 
+class RemoteChipSpec:
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        platform: str,
+        runtime: str = ...,
+        device_id: int = ...,
+        comm_profile: str = ...,
+        global_device_ranks: tuple[int, ...] = ...,
+    ) -> None: ...
+
 class CallableHandle:
     """Opaque public token returned by ``Worker.register``."""
 
@@ -41,6 +53,7 @@ class Worker:
         _startup_deadline: float | None = ...,
     ) -> None: ...
     def register(self, target: object, *, workers: list[int] | None = ...) -> CallableHandle: ...
+    def add_remote_chip(self, spec: RemoteChipSpec) -> int: ...
     def unregister(self, handle_or_slot: object) -> None: ...
     def run(self, callable: object, args: object = ..., config: object = ...) -> None: ...
     def submit(self, callable: object, args: object = ..., config: object = ...) -> RunHandle: ...
@@ -86,4 +99,4 @@ class Worker:
     def aicpu_dlopen_count(self) -> int: ...
     def host_dlopen_count(self) -> int: ...
 
-__all__ = ["CallableHandle", "RunHandle", "Worker"]
+__all__ = ["CallableHandle", "RunHandle", "RemoteChipSpec", "Worker"]

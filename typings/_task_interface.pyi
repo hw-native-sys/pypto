@@ -62,6 +62,7 @@ def get_dtype_name(dtype: DataType) -> str:
     """Return the string name of a DataType."""
 
 MAX_TENSOR_DIMS: int = 5
+COMM_CONTEXT_ABI: tuple[int, int, int, int]
 
 MAX_REGISTERED_CALLABLE_IDS: int = 64
 
@@ -270,6 +271,7 @@ class TaskHandle:
     pass
 
 class TaskArgs:
+    def add_domain_context(self, domain: object, rank: int) -> None: ...
     def __init__(self) -> None: ...
     def add_tensor(
         self, t: Tensor, tag: TensorArgType = TensorArgType.INPUT, *, transfer: TensorTransfer | None = ...

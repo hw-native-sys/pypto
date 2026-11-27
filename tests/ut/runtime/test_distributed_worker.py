@@ -27,6 +27,7 @@ import warnings
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -38,7 +39,14 @@ from pypto.ir import DistributedConfig
 from pypto.ir.compiled_program import _ParamInfo
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import DeviceTensor, StackedDeviceTensor
+from pypto.runtime import (
+    DeviceTensor,
+    DistributedDeployment,
+    DomainBufferLayout,
+    DomainLayout,
+    RemoteChipTarget,
+    StackedDeviceTensor,
+)
 from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_BEGIN,
     _L3_SWIMLANE_GRAPH_END,
@@ -50,6 +58,7 @@ from pypto.runtime.distributed_runner import (
     DistributedWorker,
     ReadOnlyHostTensor,
     _assemble_chip_callables,
+    _chip_group,
     _clear_dfx_dispatch_dirs,
     _collect_l3_swimlane,
     _construct_worker,
@@ -57,8 +66,10 @@ from pypto.runtime.distributed_runner import (
     _register_callables,
     _reset_dfx_dispatch_state,
     _submit_chip,
+    _submit_chip_group,
     _submit_dispatch,
     add_chip_tensor_arg,
+    comm_context_arg,
     validate_host_domain_runtime,
 )
 from pypto.runtime.runner import RunConfig
@@ -154,7 +165,9 @@ def _alloc_by_worker(worker_mock, buffers):
 
 
 def test_exportable_allocation_and_retirement_preserve_distributed_owner(kernel_env, patched_setup):
-    runtime = DistributedWorker(_fake_compiled([], []))
+    compiled = _fake_compiled([], [])
+    compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
+    runtime = DistributedWorker(compiled)
     backend = patched_setup["worker"]
     tensor = runtime.alloc_tensor((64,), torch.float32, worker_id=1, exportable=True)
     assert backend.alloc_child_tensor.call_args.kwargs == {"exportable": True}
@@ -1204,7 +1217,9 @@ class TestDeviceMemoryApi:
         rt.close()
 
     def test_copy_to_with_offset_supports_non_default_worker_id(self, patched_setup):
-        rt = DistributedWorker(_fake_compiled([_param("a", [16, 16])], []))
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
+        rt = DistributedWorker(compiled)
         ptr = rt.malloc(64, worker_id=1)
         host = (ctypes.c_ubyte * 16)()
         rt.copy_to(ptr, ctypes.addressof(host), 8, dst_offset=8, worker_id=1)
@@ -1342,6 +1357,7 @@ class TestDeviceMemoryApi:
         # A non-default worker_id is supported through alloc_child_tensor and
         # tracked under (worker_id, ptr) for per-worker auto-free.
         compiled = _fake_compiled([_param("a", [16, 16])], [])
+        compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
         rt = DistributedWorker(compiled)
         dev = rt.alloc_tensor((16, 16), torch.float32, worker_id=1)
         alloc_args = patched_setup["worker"].alloc_child_tensor.call_args.args
@@ -2676,7 +2692,7 @@ class TestDfxCounterWiring:
 
         class _FakeWorker:
             def submit(self, request):  # noqa: ANN001
-                request(object(), None, None)
+                request(SimpleNamespace(), None, None)
                 return "handle"
 
         monkeypatch.setattr(dr, "_reset_dfx_dispatch_state", _fake_reset)
@@ -4854,7 +4870,9 @@ class TestDeviceMemoryInfo:
         """The id names a logical chip worker, so it must not be remapped on the way down."""
         m = patched_setup
         m["worker"].device_memory_info.return_value = SimpleNamespace(free_bytes=1024, total_bytes=4096)
-        rt = self._worker(patched_setup)
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        compiled._distributed_config = DistributedConfig(device_ids=[0, 1, 2, 3])
+        rt = DistributedWorker(compiled)
 
         rt.device_memory_info(3)
 
@@ -5145,6 +5163,212 @@ def test_terminal_failure_retires_frame_before_concurrent_release(patched_setup,
                 release.result(timeout=2)
     domain._native.release.assert_called_once()
     patched_setup["worker"].release_buffer.assert_called_once()
+
+
+def test_remote_deployment_uses_returned_worker_ids(monkeypatch):
+    # SubWorkers and remote registration need not form a contiguous rank range.
+    backend = SimpleNamespace(add_remote_chip=MagicMock(side_effect=[7, 11]))
+    worker_cls = MagicMock(return_value=backend)
+    monkeypatch.setitem(
+        sys.modules, "simpler.worker", SimpleNamespace(Worker=worker_cls, RemoteChipSpec=SimpleNamespace)
+    )
+    deployment = DistributedDeployment(
+        (4, 5),
+        (
+            RemoteChipTarget("192.0.2.10:9000", 4),
+            RemoteChipTarget("192.0.2.10:9000", 5),
+        ),
+    )
+    worker = _construct_worker(DistributedConfig(), "a2a3", "rt", 1, deployment=deployment)
+    assert worker._pypto_rank_to_worker == (0, 1, 7, 11)
+    assert worker_cls.call_args.kwargs["global_device_ranks"] == (0, 1)
+    assert backend.add_remote_chip.call_args_list[1].args[0].global_device_ranks == (3,)
+    orch = SimpleNamespace(_worker=worker)
+    domain = SimpleNamespace(name="subset", workers=(11, 0))
+    assert comm_context_arg(orch, domain, 3) == (domain, 0)
+    with pytest.raises(ValueError, match="not a member"):
+        comm_context_arg(orch, domain, 2)
+
+
+def test_remote_deployment_rejects_duplicate_card_across_daemon_ports():
+    with pytest.raises(ValueError, match="host/device"):
+        DistributedDeployment(
+            (),
+            (
+                RemoteChipTarget("192.0.2.10:9000", 4),
+                RemoteChipTarget("192.0.2.10:9001", 4),
+            ),
+        )
+
+
+def test_request_finishes_handles_before_releasing_domain():
+    # A native domain lease must outlive Python result publication, including
+    # failure. This test needs neither a device nor a real Simpler runtime.
+    events = []
+
+    @contextmanager
+    def lease():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("release")
+
+    domain = SimpleNamespace(name="retained", released=False, request=lease)
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._closed = False
+    worker._owned_domains = {domain.name: domain}
+    worker._request_local = threading.local()
+
+    def fail_result():
+        events.append("result")
+        raise RuntimeError("dispatch failed")
+
+    with pytest.raises(RuntimeError, match="dispatch failed"):
+        with worker.request(domain):
+            worker._request_local.frames[-1].append(SimpleNamespace(result=fail_result))
+    assert events == ["enter", "result", "release"]
+    assert worker._request_local.frames == []
+
+
+def test_domain_copy_chunks_without_changing_member_or_buffer_offset(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "simpler.global_comm_domain", SimpleNamespace(GLOBAL_DOMAIN_MAX_COPY_BYTES=8)
+    )
+    host = torch.arange(5, dtype=torch.int32)
+    domain = SimpleNamespace(
+        member=lambda rank: SimpleNamespace(buffers={"weights": SimpleNamespace(nbytes=64)})
+    )
+    orch = SimpleNamespace(copy_to_domain=MagicMock())
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._w = SimpleNamespace(run=lambda fn: fn(orch, None, None))
+    worker._copy_domain_buffer(domain, 2, "weights", host, 16, upload=True)
+    calls = orch.copy_to_domain.call_args_list
+    assert [call.args[:2] for call in calls] == [(domain, 2)] * 3
+    assert [call.kwargs["offset"] for call in calls] == [16, 24, 32]
+    assert b"".join(call.args[2] for call in calls) == ctypes.string_at(host.data_ptr(), 20)
+
+
+def test_parallel_chip_group_maps_ranks_and_publishes_once():
+    backend = SimpleNamespace(_pypto_rank_to_worker=(0, 1, 7, 11), _pypto_remote_targets=())
+    orch = SimpleNamespace(_worker=backend, submit_next_level_group=MagicMock(return_value="group"))
+    config = SimpleNamespace(output_prefix="")
+    callable_id = object()
+    args = [object(), object()]
+    with _chip_group(orch):
+        for rank, arg in zip((3, 0), args, strict=True):
+            _submit_chip(orch, callable_id, arg, config, rank)
+        orch.submit_next_level_group.assert_not_called()
+    orch.submit_next_level_group.assert_called_once_with(callable_id, args, config, workers=[11, 0])
+    assert not hasattr(orch, "_pypto_chip_group")
+
+
+@pytest.mark.parametrize("failure", ["construction", "duplicate"])
+def test_parallel_chip_group_rejects_partial_or_duplicate_publication(failure):
+    orch = SimpleNamespace(submit_next_level_group=MagicMock())
+    config = SimpleNamespace(output_prefix="")
+    callable_id = object()
+    with pytest.raises((ValueError, RuntimeError), match="construction|distinct"):
+        with _chip_group(orch):
+            _submit_chip(orch, callable_id, object(), config, 0)
+            if failure == "construction":
+                raise RuntimeError("argument construction failed")
+            _submit_chip(orch, callable_id, object(), config, 0)
+    orch.submit_next_level_group.assert_not_called()
+    assert not hasattr(orch, "_pypto_chip_group")
+
+
+def test_chip_group_validates_remote_arguments_before_publishing(monkeypatch):
+    host = object()
+    monkeypatch.setitem(
+        sys.modules, "simpler.buffer", SimpleNamespace(AddressSpace=SimpleNamespace(HOST=host))
+    )
+    args = SimpleNamespace(
+        tensor_count=lambda: 1,
+        tensor=lambda index: SimpleNamespace(buffer=SimpleNamespace(address_space=host)),
+    )
+    orch = SimpleNamespace(
+        _worker=SimpleNamespace(_pypto_rank_to_worker=(0, 9), _pypto_remote_targets={9}),
+        submit_next_level_group=MagicMock(),
+    )
+    with pytest.raises(ValueError, match="Device-domain"):
+        _submit_chip_group(orch, object(), [object(), args], SimpleNamespace(output_prefix=""), [0, 1])
+    orch.submit_next_level_group.assert_not_called()
+
+
+def test_explicit_sharing_validates_all_layouts_before_binding():
+    first, second = MagicMock(), MagicMock()
+    layout = DomainLayout("comm", (1, 0), 64, (DomainBufferLayout("payload", 4, 64, 0),))
+    first.domain_layouts.return_value = (layout,)
+    second.domain_layouts.return_value = (DomainLayout("comm", (0, 1), 64, layout.buffers),)
+    domain = SimpleNamespace(
+        name="shared",
+        released=False,
+        workers=(7, 0),
+        requested_window_size=128,
+        buffers=(
+            SimpleNamespace(name="payload", nbytes=64),
+            SimpleNamespace(name="__pypto_order", nbytes=64),
+        ),
+    )
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._closed = False
+    worker._states = {first: {}, second: {}}
+    worker._world_size = 2
+    worker._rank_to_worker = (0, 7)
+    worker._owned_domains = {domain.name: domain}
+    worker._bound_domains = {}
+    worker._dispatch_submit_mu = threading.Lock()
+    with pytest.raises(ValueError, match="incompatible"):
+        worker.share_domain(domain, ((first, "comm"), (second, "comm")))
+    assert worker._bound_domains == {}
+    second.domain_layouts.return_value = (layout,)
+    worker.share_domain(domain, ((first, "comm"), (second, "comm")))
+    assert worker._bound_domains == {(first, "comm"): domain, (second, "comm"): domain}
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_cpu_staging_lifetime_and_failure_retention(monkeypatch, failure):
+    events = []
+    domain = object()
+    program = MagicMock()
+    invocation = SimpleNamespace(
+        domain=domain,
+        args=(object(),),
+        upload=lambda: events.append("upload"),
+        publish=lambda: events.append("publish"),
+        release=lambda: events.append("free"),
+    )
+    monkeypatch.setattr("pypto.runtime.distributed_runner._StagedInvocation", lambda worker, args: invocation)
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._closed = False
+    worker._has_remote_chips = True
+    worker._states = {program: {"param_infos": (object(),)}}
+
+    @contextmanager
+    def request(handle):
+        assert handle is domain
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    def result():
+        events.append("complete")
+        if failure:
+            raise RuntimeError("device execution failed")
+
+    worker.request = request
+    worker.submit = lambda *args, **kwargs: SimpleNamespace(result=result)
+    if failure:
+        with pytest.raises(RuntimeError, match="device execution"):
+            worker.run(program, torch.ones(4))
+        assert worker._unconfirmed_staging == [invocation]
+        assert events == ["enter", "upload", "complete", "exit"]
+    else:
+        worker.run(program, torch.ones(4))
+        assert events == ["enter", "upload", "complete", "publish", "exit", "free"]
 
 
 if __name__ == "__main__":
