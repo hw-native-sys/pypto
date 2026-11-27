@@ -909,9 +909,10 @@ def test_publish_available_reviews(
     workflow, codex, completed, gemini, cancelled, publish_codex, publish_gemini
 ):
     publish = workflow["jobs"]["publish"]
+    prepare_outputs = {"ready": "true"}
     context = {
         "needs": {
-            "prepare": {"result": "success", "outputs": {"ready": "true"}},
+            "prepare": {"result": "success", "outputs": prepare_outputs},
             "review": {"result": codex, "outputs": {"completed": completed}},
             "gemini": {"result": gemini},
         },
@@ -941,7 +942,7 @@ def test_publish_available_reviews(
     assert workflow_expression(withdraw["if"], context, cancelled=cancelled, success=False) == (
         not publish_codex
     )
-    context["needs"]["prepare"]["outputs"]["ready"] = ""
+    prepare_outputs["ready"] = ""
     assert not workflow_expression(publish["if"], context)
 
 
