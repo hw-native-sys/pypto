@@ -393,6 +393,9 @@ runner 校验授权提交的完整 Git 对象，检出时禁用钩子，将仓�
 
 部署验收使用独立测试卷和全新容器。同一 PR 恢复首轮会话并复述上轮随机值，换一个 PR 验证隔离；
 另验证模型能结合源文件和讨论给出带行号的问题，以及登录维护在无 PR 数据时可独立执行。
+在测试审查运行期间，使用同一组运行标识执行一次 `cleanup_ai_review_resources.py --current-gemini`。
+确认本次容器和专用网络已删除、会话卷仍在、共享代理仍然健康。遇到并发删除或网络端点正在脱离时，
+清理脚本会按原 Docker ID 重试，重试窗口为 20 秒。
 如 Google 要求重新交互授权，在 SSH 终端执行 `~/.local/share/pypto-gemini-review/run login`。
 
 `.github/scripts/` 中的独立 CI 辅助脚本支持 Python 3.8 及更新版本。

@@ -15,10 +15,12 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 from publish_ai_review import is_review_workflow
 
 LABEL = "org.pypto.codex-review."
+REMOVAL_RETRY_SECONDS = 20
 RESOURCE_FORMAT = (
     '[{{json .ID}},{{json (.Label "org.pypto.codex-review.run")}},'
     '{{json (.Label "org.pypto.codex-review.attempt")}}]'
@@ -53,15 +55,23 @@ def resources(kind: str, repository_id: str, label: str = LABEL) -> dict[str, tu
 
 
 def remove(kind: str, identity: str) -> None:
-    """A concurrent always-step may already have deleted the discovered immutable ID."""
-    try:
-        options = ("--force",) if kind == "container" else ()
-        command("docker", kind, "rm", *options, identity)
-    except subprocess.CalledProcessError:
-        options = ("--all",) if kind == "container" else ()
-        # Recheck existence instead of interpreting Docker's version-dependent errors.
-        if identity in command("docker", kind, "ls", "--quiet", "--no-trunc", *options).split():
-            raise
+    """Wait for the launcher's concurrent removal or a pending network detach."""
+    remove_options = ("--force",) if kind == "container" else ()
+    list_options = ("--all",) if kind == "container" else ()
+    deadline = time.monotonic() + REMOVAL_RETRY_SECONDS
+    while True:
+        try:
+            command("docker", kind, "rm", *remove_options, identity)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # Docker can report a conflict while the same immutable ID is still listed.
+            remaining_ids = command("docker", kind, "ls", "--quiet", "--no-trunc", *list_options)
+            if identity not in remaining_ids.split():
+                return
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise
+            time.sleep(min(1, remaining_time))
 
 
 def completed(repo: str, repository_id: str, run: str, attempt: str) -> bool:

@@ -503,8 +503,12 @@ The original `run review` remains available for standalone diff reviews. The nat
 
 For acceptance, use separate test volumes and fresh containers. Resume the first conversation
 and recall a random value from its previous turn. Start a second PR and check isolation. Verify a
-finding against a source file and the discussion, and test maintenance with no PR data. If Google
-requires interactive authorization, run `~/.local/share/pypto-gemini-review/run login` over SSH.
+finding against a source file and the discussion, and test maintenance with no PR data.
+During a running test review, invoke `cleanup_ai_review_resources.py --current-gemini` once with the
+same run identifiers. Verify that its containers and private network disappear, its session volume
+remains and the shared relay stays healthy. The cleaner retries a still-present ID for up to
+20 seconds when Docker reports a concurrent removal or a network endpoint is still detaching.
+If Google requires interactive authorization, run `~/.local/share/pypto-gemini-review/run login` over SSH.
 
 The standalone CI helpers in `.github/scripts/` support Python 3.8 and newer.
 Their type annotations are deferred so importing them does not require Python

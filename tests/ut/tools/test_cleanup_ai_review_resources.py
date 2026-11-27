@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -88,17 +89,43 @@ def add_attempt(host, run="100", attempt="1", *, status="completed", repository=
     }
 
 
-def test_gemini_cancellation_removes_only_its_own_attempt(cleaner, host):
+def test_gemini_cancellation_finishes_during_launcher_cleanup(cleaner, host, monkeypatch):
     add_attempt(host)
     labels = {
         "org.pypto.gemini-review.repository": "42",
         "org.pypto.gemini-review.run": "100",
         "org.pypto.gemini-review.attempt": "1",
     }
-    host["container"]["gemini"] = labels
-    host["network"]["other-attempt"] = dict(labels, **{"org.pypto.gemini-review.attempt": "2"})
+    host["container"].update({"gemini": labels, "sidecar": labels})
+    host["network"].update(
+        {
+            "private": labels,
+            "shared": {},
+            "other-attempt": dict(labels, **{"org.pypto.gemini-review.attempt": "2"}),
+        }
+    )
+    docker = cleaner.command
+    attempts = {"sidecar": 0, "private": 0}
+
+    def racing_docker(*args):
+        identity = args[-1]
+        if args[2] == "rm" and identity in attempts:
+            attempts[identity] += 1
+            if identity == "sidecar":
+                if attempts[identity] == 2:
+                    del host["container"][identity]  # The launcher finished the concurrent removal.
+                raise subprocess.CalledProcessError(1, args, stderr="container removal in progress")
+            if attempts[identity] == 1:
+                raise subprocess.CalledProcessError(1, args, stderr="network has active endpoints")
+        return docker(*args)
+
+    monkeypatch.setattr(cleaner, "command", racing_docker)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
     cleaner.reconcile("owner/repo", "42", provider="gemini", current_attempt=("100", "1"))
-    assert host["removed"] == [("container", "gemini")]
+    assert attempts == {"sidecar": 2, "private": 2}
+    assert host["removed"] == [("container", "gemini"), ("network", "private")]
+    assert set(host["container"]) == {"container-100-1"}
+    assert set(host["network"]) == {"network-100-1", "shared", "other-attempt"}
     assert all(call[0] != "gh" for call in host["calls"])
 
 
@@ -204,6 +231,7 @@ def test_failed_removal_rechecks_existence(cleaner, monkeypatch, kind, still_exi
         return "abc123" if still_exists else ""
 
     monkeypatch.setattr(cleaner, "command", command)
+    monkeypatch.setattr(cleaner, "REMOVAL_RETRY_SECONDS", 0)
     if still_exists:
         with pytest.raises(subprocess.CalledProcessError):
             cleaner.remove(kind, "abc123")
