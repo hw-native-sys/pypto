@@ -216,6 +216,121 @@ def test_hbg_graph_validates_hoisted_view_at_each_call(tmp_path, native_api, mon
     assert source.index(".view(") < check < source.index("rt_submit_graph(", check)
 
 
+@pytest.mark.parametrize("core", ["aiv", "mixed"])
+def test_hbg_graph_supports_producer_consumer_chain_with_hoisted_create(
+    tmp_path, native_api, monkeypatch, core
+):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+    native = _Native(_Binding(core))
+
+    @pl.jit.incore
+    def add_one(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+        return pl.store(pl.tile.adds(pl.load(x, [0, 0], [16, 16]), 1.0), [0, 0], out)
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        tmp = pl.create_tensor([16, 16], dtype=pl.FP32)
+        tmp = add_one(x, tmp)
+        native(tmp, out)
+        out = add_one(out, out)
+        return out
+
+    @pl.jit
+    def entry(x: pl.Tensor[[16, 16], pl.FP32], out: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]):
+        return stage(x, out)
+
+    config = RunConfig(
+        backend_type=backend.BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(config=config)
+    (path,) = Path(compiled.output_dir).rglob("orchestration/*.cpp")
+    source = path.read_text()
+    check = source.index(".check_bindings(")
+    assert check < source.index("rt_submit_graph(", check)
+    assert source.count("test_native_preflight(bindings);") == 1
+    pto_backend._validate_external_bridge_runtime(compiled.program, passes.RuntimeKind.HOST_BUILD_GRAPH)
+    with pytest.raises(ValueError, match="requires percounter"):
+        pto_backend._validate_external_bridge_runtime(
+            compiled.program, passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER
+        )
+
+
+@pytest.mark.parametrize(
+    "case,match",
+    [
+        ("loop", "Move the conditional or loop around the native call"),
+        ("core_num", "CANNBotDSL Graph calls require one static block"),
+        ("sync_start", "CANNBotDSL Graph calls require one static block"),
+        ("reshape", "Cannot validate native tensor"),
+    ],
+)
+def test_hbg_graph_rejects_uncheckable_native_patterns(tmp_path, native_api, monkeypatch, case, match):
+    backend.reset_for_testing()
+    monkeypatch.setattr("pypto.jit.decorator._ptoas_available", lambda: False)
+    native = _Native(_Binding("aiv"))
+
+    if case == "loop":
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            for _ in pl.range(2):
+                native(x, out)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+            return stage(x, out)
+
+    elif case == "core_num":
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            pl.spmd_submit(native, x, out, core_num=2)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+            return stage(x, out)
+
+    elif case == "sync_start":
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            pl.spmd_submit(native, x, out, core_num=1, sync_start=True)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+            return stage(x, out)
+
+    else:
+
+        @pl.jit.graph
+        def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+            flat = pl.reshape(x, [256])
+            native(flat, out)
+            return out
+
+        @pl.jit
+        def entry(x: pl.Tensor[[16, 16], pl.FP32], out: pl.InOut[pl.Tensor[[256], pl.FP32]]):
+            return stage(x, out)
+
+    config = RunConfig(
+        backend_type=backend.BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+    )
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        with pytest.raises(RuntimeError, match=match):
+            entry.compile(config=config)
+
+
 @pytest.mark.parametrize("core", ["aic", "aiv", "mixed"])
 @pytest.mark.parametrize("core_num,sync_start", [(2, False), (1, True)])
 def test_binding_preflight_observes_explicit_launch(monkeypatch, native_api, core, core_num, sync_start):

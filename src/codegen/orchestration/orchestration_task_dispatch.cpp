@@ -977,10 +977,9 @@ void OrchestrationStmtCodegen::AppendExternalPreflight(TaskDispatchPlan& plan,
       }
     }
     check << "            " << symbol << "(bindings);\n        }\n";
-    const auto source = check.str();
-    if (std::find(graph_binding_checks_.begin(), graph_binding_checks_.end(), source) ==
-        graph_binding_checks_.end()) {
-      graph_binding_checks_.push_back(source);
+    auto source = check.str();
+    if (graph_binding_check_seen_.insert(source).second) {
+      graph_binding_checks_.push_back(std::move(source));
     }
     return;
   }

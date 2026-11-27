@@ -492,6 +492,115 @@ int main() {
     )
 
 
+def test_graph_forwards_float_and_literal_scalars_and_rejects_uncheckable_bindings(tmp_path):
+    checker = """inline void verify_scalars(const CoreTaskArgs& args) {
+    uint64_t bits[3]; args.pack_scalars(bits);
+    if (args.scalar_count() != 3 || bits[0] != 0x3FC00000ULL || bits[1] != 7ULL || bits[2] != 1ULL) throw 1;
+}"""
+    attrs = dict(
+        external_runtime="percounter",
+        external_preflight_source=checker,
+        external_preflight_symbol="verify_scalars",
+    )
+    native = tmp_path / "native.cpp"
+    native.touch()
+    program = pl.parse(f"""import pypto.language as pl
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(native)!r})
+    def native(self, x: pl.Tensor[[32], pl.FP32], alpha: pl.Scalar[pl.FP32],
+               n: pl.Scalar[pl.INT32], flag: pl.Scalar[pl.BOOL],
+               out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+        pl.func_attr({attrs!r})
+        ...
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def stage(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]],
+              alpha: pl.Scalar[pl.FP32], n: pl.Scalar[pl.INT32]):
+        self.native(x, alpha, n, True, out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def entry(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]],
+              alpha: pl.Scalar[pl.FP32], n: pl.Scalar[pl.INT32]):
+        self.stage(x, out, alpha, n)
+""")
+    orch = _generate_orch_code(program)
+    source = tmp_path / "entry_scalars.cpp"
+    source.write_text(orch)
+    _assert_orchestration_compiles(source, runtime_name="percounter", arch="a5")
+    config = orch[orch.index("struct pypto_graph_stageConfig") : orch.index("static void pypto_graph_stage(")]
+    _compile_run(
+        tmp_path / "scalar_bindings.cpp",
+        '#include "types.h"\n#include "graph_config.h"\n'
+        + checker
+        + "\n"
+        + config
+        + """
+[[noreturn]] void assert_impl(const char* why, const char*, int) { throw why; }
+int main() {
+    simpler::hbg::Tensor x{}, out{};
+    GraphTaskArgs args;
+    args.add_input(x);
+    args.add_inout(out);
+    args.add_scalar(to_u64(1.5f));
+    args.add_scalar(int32_t{7});
+    if (args.has_error()) return 2;
+    pypto_graph_stageConfig::check_bindings(args);
+}
+""",
+        runtime_name="percounter",
+    )
+
+    tmr_attrs = dict(
+        external_preflight_source=checker,
+        external_preflight_symbol="verify_scalars",
+    )
+    tmr_program = pl.parse(f"""import pypto.language as pl
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(native)!r})
+    def native(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+        pl.func_attr({tmr_attrs!r})
+        ...
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def stage(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+        self.native(x, out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def entry(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+        self.stage(x, out)
+""")
+    with pytest.raises(ValueError, match="Recorded Graph replay requires a percounter external binding"):
+        _generate_orch_code(tmr_program)
+
+    local_scalar_program = pl.parse(f"""import pypto.language as pl
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.AIV, external_source={str(native)!r})
+    def native(self, x: pl.Tensor[[32], pl.FP32], n: pl.Scalar[pl.INT64],
+               out: pl.InOut[pl.Tensor[[32], pl.FP32]]):
+        pl.func_attr({attrs!r})
+        ...
+
+    @pl.function(type=pl.FunctionType.Graph)
+    def stage(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]],
+              scale: pl.Scalar[pl.INT64]):
+        derived: pl.Scalar[pl.INT64] = scale + 1
+        self.native(x, derived, out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def entry(self, x: pl.Tensor[[32], pl.FP32], out: pl.InOut[pl.Tensor[[32], pl.FP32]],
+              scale: pl.Scalar[pl.INT64]):
+        self.stage(x, out, scale)
+""")
+    with pytest.raises(
+        ValueError,
+        match="Pass the native scalar as a Graph boundary argument or a literal for replay validation",
+    ):
+        _generate_orch_code(local_scalar_program)
+
+
 @pytest.mark.parametrize(
     "core,lanes", [((Core.AIC,), 0), ((Core.AIV,), 1), ((Core.AIC, Core.AIV), 1), ((Core.AIC, Core.AIV), 2)]
 )

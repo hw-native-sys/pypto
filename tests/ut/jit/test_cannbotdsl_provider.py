@@ -1977,6 +1977,25 @@ def test_percounter_compiles_device_entry_with_pinned_runtime_headers(compiler, 
         build_submitter((task,), (tuple(range(len(images))),))
 
 
+def test_percounter_bridge_provenance_and_tmr_bridge_rejection(compiler):
+    from pypto.backend.cannbotdsl_runtime import lower  # noqa: PLC0415
+    from pypto.backend.tmr_bridge import materialize  # noqa: PLC0415
+
+    _aiv_runtime_manifest(compiler)
+    prepared = _prepare_call(compiler)
+    percounter_target = replace(_aiv_target(prepared), runtime="percounter")
+    with pytest.raises(ContractError, match="TMR"):
+        TMRBridge().lower(prepared, percounter_target)
+    task = lower(prepared, percounter_target)
+    assert task.bridge_version == "percounter-cannbotdsl-1"
+    with materialize(task) as source:
+        assert Path(source.source).is_file()
+    assert not Path(source.source).exists()
+    with pytest.raises(ContractError, match="unmodified bridge output"):
+        with materialize(replace(task, binary_policy="ordinary")):
+            pass
+
+
 def test_aiv_bridge_owns_checked_source_and_requires_strict_compilation(compiler):
     from pypto.backend.tmr_bridge import materialize  # noqa: PLC0415
 

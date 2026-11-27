@@ -563,6 +563,60 @@ def test_cannbotdsl_graph_rebinds_native_operands(tmp_path, test_config):
     torch.testing.assert_close(second, (x + y) * y, rtol=0, atol=0)
 
 
+@pytest.mark.platforms("a5", reason="CANNBotDSL Graph chain requires the A5 percounter runtime")
+def test_cannbotdsl_graph_producer_consumer_chain_rebinds(tmp_path, test_config):
+    from dataclasses import replace  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+    native_cube, _, _ = _compute_kernels(cb)
+
+    @pl.jit.graph
+    def stage(a: pl.Tensor, b: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        a1 = pl.create_tensor([16, 32], dtype=pl.FP16)
+        b1 = pl.create_tensor([32, 16], dtype=pl.FP16)
+        a1 = _jit_prepare(a, a1)
+        b1 = _jit_prepare(b, b1)
+        product = pl.create_tensor([16, 16], dtype=pl.FP32)
+        native_cube(a1, b1, product)
+        out = _jit_consume(product, product, out)
+        return out
+
+    @pl.jit
+    def entry(
+        a0: pl.Tensor,
+        b0: pl.Tensor,
+        out0: pl.InOut[pl.Tensor],
+        a1: pl.Tensor,
+        b1: pl.Tensor,
+        out1: pl.InOut[pl.Tensor],
+    ):
+        out0 = stage(a0, b0, out0)
+        out1 = stage(a1, b1, out1)
+        return out0, out1
+
+    a0 = ((torch.arange(512).reshape(16, 32) % 7 - 3) / 4).half()
+    b0 = ((torch.arange(512).reshape(32, 16) % 5 - 2) / 4).half()
+    a1 = ((torch.arange(512).reshape(16, 32) % 7 - 2) / 4).half()
+    b1 = ((torch.arange(512).reshape(32, 16) % 5 - 1) / 4).half()
+    out0 = torch.full((16, 16), float("nan"), dtype=torch.float32)
+    out1 = torch.full((16, 16), float("nan"), dtype=torch.float32)
+    config = replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path))
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(a0, b0, out0, a1, b1, out1, config=config)
+    compiled.load()
+    if config.codegen_only:
+        return
+    compiled(a0, b0, out0, a1, b1, out1, config=config)
+    p0 = (a0.float() + 1) @ (b0.float() + 1)
+    p1 = (a1.float() + 1) @ (b1.float() + 1)
+    torch.testing.assert_close(out0, (p0 + p0) * p0, rtol=0, atol=0)
+    torch.testing.assert_close(out1, (p1 + p1) * p1, rtol=0, atol=0)
+
+
 @pytest.mark.platforms("a5", reason="CANNBotDSL BF16 view replay requires the A5 percounter runtime")
 def test_cannbotdsl_graph_checks_derived_bf16_view(tmp_path, test_config):
     from dataclasses import replace  # noqa: PLC0415
@@ -605,6 +659,54 @@ def test_cannbotdsl_graph_checks_derived_bf16_view(tmp_path, test_config):
     compiled(x, out, 32, config=config)
     torch.testing.assert_close(out, x[32:96], rtol=0, atol=0)
     # First invocation is aligned. The same graph's next view starts two bytes later.
+    with pytest.raises(RuntimeError, match="alignment"):
+        compiled(x, out, 1, config=config)
+    with pytest.raises(RuntimeError, match="storage bounds|view_offsets|buffer_elems"):
+        compiled(x, out, 65, config=config)
+
+
+@pytest.mark.platforms("a5", reason="CANNBotDSL BF16 cache-hit replay requires the A5 percounter runtime")
+def test_cannbotdsl_graph_cache_hit_replay_checks_standalone_bf16_view(tmp_path, test_config):
+    from dataclasses import replace  # noqa: PLC0415
+
+    import torch  # noqa: PLC0415
+
+    cb = pytest.importorskip("cannbotdsl")
+    if not hasattr(cb, "export_device"):
+        pytest.skip("installed CANNBotDSL lacks public device export")
+
+    @cb.kernel
+    def copy_tile(x, out):
+        tile = cb.Buffer(cb.MemLoc.UB, cb.dtypes.bfloat16, cb.make_layout((64,)))
+        cb.mem_copy(tile, x)
+        cb.vec_sync_all()
+        cb.mem_copy(out, tile)
+        cb.vec_sync_all()
+
+    @pl.jit.graph
+    def stage(x: pl.Tensor, out: pl.InOut[pl.Tensor]):
+        copy_tile(x, out)
+        return out
+
+    @pl.jit
+    def entry(x: pl.Tensor, out: pl.InOut[pl.Tensor], offset: pl.Scalar[pl.INDEX]):
+        # Keeping the parent tensor outside stage makes every invocation share
+        # the same boundary layout, exercising true Graph cache-hit replay.
+        view = pl.tensor.slice(x, [64], [offset])
+        return stage(view, out)
+
+    x = torch.arange(128, dtype=torch.float32).bfloat16()
+    out = torch.empty(64, dtype=torch.bfloat16)
+    config = replace(test_config, save_kernels=True, save_kernels_dir=str(tmp_path))
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(x, out, 0, config=config)
+    compiled.load()
+    if config.codegen_only:
+        return
+    compiled(x, out, 0, config=config)
+    torch.testing.assert_close(out, x[:64], rtol=0, atol=0)
+    compiled(x, out, 32, config=config)
+    torch.testing.assert_close(out, x[32:96], rtol=0, atol=0)
     with pytest.raises(RuntimeError, match="alignment"):
         compiled(x, out, 1, config=config)
 

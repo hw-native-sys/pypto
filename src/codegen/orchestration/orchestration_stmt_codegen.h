@@ -588,6 +588,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // slots before each Graph invocation, while addresses still belong to that invocation.
   std::optional<std::map<std::string, size_t>> graph_tensor_slots_;
   std::vector<std::string> graph_binding_checks_;
+  std::unordered_set<std::string> graph_binding_check_seen_;
   int graph_control_depth_{0};
   std::set<std::string> declared_var_names_;
   std::set<std::string> param_name_set_;

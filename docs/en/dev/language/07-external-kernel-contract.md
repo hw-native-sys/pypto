@@ -142,10 +142,10 @@ its identity is explicitly incomplete because no complete Python closure/input
 snapshot exists. This provider is therefore not registered with the capture-only
 registry and does not claim preparation-cache reuse.
 
-The A5 TMR bridge supports direct execution and automatic ordinary JIT discovery of
-single-block AIC/AIV/MIX kernels. Complete input capture, persistent reuse, and
-performance acceptance remain separate work.
-Preparation and native binary compilation do not use caches.
+The A5 bridge supports direct TMR execution and automatic ordinary JIT discovery
+on TMR or A5 default HBG (`percounter`) for single-block AIC/AIV/MIX kernels.
+Complete input capture, persistent reuse, and performance acceptance remain
+separate work. Preparation and native binary compilation do not use caches.
 
 ### Ordinary JIT discovery
 
@@ -223,8 +223,10 @@ changed inputs and NaN outputs; the MIX consumer uses both native results.
 
 ### A5 AIC/AIV/MIX runtime path
 
-`TMRBridge.lower(prepared, target)` accepts `cannbotdsl.device_callable` v1 for
-TMR v1 on `a5/ccec`. It supports one AIC, one AIV, or one hardware-paired
+`pypto.backend.cannbotdsl_runtime.lower(prepared, target)` accepts
+`cannbotdsl.device_callable` v1 for TMR or `percounter` v1 on `a5/ccec`
+(`TMRBridge.lower` delegates the TMR target and rejects `percounter`). It
+supports one AIC, one AIV, or one hardware-paired
 AIC + two AIV group (MIX). It requires no implicit workspace and the exporter's exact resource, state,
 loading and completion declarations. Static, disjoint allocations in AIV UB and
 AIC L1/L0A/L0B/L0C are supported. The bridge validates integer sizes and offsets,

@@ -9,11 +9,13 @@
 
 """Single-block A5 AIC/AIV/MIX execution of CANNBotDSL exports on TMR and percounter.
 
-TMR executes callbacks serially on each physical core, including queued tasks.
-Local memory and sync resources belong to that callback until it returns. This
-bridge drains before entry and before return, restores the default device state,
-and submits one hardware group with completion-based dependencies. MIX completion
-is published by TMR only after AIC, AIV0 and AIV1 have all returned.
+Both executors call callbacks serially on each physical core, including queued
+tasks, without using callback-local UB/L1/L0 memory or sync events during the
+call. Percounter keeps executor state in SSBUF, which local-allocation checks
+exclude. This bridge drains before entry and before return, restores the default
+device state, and relies on completion-based dependencies: TMR publishes MIX
+completion after AIC, AIV0 and AIV1 return, while percounter counts each
+participant's post-barrier completion before releasing consumers.
 """
 
 import hashlib
@@ -203,8 +205,8 @@ def lower(prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
         '#include "c_api/asc_simd.h"',
         f'#include "{adapter.entry}"',
         'extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {',
-        # TMR's scalar executor does not use local memory or sync events while
-        # the callback runs. Drain inherited work before acquiring those resources.
+        # The runtime's scalar executor does not use UB/L1/L0 or sync events
+        # while the callback runs. Drain inherited work before acquiring them.
         "    pipe_barrier(PIPE_ALL);",
         "    asc_dcci_entire_out();",
         "    dsb(DSB_DDR);",
@@ -214,8 +216,8 @@ def lower(prepared: PreparedKernel, target: RuntimeTarget) -> ExternalTask:
         "    asc_set_ctrl(saved_ctrl & ~(1ULL << 46)); // Clear inherited HF32 on AIC.",
         "#endif",
         f"    {adapter.symbol}(args);",
-        # Return is the executor's permission to publish FIN and run the next
-        # callback. No async operations or writes may outlive this point.
+        # Return is the executor's permission to publish task completion and run
+        # the next callback. No async operations or writes may outlive this point.
         "    pipe_barrier(PIPE_ALL);",
         "    asc_dcci_entire_out();",
         "    dsb(DSB_DDR);",
