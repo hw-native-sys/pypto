@@ -115,6 +115,8 @@ __all__ = [
     "sort32",
     "mrgsort",
     "gather",
+    "gather_mask",
+    "gather_compare",
     "paged_gather",
     "create_l1",
     "gather_row",
@@ -126,7 +128,13 @@ __all__ = [
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
-from pypto.ir.utils import _normalize_expr, caller_warning_stacklevel, has_partial_valid_region
+from pypto.ir.utils import (
+    _get_span_or_capture,
+    _normalize_expr,
+    _normalize_scalar_operand,
+    caller_warning_stacklevel,
+    has_partial_valid_region,
+)
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import AtomicType, CachePolicy, Expr, MemorySpace, PadValue, TensorLayout
@@ -2409,8 +2417,10 @@ def gather(
 ) -> Tensor | tuple[Tensor, Tensor]:
     """Gather elements of ``input`` — flat / axis / mask / compare form.
 
-    The tensor layer exposes a single unified ``gather``. Based on the arguments
-    you pass, it selects the matching form and lowering:
+    Use ``gather`` for flat or axis indexing. For mask selection and threshold
+    comparisons, use ``pl.tensor.gather_mask`` and ``pl.tensor.gather_compare``.
+    The mask and compare forms of ``gather`` are deprecated and emit
+    ``DeprecationWarning`` when used.
 
     Flat form (``index``, no ``dim``)::
 
@@ -2476,9 +2486,9 @@ def gather(
         out = gather(input, index=flat_idx)
         out = gather(input, flat_idx)
         out = gather(input, dim=-1, index=idx)
-        out = gather(input, mask_pattern=1)
-        out = gather(input, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
-        dst, cdst = gather(input, kvalue=kv, cmp_mode="eq", out_cols=8)
+        out = pl.tensor.gather_mask(input, mask_pattern=1)
+        out = pl.tensor.gather_mask(input, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+        dst, cdst = pl.tensor.gather_compare(input, kv, cmp_mode="eq", out_cols=8)
     """
     kv_expr = None
     if kvalue is not None:
@@ -2496,12 +2506,67 @@ def gather(
         count_dtype=count_dtype,
     )
     if isinstance(call_expr.type, _ir_core.TupleType):
-        span = call_expr.span
-        return (
-            Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
-            Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+        warnings.warn(
+            "gather(..., kvalue=..., cmp_mode=..., out_cols=...) is deprecated; "
+            "use pl.tensor.gather_compare instead.",
+            DeprecationWarning,
+            stacklevel=caller_warning_stacklevel(),
+        )
+        return _gather_compare_results(call_expr)
+    if mask_pattern is not None:
+        warnings.warn(
+            "gather(..., mask_pattern=...) is deprecated; use pl.tensor.gather_mask instead.",
+            DeprecationWarning,
+            stacklevel=caller_warning_stacklevel(),
         )
     return Tensor(expr=call_expr)
+
+
+def gather_mask(
+    input: Tensor,
+    mask_pattern: int | _ir_core.ConstInt,
+    output_dtype: int | DataType | _ir_core.ConstInt | None = None,
+) -> Tensor:
+    """Select columns from each row by mask pattern, optionally reinterpreting their dtype."""
+    # Positional integer literals reach DSL wrappers as typed IR constants.
+    if isinstance(mask_pattern, _ir_core.ConstInt):
+        mask_pattern = mask_pattern.value
+    if isinstance(output_dtype, _ir_core.ConstInt):
+        output_dtype = output_dtype.value
+    return Tensor(expr=_ir_ops.gather_mask(input.unwrap(), mask_pattern, output_dtype))
+
+
+def gather_compare(
+    input: Tensor,
+    kvalue: int | Scalar | Expr,
+    *,
+    cmp_mode: str | int,
+    out_cols: int,
+    offset: int = 0,
+    count_dtype: int | DataType | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Return matching indices and per-row counts. An integer literal takes the input element dtype."""
+    src = input.unwrap()
+    if isinstance(kvalue, int):
+        threshold = _normalize_scalar_operand(src, kvalue, _get_span_or_capture())
+    else:
+        threshold = kvalue.unwrap() if isinstance(kvalue, Scalar) else _normalize_expr(kvalue)
+    call_expr = _ir_ops.gather_compare(
+        src,
+        threshold,
+        cmp_mode=cmp_mode,
+        out_cols=out_cols,
+        offset=offset,
+        count_dtype=count_dtype,
+    )
+    return _gather_compare_results(call_expr)
+
+
+def _gather_compare_results(call_expr: _ir_core.Call) -> tuple[Tensor, Tensor]:
+    return (
+        Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 0, call_expr.span)),
+        Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 1, call_expr.span)),
+    )
 
 
 def paged_gather(  # noqa: PLR0913

@@ -431,7 +431,7 @@ class GatherMaskOutputDtypeProgram:
         output: pl.Out[pl.Tensor[[8, 8], pl.UINT32]],
     ) -> pl.Tensor[[8, 8], pl.UINT32]:
         with pl.at(level=pl.Level.CORE_GROUP):
-            out = pl.tensor.gather(inp, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+            out = pl.tensor.gather_mask(inp, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
             output = pl.assemble(output, out, [0, 0])
         return output
 

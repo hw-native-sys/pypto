@@ -195,7 +195,7 @@ def test_tensor_gather_keeps_logical_count_shape_when_lowering_to_aligned_tiles(
             src: pl.Tensor[[rows, 64], pl.FP32],
             threshold: pl.Scalar[pl.FP32],
         ) -> tuple[pl.Tensor[[rows, 64], pl.INT32], pl.Tensor[[1, rows], pl.INT32]]:
-            indices, counts = pl.tensor.gather(src, kvalue=threshold, cmp_mode="gt", out_cols=64)
+            indices, counts = pl.tensor.gather_compare(src, threshold, cmp_mode="gt", out_cols=64)
             return indices, counts
 
     public_function = next(iter(Program.functions.values()))
