@@ -1,17 +1,24 @@
 # InsertMxScaleAddr Pass
 
-在每个 MX matmul 消费者之前插入编译器生成的 `tile.tget_scale_addr` 绑定；前提是操作数 memory space 已经全部确定。
+在操作数内存空间确定后，物化 A5 MX scale 地址绑定。
 
 ## 概述
 
-[`InferTileMemorySpace`](22-infer_tile_memory_space.md) 解析完 `Left` / `LeftScale` / `Right` / `RightScale` 并插入必要的 `tile.move` 之后，本 pass 物化 A5 的 scale 地址绑定：
+[`InferTileMemorySpace`](22-infer_tile_memory_space.md) 解析完 `Left` / `LeftScale` / `Right` / `RightScale` 并插入必要的 `tile.move` 之后，本 pass 在写入 scale 数据前为符合条件的 Mat→Scale extract 绑定目标地址。
 
 ```text
-bound_scale = tile.tget_scale_addr(scale, data)
-matmul_mx(..., bound_scale, ...)
+dst = tile.bind_scale_addr(data, shape, valid_shape, target_memory=LeftScale)
+scale = tile.extract_into(dst, scale_panel, row, col)
+matmul_mx(..., scale, ...)
 ```
 
-`tile.tget_scale_addr` 有意不暴露在公共 `pypto.language` API 中。用户只编写高层 `matmul_mx` 算子族；编译器根据 matmul 操作数位置推导左右侧。低层 `ir.op.tile.tget_scale_addr` 仍供编译器构造与 IR 解析使用，且只接受已解析的 `(LeftScale, Left)` 与 `(RightScale, Right)` 配对，data tile 支持 FP8E4M3FN、FP8E5M2 或打包 FP4。
+`tile.bind_scale_addr` 创建 scale tile 句柄，地址从对应的 Left/Right payload
+派生。实际搬运由 `tile.extract_into` 完成，其返回的 SSA 值与传入的
+目标句柄共享存储。两条 IR 分别发射为 `pto.tget_scale_addr` 和
+`pto.textract`。其他生产者仍使用 `tile.tget_scale_addr(scale, data)`。
+地址操作接受已解析的 `(LeftScale, Left)` 和 `(RightScale, Right)` 配对，
+支持 FP8E4M3FN、FP8E5M2 与打包 FP4 payload。新增操作可通过 IR builder 构造，
+用于 pass dump 与 IR 解析。
 
 **流水线位置**：紧接在 [`InferTileMemorySpace`](22-infer_tile_memory_space.md) 之后，[`ResolveBackendOpLayouts`](24-resolve_backend_op_layouts.md) 之前。
 
@@ -39,7 +46,12 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 
 1. 按算子配对 data/scale 操作数下标（`matmul_mx` / `_bias` 为 `(0,1)/(2,3)`；`_acc` 为 `(1,2)/(3,4)`）。
 2. 要求操作数为 Var-like（`Var` 或 `IterArg`），且 memory space 已构成合法的 LeftScale↔Left 或 RightScale↔Right 配对。
-3. 只有两个 SSA 操作数均未变化、且中间没有使绑定失效的操作时，才复用该侧最近的绑定；否则在 matmul 前插入 `tile.tget_scale_addr(scale, data)`。把 matmul 改写为使用绑定后的 scale SSA。
+3. 如果 scale 来自同一直线区域内的 Mat→Scale extract，且 payload 在
+   extract 处已可用，就在原位置改写为绑定和显式写入。同侧 L0
+   的中间使用、定义或控制流边界会让候选失效。两侧独立跟踪。
+4. 对其他生产者，复用相同 scale/data SSA 配对的最近有效绑定，或
+   在 matmul 前插入 `tile.tget_scale_addr(scale, data)`。matmul 消费
+   绑定后的 scale SSA。
 
 `NormalizedStmtStructure` 可能 unwrap 单语句 `SeqStmts`，使 `if` / `for` / `while`（或函数）body 成为裸 `AssignStmt`。插入绑定时，pass 会把该 body 包成 `SeqStmts`，处理方式与 `InsertCommFence` 的裸 body 逻辑一致。
 

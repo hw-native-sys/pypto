@@ -134,6 +134,8 @@ target 规范化为 `target_memory=Mat`。原始 `tile.load` IR 仍必须携带�
 
 候选资格首先依赖编译器私有的 provenance。`ConvertTensorToTileOps` 会标记其生成的所有 `GM → Mat` bridge load；该标记经过打印、flatten 和 L0 自动分块后一直保留到本阶段。阶段 4 随后证明带标记的 load 符合上文所述的精确静止前缀或只读 matmul panel 分支。用户手写的 `tile.load(..., target_memory=Mat)` 不带此标记，因此本优化绝不会提升它，从而保证显式 tile 程序仍由用户控制。
 
+对于 MX matmul，panel 的只读使用也可经过 `LeftScale` 和 `RightScale` 分级，前提是生成的 tile 进入对应的 scale 操作数槽位。该 pass 可以把完整的 Mat scale panel load 移到循环外，并保留循环内的 L0 scale 分级。
+
 首版合法性规则有意保持严格：
 
 - 循环必须为 `Sequential`，边界是常量，step 为正，且至少执行一次；
