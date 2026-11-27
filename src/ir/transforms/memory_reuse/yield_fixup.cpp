@@ -36,6 +36,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -395,9 +396,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // return_var is still patched onto the sibling arm's buffer -- leaving the
       // phi buffer unwritten on that path and feeding garbage into the carry.
       VarPtr then_var =
-          (then_yield && i < then_yield->value_.size()) ? AsVarLike(then_yield->value_[i]) : nullptr;
+          (then_yield && i < then_yield->value_.size()) ? BranchValue(then_yield->value_[i]) : nullptr;
       VarPtr else_var =
-          (else_yield && i < else_yield->value_.size()) ? AsVarLike(else_yield->value_[i]) : nullptr;
+          (else_yield && i < else_yield->value_.size()) ? BranchValue(else_yield->value_[i]) : nullptr;
 
       auto then_tile = then_var ? GetTileTypeWithMemRef(then_var->GetType()) : nullptr;
       auto else_tile = else_var ? GetTileTypeWithMemRef(else_var->GetType()) : nullptr;
@@ -487,7 +488,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
         const auto cover = view == branch_views_.end() ? copy.source : view->second.cover;
         targets_index.ForEachOverlapping(copy.dst_memref, [&](size_t other) {
           if (other == copy.index) return;
-          const auto sibling = AsVarLike(else_yield->value_.at(other));
+          const auto sibling = BranchValue(else_yield->value_.at(other));
           const auto source = GetTypeMemRef(else_yield->value_[other]->GetType());
           const bool same_windows = source && SamePhysicalWindow(*source, copy.src_memref) &&
                                     SamePhysicalWindow(targets[other], copy.dst_memref);
@@ -604,6 +605,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     ExprPtr offset;  // relative to the immediate input
   };
   std::map<const Var*, BranchView> branch_views_;
+  std::unordered_map<const Var*, VarPtr> branch_aliases_;
 
   struct BranchTransfer {
     VarPtr source;
@@ -611,7 +613,26 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     std::map<const Var*, CallPtr> sibling_slices;
   };
 
+  // Plain SSA renames preserve the descriptor. Resolve each chain at definition time
+  // so a yielded alias and a view taken through that alias use the same transfer.
+  VarPtr BranchValue(const ExprPtr& expr) const {
+    const auto var = AsVarLike(expr);
+    const auto it = branch_aliases_.find(var.get());
+    return it == branch_aliases_.end() ? var : it->second;
+  }
+
   void RecordBranchView(const AssignStmtPtr& assignment) {
+    const auto tile = GetTileTypeWithMemRef(assignment->var_->GetType());
+    if (!tile) return;
+    if (const auto alias = AsVarLike(assignment->value_)) {
+      const auto parent = GetTileTypeWithMemRef(alias->GetType());
+      if (SameKnownTileMemorySpace(tile, parent) &&
+          SamePhysicalWindow(GetDefinedMemRef(tile), GetDefinedMemRef(parent)) &&
+          structural_equal(tile, parent)) {
+        branch_aliases_.emplace(assignment->var_.get(), BranchValue(alias));
+      }
+      return;
+    }
     const auto call = As<Call>(assignment->value_);
     if (!call || !call->op_ || call->args_.empty() ||
         !op_predicates::IsBufferAliasingViewOp(call->op_->name_) ||
@@ -619,8 +640,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
             ExecutionMemoryAccessEvidence::NoAccess) {
       return;
     }
-    const auto input = AsVarLike(call->args_.front());
-    const auto tile = GetTileTypeWithMemRef(assignment->var_->GetType());
+    const auto input = BranchValue(call->args_.front());
     const auto parent = input ? GetTileTypeWithMemRef(input->GetType()) : nullptr;
     if (!SameKnownTileMemorySpace(tile, parent)) return;
     const auto window = GetDefinedMemRef(tile);
@@ -659,7 +679,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     const auto it = branch_views_.find(value.get());
     if (it == branch_views_.end()) return nullptr;
     const auto& view = it->second;
-    const auto parent = ProjectBranchWindow(AsVarLike(view.call->args_.front()), ancestor, target);
+    const auto parent = ProjectBranchWindow(BranchValue(view.call->args_.front()), ancestor, target);
     if (!parent) return nullptr;
     return MakeAliasingMemRef(parent, view.offset,
                               GetDefinedMemRef(GetTileTypeWithMemRef(value->GetType()))->size_, value->span_);
@@ -680,7 +700,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     const auto& outer = large->second.call;
     const auto& inner = small->second.call;
     if (!IsOp(outer, "tile.slice") || !IsOp(inner, "tile.slice") ||
-        outer->args_.front() != inner->args_.front()) {
+        BranchValue(outer->args_.front()) != BranchValue(inner->args_.front())) {
       return nullptr;
     }
     const auto tile = GetTileTypeWithMemRef(cover->GetType());
@@ -722,7 +742,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     const auto& call = sibling == transfer.sibling_slices.end() ? original.call : sibling->second;
     const auto offset = sibling == transfer.sibling_slices.end() ? original.offset : MakeZeroByteOffset();
     auto args = call->args_;
-    const auto parent = RebuildBranchView(AsVarLike(args.front()), transfer, rebuilt, statements);
+    const auto parent = RebuildBranchView(BranchValue(args.front()), transfer, rebuilt, statements);
     args.front() = parent;
     const auto size = GetDefinedMemRef(GetTileTypeWithMemRef(value->GetType()))->size_;
     const auto window = MakeAliasingMemRef(GetDefinedMemRef(GetTileTypeWithMemRef(parent->GetType())), offset,
@@ -992,7 +1012,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       std::map<const Var*, VarPtr> rebuilt{{it->second.source.get(), copy.moved_var}};
       for (size_t position : it->second.positions) {
         new_yield->value_[position] =
-            RebuildBranchView(AsVarLike(yield->value_[position]), it->second, &rebuilt, &moves);
+            RebuildBranchView(BranchValue(yield->value_[position]), it->second, &rebuilt, &moves);
       }
     }
     return InsertMovesAndReplaceYield(body, new_yield, moves);

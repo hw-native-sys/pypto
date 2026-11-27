@@ -955,13 +955,16 @@ class TestSlots:
                         x, [0, 0], [1, 64], valid_shape=[1, source_cols]
                     )
                     av = pl.tile.slice(a, [1, view_cols], [0, then_col], valid_shape=[1, 32])
-                    small, full, again = pl.yield_(av, a, av)
+                    av_alias = av
+                    small, full, again = pl.yield_(av, a, av_alias)
                 else:
                     b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(
                         x, [1, 0], [1, 64], valid_shape=[1, source_cols]
                     )
                     bv = pl.tile.slice(b, [1, view_cols], [0, else_col], valid_shape=[1, 32])
-                    small, full, again = pl.yield_(bv, b, bv)
+                    bv_alias = bv
+                    bv_again = bv_alias
+                    small, full, again = pl.yield_(bv_again, b, bv)
                 out = pl.store(small, [0, 0], out)
                 out = pl.store(full, [1, 0], out)
                 return pl.store(again, [2, 0], out)
@@ -1028,7 +1031,8 @@ class TestSlots:
                     short, wide = pl.yield_(a16, a32)
                 else:
                     b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
-                    b16 = pl.tile.slice(b, [1, 16], [0, 16])
+                    b_parent = b
+                    b16 = pl.tile.slice(b_parent, [1, 16], [0, 16])
                     b32 = pl.tile.slice(b, [1, 32], [0, 16])
                     short, wide = pl.yield_(b16, b32)
                 out = pl.store(short, [0, 0], out)
