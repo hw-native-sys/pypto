@@ -57,6 +57,15 @@ repos:
           language_version: python3
           pass_filenames: false
 
+        - id: check-docs-symbol-coverage-tests
+          name: check-docs-symbol-coverage-tests
+          entry: python -m pytest tests/lint/test_check_docs_symbol_coverage.py -q
+          language: python
+          language_version: python3
+          additional_dependencies: ["pytest>=8.4,<9.2"]
+          pass_filenames: false
+          files: ^(docs/(en|zh)/user/ops/01-catalog\.md|tests/lint/(check_docs_symbol_coverage|test_check_docs_symbol_coverage)\.py)$
+
         - id: check-no-broad-raises
           name: check-no-broad-raises
           entry: python tests/lint/check_no_broad_raises.py

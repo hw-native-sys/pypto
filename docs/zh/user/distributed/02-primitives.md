@@ -15,15 +15,20 @@
 | `WaitCmp` | `Eq`, `Ge` | 等待谓词。`Eq`：等于时解除阻塞。`Ge`：大于等于时解除阻塞。 |
 | `ReduceOp` | `Sum`, `Max`, `Min`, `Prod` | 集合通信的规约算子。支持情况按操作而定：`allreduce` 支持全部四种；`reduce_scatter` 在 InCore 通道支持全部四种（HOST builtin 通道目前仅 lower `Sum`）。 |
 | `AtomicType` | `None_`, `Add` | 远程存储合并模式。`None_`：普通存储。`Add`：原子累加——要求目标为 `fp32`/`bf16`/`fp16`/`int32`/`int16`/`int8`，其中 `bf16` 目标仅支持 Ascend910（A2/A3）。 |
+| `pld.CommEngine` | `URMA` | 异步传输算子 `engine=` 参数的编译期引擎选择。目前仅 `URMA` 一种取值。这两个算子本章暂未覆盖——现状见 [Distributed Operators](../../dev/distributed_ops.md)。 |
 | `DistributedTensor` | — | 绑定到通信域 window buffer 的 tensor 视图。 |
-| `CommCtx` | — | 通信上下文句柄。 |
+| `pld.CommCtx` | — | 通信上下文句柄。 |
+
+> **说明：** 上述五个枚举是**只能追加的 ABI**——其底层 `int` 值被序列化进编译后的
+> IR，因此新增取值只能加在末尾，不能插入或重新编号。完整编号见
+> [ABI enums](../../dev/distributed_ops.md)。
 
 ## 系统基础设施 (`pld.system.*`)
 
 | 名称 | 签名 | 描述 |
 | ---- | ---- | ---- |
 | `world_size` | `() -> Scalar` | 分布式执行中的 rank 数量，返回 `INT64`。可在 HOST 或 CLUSTER_0 编排中调用。 |
-| `num_workers` | `() -> Scalar` | 直属 worker 数量，返回 `INT64`。可在 HOST 或 CLUSTER_0 编排中调用。 |
+| `num_workers` | `() -> Scalar` | 直属 worker 数量，返回 `INT64`。可在 HOST 或 CLUSTER_0 编排中调用；完整名称为 `pld.system.num_workers`。 |
 | `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | 提升为 `CommCtx` 句柄。host 编排器和 InCore 代码均可用。 |
 | `rank` | `(ctx: Ctx) -> Scalar` | **仅限 InCore。** 本地 rank 索引。 |
 | `nranks` | `(ctx: Ctx) -> Scalar` | **仅限 InCore。** 通信组中 rank 数量。 |
