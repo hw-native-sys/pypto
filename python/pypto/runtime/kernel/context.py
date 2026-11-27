@@ -23,6 +23,7 @@ from pypto.ir.compiled_artifact import CompiledArtifact
 from pypto.runtime._execution_mode import claim_kernel_mode
 
 from .callable import KernelRegistration, artifact_identity
+from .capture import CaptureInUseError
 from .session import KernelConfig, _BorrowedWorkerSession
 
 
@@ -59,6 +60,9 @@ class _ProcessKernelState:
         self._preparing: dict[Hashable, Future[KernelRegistration]] = {}
         self._prepare_threads: dict[Hashable, threading.Thread] = {}
         self._submissions: list[Any] = []
+        # Capture must advance outstanding eager work without walking the
+        # growing list of recorded nodes or changing their retirement order.
+        self._warmup_submissions: list[Any] = []
         self._submission_lock = threading.Lock()
 
     def _check_pid(self) -> None:
@@ -246,35 +250,53 @@ class _ProcessKernelState:
             if self.state is not KernelState.CLOSING:
                 self.state = KernelState.FAILED
 
-    def submit(self, registration: KernelRegistration, prepare: Callable[[Any], Any]) -> None:
+    def check_eager_admission(self, config: KernelConfig) -> None:
+        with self._submission_lock:
+            self.bound_worker(config).check_eager_admission()
+
+    def submit(
+        self, registration: KernelRegistration, prepare: Callable[[Any], Any], *, capturing: bool = False
+    ) -> None:
         """Serialize admission and retain native tickets before any enqueue can fail."""
         self._check_pid()
         with self._submission_lock:
             self.require_registration(registration)
             self._worker.check_context()
+            if not capturing:
+                self._worker.check_eager_admission()
             try:
-                pending: list[Any] = []
-                for ticket in self._submissions:
-                    if not ticket.done():
-                        pending.append(ticket)
-                self._submissions = pending
+                if capturing:
+                    self._warmup_submissions = [
+                        ticket for ticket in self._warmup_submissions if not ticket.poll_capture()
+                    ]
+                else:
+                    self._submissions = [ticket for ticket in self._submissions if not ticket.done()]
+                    self._warmup_submissions = [
+                        ticket for ticket in self._submissions if getattr(ticket, "capture", None) is None
+                    ]
             except BaseException as exc:
                 self._submissions = [
                     ticket for ticket in self._submissions if not getattr(ticket, "retired", False)
                 ]
                 self._fail_admission(exc)
                 raise RuntimeError("Kernel Worker failed after an earlier asynchronous launch error") from exc
+            if capturing and self._warmup_submissions:
+                # Incomplete eager work is retryable. Keep the Worker ready and
+                # let the caller synchronize outside the recording boundary.
+                raise RuntimeError("Kernel eager work is still pending; synchronize the NPU before capture")
             ticket = prepare(self._worker)
             self._submissions.append(ticket)
             try:
                 ticket.enqueue()
+                if not capturing:
+                    self._warmup_submissions.append(ticket)
             except BaseException as exc:
                 if getattr(ticket, "retired", False):
                     self._submissions.remove(ticket)
                 self._fail_admission(exc)
                 raise
 
-    def _wait_submissions(self) -> None:
+    def _wait_submissions(self, *, allow_live_captures: bool = False) -> None:
         pending: list[Any] = []
         error = None
         for ticket in self._submissions:
@@ -283,18 +305,21 @@ class _ProcessKernelState:
             except BaseException as exc:
                 if not getattr(ticket, "retired", False):
                     pending.append(ticket)
-                if error is None:
+                if error is None and not (allow_live_captures and isinstance(exc, CaptureInUseError)):
                     error = exc
         self._submissions = pending
+        self._warmup_submissions = [ticket for ticket in pending if getattr(ticket, "capture", None) is None]
         if error is not None:
             raise error
 
     def drain(self) -> None:
-        """Observe all admitted work, retaining only tickets without safe retirement."""
+        """Wait eager work and reclaim destroyed graphs, retaining live graph owners."""
         self._check_pid()
         with self._submission_lock:
+            if self._worker is not None:
+                self._worker.check_context()
             try:
-                self._wait_submissions()
+                self._wait_submissions(allow_live_captures=True)
             except BaseException as exc:
                 self._fail_admission(exc)
                 raise

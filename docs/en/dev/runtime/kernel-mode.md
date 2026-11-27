@@ -102,6 +102,9 @@ through the public Worker interface, using `Buffer.wrap` and Simpler Tensor view
 for borrowed device storage. Scalar values and types use the public
 `TaskArgs` typed scalar interface, leaving ABI encoding to Simpler.
 `ScalarArgument` retains the validated value and dtype without encoding it.
+KERNEL orchestration callable signatures append SCALAR slots after tensor
+directions so Simpler can validate both argument-pool counts. PROGRAM and
+per-core dependency signatures retain their tensor-only convention.
 
 Runtime capability checks run at explicit Torch kernel initialization. The lifecycle
 layer supports Worker initialization, callable registration and eager submission.
@@ -138,8 +141,7 @@ Diagnostics require an output directory; this step reserves the configuration,
 while public DFX windows are a later step. The workspace budget follows the
 public Worker's minimum of 1024 bytes and excludes borrowed tensor storage.
 
-The runtime submodule follows upstream's Simpler pin
-`31f9e72ee6832cd198b77df18c1c305e7fd83676`. The existing `check_runtime_pin`
+The `runtime/` submodule records the Simpler revision for this checkout. The `check_runtime_pin`
 policy remains authoritative for the installed native binding, including its
 missing-identity and explicit-skip rules. A separate availability check requires
 public borrowed init, caller-stream preparation, Buffer/TaskArgs, PreparedSubmission and
@@ -222,8 +224,8 @@ The first eager call specializes, validates the logical signature, runs shared
 passes/codegen, loads/assembles the artifact and registers its callable. Repeated
 calls reuse compatible artifacts and handles; runtime scalar changes do not
 recompile. Returns are aliases of caller tensors, including repeated aliases.
-No business output is allocated. Capture/replay raises `NotImplementedError`
-before compilation or registration, even after eager warmup.
+No business output is allocated. Graph capture requires prior eager execution
+of every specialization and completed registration; cold cache misses are refused.
 
 Kernel calls use `runtime.kernel.arguments.BorrowedArguments` to build TaskArgs
 from validated NPU call frames and own the per-call storage leases. They do not
@@ -257,8 +259,10 @@ Build the adapter and Simpler together: the header comes from the installed
 assets. The capsule is a same-build interface, not a separately versioned ABI.
 
 Outer JIT return, native submission and device completion remain distinct.
-Ordinary calls never drain the host queue. A done ticket still requires bounded
-`wait` observation and a true `safe_to_release` before external owners are released.
+Ordinary eager-ticket observation uses bounded `wait` and requires a true
+`safe_to_release` before owners are released. Outside capture, admission can
+synchronize prior work to reclaim a destroyed graph; the new submission still
+returns without waiting for its own callback.
 If enqueue raises, attempt cancellation; cancellation alone is not cleanup proof.
 Already-consumed or unsafe tickets remain tracked. Explicit shutdown waits for
 remaining work. Simpler submission retains its existing capacity backpressure.
@@ -269,6 +273,89 @@ output and native/framework boundaries mocked. They do not validate optional
 adapter compilation, real taskQueue/GIL/lock behavior, allocator safety or NPU
 numerical execution. The device-gated STs below cover numerical execution and
 queue-drain regressions; skipped cases do not establish device correctness.
+
+## Native Torch graph capture
+
+Call each specialization eagerly and synchronize before capture. `compile()` and
+`warmup()` request the PROGRAM contract and do not prepare a Kernel registration.
+Capture uses the existing KERNEL specialization and callable; it never compiles,
+loads a new binary or initializes a Worker. Initialize with diagnostics disabled.
+If earlier eager work is still queued or running, the Worker refuses the captured
+call before enqueue. End capture, synchronize the NPU, and retry recording.
+
+If a configured `CacheConfig.extra_source_paths` entry is missing, eager warmup
+can succeed with a private build whose fingerprint capture cannot look up.
+Restore the missing input or call `pypto.configure_cache(pypto.CacheConfig(enabled=False))`
+when using process defaults, then repeat eager warmup and synchronization.
+
+```python
+import torch
+import torch_npu
+import pypto.torch
+
+pypto.torch.init()
+op(x, out)  # Existing @pl.jit kernel, with caller-owned NPU input/output tensors.
+torch_npu.npu.synchronize()
+# Restore any InOut state changed by eager warmup before recording.
+graph = torch_npu.npu.NPUGraph()
+with torch_npu.npu.graph(graph):
+    op(x, out)
+graph.replay()
+torch_npu.npu.synchronize()
+graph.reset()
+op(x, out)  # Automatically reclaim the destroyed graph before enqueueing this call.
+torch_npu.npu.synchronize()
+```
+
+PyPTO queries the active ACL model using a non-draining stream lookup at each
+call. The session groups submissions by model and uses Simpler's same-build
+`_register_model_destroy_notice(anchor)` interface to share one model destroy notice.
+Each invocation still owns its own preparation, argument snapshot and retained
+resources. Model addresses can be reused only after the previous destroy notice.
+No Python graph object is retained and no `NPUGraph` method is patched or wrapped.
+Record all PyPTO nodes of a graph on one stream. An attempted PyPTO call on a
+second stream joined to the same graph is refused before submission and leaves
+the Worker available. The graph can subsequently replay on a different stream.
+The original torch_npu graph context owns capture begin/end, replay and reset.
+
+Capture admission enqueues the same GIL-free native submit callback as eager
+execution and returns output aliases without waiting for that callback. The
+original framework capture-end boundary drains the host queue before ending
+RTS recording. Replay does not reenter Python JIT. Addresses, scalar values and
+Host-derived structure remain fixed; ordered changes to device data at those
+addresses are visible to later replay. Concurrent replay is not qualified.
+
+Ending capture or synchronizing a replay does not end future graph uses.
+Captured tickets retain tensor/storage, stream and callable owners until the
+native model destroy notice and checked cleanup. Each subsequent ordinary
+`op()` automatically reclaims destroyed graphs before enqueueing its own callback.
+This cleanup may synchronize all device streams because replay can use a stream
+different from recording. Live graphs remain retained and replayable.
+
+Reclamation is deferred when the calling stream is recording, including when
+a new model reuses a destroyed model's address. Eager admission also checks
+streams retained from PyPTO recordings, so a queued stream join cannot trigger
+eager cleanup. A recording on an unrelated stream with no PyPTO owner can
+still coincide with device synchronization and leave the Worker failed.
+Schedule ordinary calls that reclaim graphs after such recordings end.
+Completed eager warmup may still be polled out of the native
+execution lane during capture, while its finalization is deferred until outside
+recording. Simpler's `safe_to_release` remains the final owner-release condition. Failed cleanup retains owners and refuses the new submission.
+If there are no subsequent calls, shutdown attempts reclamation. There is no
+public `drain()` API, no background reclaimer and no need for an extra user call.
+
+The existing shutdown hook never resets or disables user graphs. A graph still
+alive at Worker close retains its resources. Close reports an error after
+processing other pending tickets, which can include waiting for eager work. Reset
+or destroy graphs before process teardown. Failed destruction, partial recording,
+failed synchronization and failed native release retain owners for cleanup retry.
+
+`tests/st/runtime/kernel/test_torch_capture.py` covers HBG/TMR and task queue 0/1:
+cold-call refusal, three live graphs with multiple interleaved Torch/PyPTO nodes,
+changed-input replay on another stream, fixed scalar snapshots, independent model
+release, survivor replay and subsequent eager reuse. Unit tests additionally
+cover queued callbacks, model-address reuse, failed retention, cleanup retry and
+unchanged graph methods. CPU tests do not establish hardware qualification.
 
 ## Call metadata and ownership
 
@@ -412,7 +499,7 @@ initialization and eager submission are implemented. Direct JIT calls use the
 Torch queue bridge; explicit `compile()` retains program execution. Unit tests
 cover queue ordering and resource lifetime with mocked execution boundaries.
 Native adapter builds, real-device numerical correctness and allocator safety
-require device validation; ACLGraph capture/replay remains unsupported.
+require device validation, including capture/replay on the target framework version.
 
 ## Verification
 

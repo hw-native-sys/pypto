@@ -29,21 +29,24 @@ def _load_native() -> Any:
     return native
 
 
-def _capture_supported() -> bool:
-    # The production backend has no graph lifetime contract. Keep the policy
-    # separate so fake-capable UTs can exercise lookup-only capture admission.
-    return False
-
-
-def _check_capture(stream_id: int, device: int) -> bool:
-    capturing = bool(_load_native().check_call(stream_id, device))
-    if capturing and not _capture_supported():
-        raise NotImplementedError("Torch kernel graph capture/replay is not supported, even after warmup")
-    return capturing
+def _check_capture(stream_id: int, device: int, config: Any) -> int:
+    native = _load_native()
+    if not native.check_call(stream_id, device):
+        return 0
+    if config.enable_chip_swimlane or config.enable_dep_gen:
+        raise ValueError("Kernel graph capture requires diagnostics disabled at pypto.torch.init")
+    if not all(callable(getattr(native, name, None)) for name in ("capture_model", "recording_on_stream")):
+        raise NotImplementedError("Kernel capture requires capture stream queries; rebuild the Torch adapter")
+    model = native.capture_model(stream_id, device)
+    if type(model) is not int or model <= 0:
+        raise RuntimeError("Kernel capture requires a nonzero active ACL model identity")
+    return model
 
 
 def check_eager_call(config: Any) -> bool:
     """Reject capture/device mismatch before specialization or compilation."""
+    from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
+
     from .interop import _load_torch_npu  # noqa: PLC0415
 
     npu = _load_torch_npu().npu
@@ -51,10 +54,13 @@ def check_eager_call(config: Any) -> bool:
     if device != config.device_id:
         raise ValueError(f"Kernel call device {device} differs from initialized NPU {config.device_id}")
     stream = npu.current_stream(device)
-    return _check_capture(stream.stream_id, device)
+    capturing = bool(_check_capture(stream.stream_id, device, config))
+    if not capturing:
+        get_process_kernel_state().check_eager_admission(config)
+    return capturing
 
 
-def check_frame(frame: Any, config: Any) -> bool:
+def check_frame(frame: Any, config: Any) -> int:
     from pypto.runtime.kernel.arguments import check_tensor_dtype  # noqa: PLC0415
 
     if frame.device_index != config.device_id:
@@ -66,12 +72,13 @@ def check_frame(frame: Any, config: Any) -> bool:
             extent <= 0 or extent > 0xFFFFFFFF for extent in (*meta.shape, *meta.strides)
         ):
             raise ValueError("Kernel tensors require rank 1..5 and positive u32 extents/strides")
-    return _check_capture(frame.stream.stream_id, frame.device_index)
+    return _check_capture(frame.stream.stream_id, frame.device_index, config)
 
 
 def invoke(artifact: Any, frame: Any, config: Any) -> Any:
     """Register a shared artifact, retain a ticket, then enqueue without waiting."""
     from pypto.runtime.kernel.arguments import BorrowedArguments  # noqa: PLC0415
+    from pypto.runtime.kernel.capture import CaptureResources  # noqa: PLC0415
     from pypto.runtime.kernel.context import get_process_kernel_state  # noqa: PLC0415
     from pypto.runtime.kernel.pending import PendingTicket  # noqa: PLC0415
     from pypto.runtime.kernel.session import make_call_config  # noqa: PLC0415
@@ -88,15 +95,22 @@ def invoke(artifact: Any, frame: Any, config: Any) -> Any:
     )
 
     def prepare(session: Any) -> PendingTicket:
+        caller_stream = native.caller_stream(frame.stream.stream_id, frame.device_index)
+        if type(caller_stream) is not int or caller_stream <= 0:
+            raise ValueError("Kernel submission requires a nonzero RTS stream handle")
+        if capturing:
+            # Simpler accepts a shared destruction notice only on its original
+            # recording stream. Reject a joined stream before acquiring leases
+            # or creating a ticket, so ordinary admission remains available.
+            anchor = session.capture_anchors.get(capturing)
+            if anchor is not None and anchor.stream != caller_stream and not anchor.native._model_destroyed():
+                raise ValueError("Record PyPTO calls for one graph on a single NPU stream")
         call_config = make_call_config(config, session._api.CallConfig)
         tensors = [arg.tensor for arg in frame.tensors]
         arguments = BorrowedArguments(frame, session.sources, session.device_location)
 
         def enqueue(ticket: PendingTicket) -> None:
             session.check_context()
-            caller_stream = native.caller_stream(frame.stream.stream_id, frame.device_index)
-            if type(caller_stream) is not int or caller_stream <= 0:
-                raise ValueError("Kernel submission requires a nonzero RTS stream handle")
             ticket.submission = session.worker.prepare_submission(
                 registration.handle,
                 arguments.task_args,
@@ -104,6 +118,15 @@ def invoke(artifact: Any, frame: Any, config: Any) -> Any:
                 caller_stream=caller_stream,
                 keepalive=(arguments, frame),
             )
+            if capturing:
+                ticket.capture = CaptureResources(
+                    ticket.submission,
+                    capturing,
+                    caller_stream,
+                    session.capture_anchors,
+                    session.synchronize_device,
+                )
+                ticket.capture.retain()
             native.enqueue(
                 tensors,
                 frame.stream.stream_id,
@@ -120,7 +143,7 @@ def invoke(artifact: Any, frame: Any, config: Any) -> Any:
             owners=(session, arguments, call_config, frame),
         )
 
-    state.submit(registration, prepare)
+    state.submit(registration, prepare, capturing=bool(capturing))
     return frame.alias_result()
 
 

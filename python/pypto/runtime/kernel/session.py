@@ -25,6 +25,7 @@ from typing import Any
 from pypto.runtime.runtime_pin import check_runtime_pin
 
 from .arguments import SourcePool
+from .capture import CaptureResources
 from .owner import _OwnerThread
 
 
@@ -172,6 +173,7 @@ class _BorrowedWorkerSession:
         self._context = self._native.borrow_context(config.device_id)
         self._device_id = config.device_id
         self._generation = state.generation
+        self.capture_anchors: dict[int, CaptureResources] = {}
         self.worker: Any = None
         self._owner = _OwnerThread()
 
@@ -183,6 +185,14 @@ class _BorrowedWorkerSession:
         import threading  # noqa: PLC0415
 
         return threading.current_thread() is self._owner.thread
+
+    def check_eager_admission(self) -> None:
+        # A queued wait_event can join a second stream after Python classifies
+        # the call. Check retained recording streams before eager finalization
+        # can synchronize them. The submission lock protects the stream owners.
+        for stream in {anchor.stream for anchor in self.capture_anchors.values()}:
+            if self._native.recording_on_stream(stream):
+                raise ValueError("Record PyPTO calls for one graph on a single NPU stream")
 
     def init(self, config: KernelConfig) -> None:
         self._owner.call(lambda: self._init(config))
@@ -214,6 +224,11 @@ class _BorrowedWorkerSession:
     @property
     def device_location(self) -> Any:
         return self.worker.device_location
+
+    def synchronize_device(self) -> None:
+        from pypto.torch.interop import _load_torch_npu  # noqa: PLC0415
+
+        _load_torch_npu().npu.synchronize(self._device_id)
 
     def wait(self, ticket: Any) -> None:
         def retire() -> None:

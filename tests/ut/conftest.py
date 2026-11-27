@@ -340,6 +340,9 @@ def kernel_env(monkeypatch, tmp_path):
         def check_context(self):
             pass
 
+        def check_eager_admission(self):
+            pass
+
         def on_owner_thread(self):
             return False
 
@@ -405,6 +408,9 @@ def eager_env(monkeypatch):
         workers=[],
         synchronized_streams=[],
         capture=False,
+        models={},
+        device_sync_error=None,
+        capture_release_error=None,
         queued=True,
         stream_id=7,
         rts_stream=12345,
@@ -442,9 +448,24 @@ def eager_env(monkeypatch):
             synchronize=lambda: synchronize(stream_id),
         )
 
+    def synchronize_device(device):
+        assert device == env.device
+        env.events.append("device.synchronize")
+        run_queue()
+        if env.device_sync_error:
+            raise env.device_sync_error
+        if env.queue_error:
+            raise env.queue_error
+        for run in env.runs:
+            run.complete = True
+
     framework = SimpleNamespace(
         __version__="2.6.0.post2",
-        npu=SimpleNamespace(current_device=lambda: env.device, current_stream=lambda device: stream()),
+        npu=SimpleNamespace(
+            current_device=lambda: env.device,
+            current_stream=lambda device: stream(),
+            synchronize=synchronize_device,
+        ),
         get_npu_format=lambda tensor: 2,
         _C=SimpleNamespace(_npu_shutdown=lambda: None, _npu_shutdown_synchronize=lambda: None),
     )
@@ -472,6 +493,9 @@ def eager_env(monkeypatch):
                 raise self.wait_error
             self.complete = self.retired = True
 
+    class RunPreparationRefused(RuntimeError):
+        pass
+
     class PreparedSubmission:
         def __init__(self, worker, target, args, config, caller_stream, keepalive):
             self.worker, self.target, self.args = worker, target, args
@@ -483,6 +507,53 @@ def eager_env(monkeypatch):
             self.error = None
             self.safe = False
             self.cancel_error = None
+            self.model_notice = None
+            self.model_released = False
+            self._native_submission = SimpleNamespace(
+                _submission=self,
+                _register_model_destroy_notice=lambda anchor=None: self._register_model_destroy_notice(
+                    anchor._submission if anchor is not None else None
+                ),
+                _model_destroyed=self._model_destroyed,
+                _release_model_resources=self._release_model_resources,
+                cancel=self._cancel_native,
+            )
+
+        def _cancel_native(self):
+            if self.consumed or self.cancelled:
+                return False
+            self.cancelled = True
+            return True
+
+        def _register_model_destroy_notice(self, anchor=None):
+            model = int(env.capture)
+            assert model
+            env.events.append(("capture.retain", model, anchor))
+            if anchor is not None:
+                assert anchor.caller_stream == self.caller_stream
+                assert anchor.model_notice is env.models[model]
+                assert not anchor._model_destroyed()
+                self.model_notice = anchor.model_notice
+            else:
+                assert model not in env.models or env.models[model].destroyed
+                self.model_notice = SimpleNamespace(destroyed=False)
+                env.models[model] = self.model_notice
+
+        def _model_destroyed(self):
+            return self.model_notice is not None and self.model_notice.destroyed
+
+        def _release_model_resources(self):
+            if self.model_notice is not None and not self._model_destroyed():
+                raise RunPreparationRefused("native resource release requires the ACL model destroy notice")
+            if env.capture_release_error:
+                raise env.capture_release_error
+            env.events.append("capture.release")
+            cancelled = not self.consumed and not self.cancelled
+            if cancelled:
+                self.cancelled = True
+                self.cancel_error = RunPreparationRefused("model release cancelled the prepared submission")
+            self.model_released = True
+            return cancelled
 
         native_handle = property(lambda self: self)
         safe_to_release = property(lambda self: self.safe)
@@ -507,11 +578,17 @@ def eager_env(monkeypatch):
             self.cancelled = True
             if self.cancel_error:
                 raise self.cancel_error
-            self.safe = True
-            self.keepalive = ()
+            self.safe = self.model_notice is None
+            if self.safe:
+                self.keepalive = ()
             return True
 
         def wait(self, timeout=None):
+            if self.model_notice is not None and not self.model_released:
+                raise TimeoutError("model still retained")
+            if self.model_released:
+                self.safe = True
+                self.keepalive = ()
             if self.error:
                 raise self.error
             if self.cancelled:
@@ -607,6 +684,7 @@ def eager_env(monkeypatch):
         CallConfig=CallConfig,
         RunHandle=RunHandle,
         PreparedSubmission=PreparedSubmission,
+        RunPreparationRefused=RunPreparationRefused,
         Buffer=Buffer,
         TaskArgs=TaskArgs,
         Tensor=lambda buffer, **kw: SimpleNamespace(buffer=buffer, **kw),
@@ -643,7 +721,9 @@ def eager_env(monkeypatch):
     native = SimpleNamespace(
         enqueue=enqueue,
         caller_stream=lambda stream, device: env.rts_stream,
-        check_call=lambda stream, device: env.capture,
+        check_call=lambda stream, device: bool(env.capture),
+        capture_model=lambda stream, device: int(env.capture),
+        recording_on_stream=lambda stream: bool(env.capture),
         borrow_context=lambda device: env.context,
         bind_context=lambda context: None,
         framework_alive=lambda: True,
