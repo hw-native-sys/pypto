@@ -38,7 +38,9 @@ from pypto.backend.pto_backend import (
     _generate_kernel_wrapper,
     _get_error_summary,
     _preprocess_ptoas_output,
+    _uses_bf16_to_fp16_tile_cast,
     _uses_dynamic_subblock_id,
+    _uses_reg_saturation,
     generate,
 )
 from pypto.ir import OptimizationStrategy, PassManager
@@ -2436,6 +2438,11 @@ class TestGenerateArgUnpacking:
 class TestGenerateKernelWrapper:
     """Tests for _generate_kernel_wrapper."""
 
+    _A5_VEC_GUARD = (
+        "#if defined(__DAV_VEC__) && defined(PTO_NPU_ARCH_A5) && "
+        "!defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
+    )
+
     def test_contains_kernel_entry(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
@@ -2485,7 +2492,127 @@ class TestGenerateKernelWrapper:
         ) in entry
         assert entry.index(reset) < entry.index("// Unpack tensor: a")
         assert entry.index(reset) < entry.index("my_kernel(a, out, s);")
-        assert "set_ctrl(sbitset1" not in entry
+        assert "sbitset1(get_ctrl(), pto::MAD_MODE_BIT)" not in entry
+
+    def test_clears_inherited_saturation_override_on_a5_device_vec_before_forwarding(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, uses_reg_saturation=True)
+        entry = wrapper[wrapper.index("void kernel_entry(__gm__ int64_t* args)") :]
+        reset = "set_ctrl(sbitset0(get_ctrl(), 60));"
+
+        assert entry.count(reset) == 1
+        before, after = entry.split("my_kernel(a, out, s);")
+        assert reset in before.split(self._A5_VEC_GUARD)[1].partition("#endif")[0]
+        assert before.index("set_atomic_none();") < before.index(reset) < before.index("// Unpack tensor: a")
+        restore = "set_ctrl(sbitset1(get_ctrl(), 60));"
+        assert entry.count(restore) == 1
+        assert (
+            f"pipe_barrier(PIPE_ALL);\n    {restore}"
+            in after.split(self._A5_VEC_GUARD)[1].partition("#endif")[0]
+        )
+
+    def test_restores_global_saturation_mode_on_a5_device_vec_without_reg_convert(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        entry = wrapper[wrapper.index("void kernel_entry(__gm__ int64_t* args)") :]
+        restore = "set_ctrl(sbitset1(get_ctrl(), 60));"
+        assert entry.count(restore) == 1
+        assert restore in entry.split(self._A5_VEC_GUARD, 1)[1].partition("#endif")[0]
+        assert entry.index(restore) < entry.index("// Unpack tensor: a")
+        assert entry.index(restore) < entry.index("my_kernel(a, out, s);")
+        assert "sbitset0(get_ctrl(), 60)" not in entry
+        assert "set_ctrl(" not in entry.split("my_kernel(a, out, s);")[1]
+
+    def test_mixed_reg_convert_and_bf16_to_fp16_scopes_ctrl60_to_vf_adapter(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        symbol = "__pypto_vf_my_kernel_0_tile_adapter"
+        source = f"static AICORE void {symbol}() {{ run_vf(); }}\n" + SAMPLE_PTOAS_OUTPUT
+        wrapper = _generate_kernel_wrapper(
+            func, source, uses_reg_saturation=True, reg_saturation_vf_adapters=(symbol,)
+        )
+        adapter = wrapper.split(f"void {symbol}() {{")[1].split("run_vf();")[0]
+        guard = adapter.split(self._A5_VEC_GUARD)[1].partition("#endif")[0]
+        ctor, dtor = guard.split("__aicore__ ~__PyptoRegSatCtrlGuard()")
+        clear = "set_ctrl(sbitset0(get_ctrl(), 60));"
+        restore = "set_ctrl(sbitset1(get_ctrl(), 60));"
+        assert (
+            ctor.index("struct __PyptoRegSatCtrlGuard")
+            < ctor.index("pipe_barrier(PIPE_ALL);")
+            < ctor.index(clear)
+        )
+        assert (
+            dtor.index("pipe_barrier(PIPE_ALL);")
+            < dtor.index(restore)
+            < dtor.index("__pypto_reg_sat_ctrl_guard;")
+        )
+        entry = wrapper.split("void kernel_entry(__gm__ int64_t* args)")[1]
+        assert restore in entry.split(self._A5_VEC_GUARD)[1].partition("#endif")[0]
+        assert entry.index(restore) < entry.index("my_kernel(a, out, s);")
+        assert entry.count(restore) == 1 and clear not in entry
+
+    def test_uses_reg_saturation_in_outlined_vf_helper(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.program
+        class Kernels:
+            @pl.function(type=pl.FunctionType.AIV)
+            def convert(
+                self, src: pl.Tile[[64], pl.FP32, pl.Mem.Vec], dst: pl.Tile[[64], pl.INT32, pl.Mem.Vec]
+            ):
+                with pl.reg_scope():
+                    x = pl.reg.load(src, lanes=64)
+                    y = pl.reg.convert(x, dtype=pl.INT32, rounding="Z", saturate=False)
+                    converted = pl.reg.store(dst, value=y)
+                return converted
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def copy(self, src: pl.Tile[[64], pl.FP32, pl.Mem.Vec]):
+                return src
+
+        program = passes.outline_reg_scopes()(Kernels)
+        entry = program.get_function("convert")
+        other = program.get_function("copy")
+        (helper,) = (f for f in program.functions.values() if f.func_type == ir.FunctionType.VF)
+        assert entry is not None and other is not None
+        assert _uses_reg_saturation(helper)
+        assert not _uses_reg_saturation(entry)
+        assert _uses_reg_saturation(entry, program)
+        assert not _uses_reg_saturation(other, program)
+
+    def test_widening_reg_convert_does_not_use_reg_saturation(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend950)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def widen(src: pl.Tile[[64], pl.FP16, pl.Mem.Vec], dst: pl.Tile[[64], pl.FP32, pl.Mem.Vec]):
+            with pl.reg_scope():
+                x = pl.reg.load(src, lanes=64)
+                y = pl.reg.convert(x, dtype=pl.FP32)
+                converted = pl.reg.store(dst, value=y)
+            return converted
+
+        assert not _uses_reg_saturation(widen)
+
+    @pytest.mark.parametrize("src_dtype", [pl.BF16, pl.FP32])
+    def test_uses_bf16_to_fp16_tile_cast(self, src_dtype):
+        @pl.function(type=pl.FunctionType.AIV)
+        def cast(src: pl.Tile[[1, 64], src_dtype, pl.Mem.Vec]):
+            return pl.cast(src, pl.FP16, saturation_mode="on")
+
+        assert _uses_bf16_to_fp16_tile_cast(cast) == (src_dtype == pl.BF16)
+
+        ib = IRBuilder()
+        with ib.function("buffer_cast", type=ir.FunctionType.AIV) as f:
+            src = f.param("src", ir.BufferType([1, 64], src_dtype, ir.MemorySpace.Vec))
+            dst = f.param("dst", ir.BufferType([1, 64], pl.FP16, ir.MemorySpace.Vec))
+            span = ir.Span.unknown()
+            ib.emit(
+                ir.EvalStmt(
+                    ir.Call(ir.get_op("buffer.cast"), [src, dst], {}, None, ir.VoidType(), span), span
+                )
+            )
+        assert _uses_bf16_to_fp16_tile_cast(f.get_result()) == (src_dtype == pl.BF16)
 
     def test_defer_wait_wrapper_forwards_raw_args_through_checked_adapter(self):
         @pl.program
