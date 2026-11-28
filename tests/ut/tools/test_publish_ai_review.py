@@ -1161,7 +1161,6 @@ def test_comment_trigger_and_session_isolation(workflow):
         jobs["prepare"],
         jobs["publish"],
         load_workflow("ai-review-retarget")["jobs"]["invalidate"],
-        load_workflow("ai-review-cleanup")["jobs"]["cleanup-sessions"],
     ):
         checkout = next(step for step in job["steps"] if "checkout@" in step.get("uses", ""))
         assert checkout["with"]["ref"] == "${{ github.workflow_sha }}"
@@ -1190,6 +1189,14 @@ def test_close_cleanup_is_independent_of_review_eligibility():
     workflow = load_workflow("ai-review-cleanup")
     assert workflow["on"] == {"pull_request_target": {"types": ["closed"]}}
     assert set(workflow["jobs"]) == {"cleanup-sessions", "gemini-cleanup-sessions"}
+    for job in workflow["jobs"].values():
+        checkout, verify = job["steps"][:2]
+        assert checkout["uses"].startswith("actions/checkout@")
+        assert {"ref", "repository"}.isdisjoint(checkout["with"])
+        assert not checkout["with"].get("allow-unsafe-pr-checkout")
+        assert checkout["with"]["persist-credentials"] is False
+        assert verify["env"]["TRUSTED_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
+        assert verify["run"] == 'test "$(git rev-parse HEAD)" = "$TRUSTED_WORKFLOW_SHA"'
     gemini = workflow["jobs"]["gemini-cleanup-sessions"]
     assert "if" not in gemini and "run_gemini_review.py cleanup" in gemini["steps"][-1]["run"]
     cleanup = workflow["jobs"]["cleanup-sessions"]
