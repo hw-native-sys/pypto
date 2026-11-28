@@ -163,18 +163,23 @@ class Program:
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 @pytest.mark.parametrize(
-    "pool_shape, offset",
+    "pool_shape, slice_shape, offset, drop_dims, contiguous",
     [
-        pytest.param([1, 16384], [0, 4096], id="flat_pool"),
-        pytest.param([4, 8192], [2, 1024], id="row_window"),
+        pytest.param([1, 16384], [1, 4096], [0, 4096], [], True, id="flat_pool"),
+        pytest.param([4, 8192], [1, 4096], [2, 1024], [], True, id="row_window"),
+        pytest.param([4, 8192], [1, 4096], [2, 1024], [0], True, id="rank_reduced_row"),
+        pytest.param([4096, 16], [4096, 1], [0, 0], [1], False, id="rank_reduced_column"),
     ],
 )
-def test_direct_bf16_writeback_to_reshaped_single_row_slice(tmp_path, planner, pool_shape, offset):
+def test_direct_bf16_writeback_checks_reshaped_slice_pitch(
+    tmp_path, planner, pool_shape, slice_shape, offset, drop_dims, contiguous
+):
     annotation = (
         f': pl.Tile[{pool_shape}, pl.BF16, pl.MemRef("ub"), pl.Mem.Vec]'
         if planner == passes.MemoryPlanner.PYPTO
         else ""
     )
+    drop = f", drop_dims={drop_dims}" if drop_dims else ""
     program = pl.parse_program(f"""
 import pypto.language as pl
 @pl.program
@@ -185,10 +190,14 @@ class Program:
         rhs = pl.tile.load(y, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
         acc = pl.tile.matmul(lhs, rhs)
         pool{annotation} = pl.tile.create({pool_shape}, pl.BF16, target_memory=pl.Mem.Vec)
-        flat = pl.tile.slice(pool, [1, 4096], {offset})
-        mailbox = pl.tile.reshape(flat, [32, 128])
+        window = pl.tile.slice(pool, {slice_shape}, {offset}{drop})
+        mailbox = pl.tile.reshape(window, [32, 128])
         pl.tpush_to_aiv(acc, split=0, dst=mailbox, aiv_subblockid=0)
 """)
+    if not contiguous:
+        with pytest.raises(ValueError, match="requires a contiguous destination"):
+            generated_mlir(program, planner=planner)
+        return
     mlir = generated_mlir(program, planner=planner)
     assert "pto.textract " not in mlir
     cpp = compile_native(tmp_path, mlir, planner=planner).read_text()

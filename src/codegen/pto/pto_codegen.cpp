@@ -183,15 +183,15 @@ class TileProvenanceChecker : public ir::IRVisitor {
         const auto src_type = As<TileType>(call->args_[0]->GetType());
         const auto src_cols =
             src_type && src_type->shape_.size() == 2 ? As<ir::ConstInt>(src_type->shape_[1]) : nullptr;
-        const auto dst_rows =
-            tile_type->shape_.size() == 2 ? As<ir::ConstInt>(tile_type->shape_[0]) : nullptr;
-        const auto dst_cols =
-            tile_type->shape_.size() == 2 ? As<ir::ConstInt>(tile_type->shape_[1]) : nullptr;
-        // Cropping a single row leaves a contiguous window. Multi-row slices
-        // retain the parent's pitch and need its full width to be packed.
+        const auto slice_shape = As<ir::MakeTuple>(call->args_[1]);
+        const bool is_matrix_slice = slice_shape && slice_shape->elements_.size() == 2;
+        const auto slice_rows = is_matrix_slice ? As<ir::ConstInt>(slice_shape->elements_[0]) : nullptr;
+        const auto slice_cols = is_matrix_slice ? As<ir::ConstInt>(slice_shape->elements_[1]) : nullptr;
+        // Use the physical window before drop_dims can turn a column into a
+        // logical row. Only one physical row can be cropped without a gap.
         const bool contiguous =
-            (dst_rows && dst_rows->value_ == 1) ||
-            (src_cols && dst_cols && src_cols->value_ > 0 && src_cols->value_ == dst_cols->value_);
+            (slice_rows && slice_rows->value_ == 1) ||
+            (src_cols && slice_cols && src_cols->value_ > 0 && src_cols->value_ == slice_cols->value_);
         if (!contiguous) {
           non_packed_slices_.insert(op->var_.get());
         }
