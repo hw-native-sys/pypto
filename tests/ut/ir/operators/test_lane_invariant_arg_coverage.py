@@ -49,6 +49,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 BASE_SHAPE = [64, 32]
 _SHAPE_CANDIDATES = ([64, 32], [64, 1], [1, 32])
 
+# Quantization's full-vector source load needs a width divisible by 64.
+# Its scale/offset still use column vectors, and the rectangular source keeps
+# each axis distinguishable to the probe.
+_SHAPE_CANDIDATES_BY_OP = {
+    ir.get_op("tile.quant").name: ([64, 128], [64, 1]),
+}
+
 # Kwargs an operator requires before its deducer will produce any result at all. Values are chosen to
 # be neutral: they must not themselves depend on a tile operand's extent, or the probe would read the
 # kwarg's influence as the operand's.
@@ -201,8 +208,9 @@ def _find_baseline(op_name, n_args, tile_idx):
         ]
         return args, _deduce(op_name, args)
     ordered = sorted(tile_idx)
+    shape_candidates = _SHAPE_CANDIDATES_BY_OP.get(op_name, _SHAPE_CANDIDATES)
     for dtype in _DTYPES:
-        for shapes in itertools.product(_SHAPE_CANDIDATES, repeat=len(ordered)):
+        for shapes in itertools.product(shape_candidates, repeat=len(ordered)):
             per_arg = dict(zip(ordered, shapes, strict=True))
             for scalar_dtype in _DTYPES:
                 args = [

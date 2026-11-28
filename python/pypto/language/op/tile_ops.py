@@ -140,6 +140,7 @@ from ._tile_linalg import matmul_bias as matmul_bias
 from ._tile_linalg import matmul_mx as matmul_mx
 from ._tile_linalg import matmul_mx_acc as matmul_mx_acc
 from ._tile_linalg import matmul_mx_bias as matmul_mx_bias
+from ._tile_linalg import quant as quant
 from ._tile_linalg import quant_mx as quant_mx
 from ._tile_linalg import quant_mx_raw as quant_mx_raw
 from ._tile_linalg import tmov_x2zz as tmov_x2zz
@@ -253,6 +254,7 @@ __all__ = [
     "abs",
     "relu",
     "cast",
+    "quant",
     "quant_mx",
     "quant_mx_raw",
     "tmov_x2zz",

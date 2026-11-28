@@ -29,10 +29,11 @@ namespace backend {
 static const bool kOpsRegistered = [] {
   RegisterSelectOps(Backend910::Instance(), BackendType::Ascend910);
   RegisterCastOps(Backend910::Instance(), BackendType::Ascend910);
-  // Only the A5 backend exposes these MX operations and row-wise dequantization.
-  RegisterPTOOps(Backend910::Instance(), {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias",
-                                          "tile.bind_scale_addr", "tile.extract_into", "tile.tget_scale_addr",
-                                          "tile.tquant_mx_raw", "tile.tmov_x2zz", "tile.dequant"});
+  // Only the A5 backend exposes these MX operations and row-wise quantization/dequantization.
+  RegisterPTOOps(Backend910::Instance(),
+                 {"tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias", "tile.bind_scale_addr",
+                  "tile.extract_into", "tile.tget_scale_addr", "tile.tquant_mx_raw", "tile.tmov_x2zz",
+                  "tile.dequant", "tile.quant"});
   return true;
 }();
 

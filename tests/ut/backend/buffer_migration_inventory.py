@@ -291,6 +291,7 @@ MIGRATION_FAMILIES = (
             "tile.matmul_mx_bias",
             "tile.bind_scale_addr",
             "tile.extract_into",
+            "tile.quant",
             "tile.tget_scale_addr",
             "tile.tquant_mx_raw",
             "tile.tmov_x2zz",
