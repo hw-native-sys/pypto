@@ -6,6 +6,10 @@ Expands `ForKind::Unroll` loops at compile time by inlining the loop body for ea
 
 This pass statically unrolls for loops created with `pl.unroll()`, replacing them with repeated copies of the loop body where the loop variable is substituted with each iteration's constant value.
 
+This also applies to tile annotations. For example, a tile declared with `pl.MemRef("buf", slots=2)[i]` inside `pl.unroll(2)` uses slot 0 in the first copy and slot 1 in the second. Both slots belong to the same allocation.
+
+If a tile declared with a loop-indexed slot is reassigned in another branch of an `if`, each assignment keeps its own slot. A read after the `if` uses the tile selected by the branch that ran.
+
 **When to use**: Runs automatically in the default pipeline before `ConvertToSSA`. Use `pl.unroll()` when the loop trip count is a compile-time constant and you want the body duplicated for each iteration.
 
 ## API

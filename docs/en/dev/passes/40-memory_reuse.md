@@ -206,6 +206,15 @@ has no static slot to attribute a tile to, so the check is skipped there — the
 the author's to get right — while isolation from every other allocation still holds. This pass owns the check because it is where lifetimes are computed
 (`AnalyzeAllocationLifetimes`); the rule matches the packer's own `var_overlap`, so *touching* is
 allowed (one tile's last read may be the statement that produces the next member).
+A tile yielded from `then` can share its slot with a tile defined in the matching `else`
+arm. After the join, a write to that slot still conflicts if the yielded value is needed later.
+Scaling buffers retain their asynchronous TPUSH lifetime.
+When a branch returns two tiles in swapped slots, the compiler uses a temporary to preserve both values.
+If a branch yields a tile and its slice, assigning the slice to another name before the yield
+preserves its offset and valid shape. Both results can share a single transfer.
+For overlapping branch results with known byte offsets, the pass sorts the destination ranges
+and sweeps them once. Even when every result overlaps every other result, the number of
+destination comparisons grows linearly with the number of results.
 Tiles that land on the allocation by inheritance rather than by binding — views, in-place
 results, bare SSA aliases — are excluded: they are the same data as their source, so
 overlapping with it is expected.

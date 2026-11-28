@@ -14,7 +14,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -37,6 +36,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -44,6 +44,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 #include "src/ir/transforms/memory_reuse/internal.h"
 #include "src/ir/transforms/memory_reuse/storage.h"
 
@@ -208,6 +209,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto result = IRMutator::VisitStmt_(op);
+    if (fixup_if_stmts_ && !canonical_branch_storage_ && !selections_) {
+      RecordBranchView(As<AssignStmt>(result));
+    }
     if (selections_ || fixup_if_stmts_) return result;
 
     // Follow semantic aliases of a repaired phi. Registered views re-derive
@@ -332,33 +336,13 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       return PatchIterArgsAndReturnVars(for_stmt, yield_stmt);
     }
 
-    // `pl.yield_` rebinds every carry simultaneously, so the copies that realize
-    // it must not observe each other's writes. Order them first.
-    std::vector<StmtPtr> spill_stmts;
-    const std::vector<size_t> order = OrderCarryCopies(&copies, carry_index, &spill_stmts);
-
-    // Build new yield values with moved vars substituted
-    std::vector<ExprPtr> new_yield_values = yield_stmt->value_;
-    for (const auto& copy : copies) {
-      new_yield_values[copy.index] = copy.moved_var;
-    }
-    auto new_yield = MutableCopy(yield_stmt);
-    new_yield->value_ = std::move(new_yield_values);
-
-    // A spill reads a carry buffer before any copy writes one, so every spill
-    // precedes every copy.
-    std::vector<StmtPtr> move_stmts = std::move(spill_stmts);
-    move_stmts.reserve(move_stmts.size() + order.size());
-    for (size_t idx : order) move_stmts.push_back(copies[idx].move_stmt);
-
-    // Insert tile.move stmts before yield and replace yield in body
-    auto new_body = InsertMovesAndReplaceYield(for_stmt->body_, new_yield, move_stmts);
+    auto new_body = InsertOrderedYieldCopies(for_stmt->body_, yield_stmt, &copies, carry_index);
 
     // Build intermediate ForStmt with new body, then patch iter_args/return_vars
     auto intermediate_for = MutableCopy(for_stmt);
     intermediate_for->body_ = new_body;
 
-    return PatchIterArgsAndReturnVars(intermediate_for, new_yield);
+    return PatchIterArgsAndReturnVars(intermediate_for, FindYieldStmt(new_body));
   }
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
@@ -399,8 +383,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     // with different MemRefs.  When they differ, insert tile.move in the
     // branch whose MemRef ≠ the canonical target (then-branch is canonical).
     bool body_changed = false;
-    std::vector<std::pair<size_t, VarPtr>> else_moves;
-    std::vector<StmtPtr> else_move_stmts;
+    std::vector<CarryCopy> else_copies;
+    std::vector<MemRefPtr> targets(if_stmt->return_vars_.size());
+    std::vector<MemRefPtr> aligned_roots(targets.size());
     std::vector<VarPtr> new_return_vars = if_stmt->return_vars_;
 
     for (size_t i = 0; i < new_return_vars.size(); ++i) {
@@ -411,9 +396,9 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // return_var is still patched onto the sibling arm's buffer -- leaving the
       // phi buffer unwritten on that path and feeding garbage into the carry.
       VarPtr then_var =
-          (then_yield && i < then_yield->value_.size()) ? AsVarLike(then_yield->value_[i]) : nullptr;
+          (then_yield && i < then_yield->value_.size()) ? BranchValue(then_yield->value_[i]) : nullptr;
       VarPtr else_var =
-          (else_yield && i < else_yield->value_.size()) ? AsVarLike(else_yield->value_[i]) : nullptr;
+          (else_yield && i < else_yield->value_.size()) ? BranchValue(else_yield->value_[i]) : nullptr;
 
       auto then_tile = then_var ? GetTileTypeWithMemRef(then_var->GetType()) : nullptr;
       auto else_tile = else_var ? GetTileTypeWithMemRef(else_var->GetType()) : nullptr;
@@ -434,10 +419,16 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       auto target_tile = then_tile ? then_tile : else_tile;
       auto target_memref = GetDefinedMemRef(target_tile);
       auto target_memory = target_tile->GetMemorySpace();
+      targets[i] = target_memref;
 
       // Check else branch: if MemRef differs from target, insert tile.move
       if (fixup_if_stmts_ && then_tile && else_tile) {
         auto else_memref = GetDefinedMemRef(else_tile);
+        const auto then_root = GetDefinedMemRef(GetTileTypeWithMemRef(BranchViewRoot(then_var)->GetType()));
+        if (SamePhysicalWindow(ProjectBranchWindow(else_var, BranchViewRoot(else_var), then_root),
+                               target_memref)) {
+          aligned_roots[i] = then_root;
+        }
         // Addresses, not allocations: an arm sitting on a sibling slot of the same
         // allocation still has to be copied into the phi's slot.
         const AddressRelation arm = CompareBaseAddress(else_memref, target_memref);
@@ -449,8 +440,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
                "both branches, or give the branches separate allocations.";
         if (arm == AddressRelation::kDifferent) {
           auto [moved_var, move_stmt] = CreateTileMove(else_var, target_memref, target_memory);
-          else_move_stmts.emplace_back(std::move(move_stmt));
-          else_moves.emplace_back(i, moved_var);
+          else_copies.push_back({i, else_var, std::move(moved_var), std::move(move_stmt), else_memref,
+                                 target_memref, target_memory});
           body_changed = true;
         }
       }
@@ -478,14 +469,67 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
     // Rebuild else body with tile.move stmts inserted before yield
     auto new_else_body = if_stmt->else_body_;
-    if (!else_moves.empty() && else_yield && if_stmt->else_body_.has_value()) {
-      std::vector<ExprPtr> new_else_yield_values = else_yield->value_;
-      for (const auto& [idx, moved_var] : else_moves) {
-        new_else_yield_values[idx] = moved_var;
+    if (new_else_body && !else_copies.empty()) {
+      const CarryRangeIndex targets_index(targets);
+      // A swap has distinct destinations but needs a temporary. Two different
+      // results assigned overlapping destinations cannot be preserved by reordering.
+      // Visit enclosing windows first, independent of tuple order. A full transfer can
+      // supply subviews; a subview transfer alone cannot supply its full tile.
+      std::stable_sort(else_copies.begin(), else_copies.end(),
+                       [](const CarryCopy& lhs, const CarryCopy& rhs) {
+                         return lhs.src_memref->size_ > rhs.src_memref->size_;
+                       });
+      const auto overlaps = targets_index.BranchOverlapWitnesses(else_copies, targets.size());
+      std::set<size_t> repeated;
+      std::map<size_t, BranchTransfer> transfers;
+      for (auto& copy : else_copies) {
+        const auto root = BranchViewRoot(copy.source);
+        const auto view = branch_views_.find(copy.source.get());
+        const auto cover = view == branch_views_.end() ? copy.source : view->second.cover;
+        for (size_t other : overlaps[copy.index]) {
+          const auto sibling = BranchValue(else_yield->value_.at(other));
+          const auto source = GetTypeMemRef(else_yield->value_[other]->GetType());
+          const bool same_windows = source && SamePhysicalWindow(*source, copy.src_memref) &&
+                                    SamePhysicalWindow(targets[other], copy.dst_memref);
+          const bool common_root =
+              sibling && root == BranchViewRoot(sibling) &&
+              GetTileTypeWithMemRef(root->GetType())->GetMemorySpace() == copy.dst_memory;
+          const bool can_rebuild =
+              common_root && copy.src_memref->size_ == copy.dst_memref->size_ &&
+              SamePhysicalWindow(ProjectBranchWindow(sibling, cover, copy.dst_memref), targets[other]);
+          // Even without an enclosing result, partial copies agree on their intersection
+          // when both branches place each view at the same offset within the paired roots.
+          const bool aligned =
+              common_root && SamePhysicalWindow(aligned_roots[copy.index], aligned_roots[other]);
+          CHECK_SPAN(same_windows || can_rebuild || aligned, if_stmt->span_)
+              << "Branch results '" << new_return_vars[copy.index]->name_hint_ << "' and '"
+              << new_return_vars[other]->name_hint_ << "' require overlapping destination slots";
+          if (repeated.count(copy.index) || repeated.count(other)) continue;
+          const bool distinct_views = sibling != copy.source;
+          CallPtr sibling_slice;
+          if (distinct_views && !can_rebuild && aligned &&
+              CompareBaseAddress(targets[other], copy.dst_memref) == AddressRelation::kSame) {
+            sibling_slice = SliceFromCoveringSibling(cover, sibling);
+          }
+          if (distinct_views ? (!can_rebuild && !sibling_slice) : !same_windows) continue;
+          auto it = transfers.try_emplace(copy.index, BranchTransfer{copy.source, {copy.index}, {}}).first;
+          if (distinct_views) it->second.source = cover;
+          if (sibling_slice) it->second.sibling_slices.emplace(sibling.get(), sibling_slice);
+          it->second.positions.push_back(other);
+          repeated.insert(other);
+        }
+        if (auto it = transfers.find(copy.index); it != transfers.end() && it->second.source != copy.source) {
+          // A narrow view may be yielded first. Transfer the full backing tile before rebuilding its views.
+          copy.source = it->second.source;
+          std::tie(copy.moved_var, copy.move_stmt) =
+              CreateTileMove(copy.source, copy.dst_memref, copy.dst_memory);
+        }
       }
-      auto new_yield = MutableCopy(else_yield);
-      new_yield->value_ = std::move(new_else_yield_values);
-      new_else_body = InsertMovesAndReplaceYield(if_stmt->else_body_.value(), new_yield, else_move_stmts);
+      else_copies.erase(std::remove_if(else_copies.begin(), else_copies.end(),
+                                       [&](const CarryCopy& copy) { return repeated.count(copy.index); }),
+                        else_copies.end());
+      new_else_body =
+          InsertOrderedYieldCopies(*new_else_body, else_yield, &else_copies, targets_index, transfers);
     }
 
     auto new_if = MutableCopy(if_stmt);
@@ -554,6 +598,164 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   bool fixup_if_stmts_ = true;
   bool canonical_branch_storage_ = false;
   std::set<const Var*> repaired_tile_aliases_;
+  struct BranchView {
+    CallPtr call;
+    VarPtr root;
+    VarPtr cover;    // highest ancestor with the same physical window
+    ExprPtr offset;  // relative to the immediate input
+  };
+  std::map<const Var*, BranchView> branch_views_;
+  std::unordered_map<const Var*, VarPtr> branch_aliases_;
+
+  struct BranchTransfer {
+    VarPtr source;
+    std::vector<size_t> positions;
+    std::map<const Var*, CallPtr> sibling_slices;
+  };
+
+  // Plain SSA renames preserve the descriptor. Resolve each chain at definition time
+  // so a yielded alias and a view taken through that alias use the same transfer.
+  VarPtr BranchValue(const ExprPtr& expr) const {
+    const auto var = AsVarLike(expr);
+    const auto it = branch_aliases_.find(var.get());
+    return it == branch_aliases_.end() ? var : it->second;
+  }
+
+  void RecordBranchView(const AssignStmtPtr& assignment) {
+    const auto tile = GetTileTypeWithMemRef(assignment->var_->GetType());
+    if (!tile) return;
+    if (const auto alias = AsVarLike(assignment->value_)) {
+      const auto parent = GetTileTypeWithMemRef(alias->GetType());
+      if (SameKnownTileMemorySpace(tile, parent) &&
+          SamePhysicalWindow(GetDefinedMemRef(tile), GetDefinedMemRef(parent)) &&
+          structural_equal(tile, parent)) {
+        branch_aliases_.emplace(assignment->var_.get(), BranchValue(alias));
+      }
+      return;
+    }
+    const auto call = As<Call>(assignment->value_);
+    if (!call || !call->op_ || call->args_.empty() ||
+        !op_predicates::IsBufferAliasingViewOp(call->op_->name_) ||
+        OpRegistry::GetInstance().GetEntry(call->op_->name_).GetExecutionMemoryAccessEvidence() !=
+            ExecutionMemoryAccessEvidence::NoAccess) {
+      return;
+    }
+    const auto input = BranchValue(call->args_.front());
+    const auto parent = input ? GetTileTypeWithMemRef(input->GetType()) : nullptr;
+    if (!SameKnownTileMemorySpace(tile, parent)) return;
+    const auto window = GetDefinedMemRef(tile);
+    const auto offset = ComputeViewByteOffset(call, parent);
+    if (!SamePhysicalWindow(window, MakeAliasingMemRef(GetDefinedMemRef(parent), offset, window->size_))) {
+      return;
+    }
+
+    // A partially valid source can supply a slice only inside its valid region.
+    const auto valid = GetValidShape(parent);
+    if (!ValidExtentsEqual(valid, parent->shape_)) {
+      const auto slice = IsOp(call, "tile.slice");
+      if (!slice && !IsOp(call, "tile.set_validshape")) return;
+      const auto view_valid = GetValidShape(tile);
+      const auto offsets = slice ? As<MakeTuple>(call->args_.at(2)) : nullptr;
+      if (view_valid.size() != valid.size() ||
+          (slice && (!offsets || offsets->elements_.size() != valid.size()))) {
+        return;
+      }
+      for (size_t i = 0; i < valid.size(); ++i) {
+        const auto end = slice ? AddByteOffsets(offsets->elements_[i], view_valid[i]) : view_valid[i];
+        if (ProveValidExtentLessEqual(end, valid[i]) != ProofResult::kTrue) return;
+      }
+    }
+    const auto it = branch_views_.find(input.get());
+    const auto cover = SamePhysicalWindow(window, GetDefinedMemRef(parent))
+                           ? (it == branch_views_.end() ? input : it->second.cover)
+                           : assignment->var_;
+    branch_views_.emplace(assignment->var_.get(), BranchView{call, BranchViewRoot(input), cover, offset});
+  }
+
+  // Project a descendant's window onto a relocated ancestor. A sibling outside that
+  // subtree cannot be reconstructed from this transfer.
+  MemRefPtr ProjectBranchWindow(const VarPtr& value, const VarPtr& ancestor, const MemRefPtr& target) const {
+    if (value == ancestor) return target;
+    const auto it = branch_views_.find(value.get());
+    if (it == branch_views_.end()) return nullptr;
+    const auto& view = it->second;
+    const auto parent = ProjectBranchWindow(BranchValue(view.call->args_.front()), ancestor, target);
+    if (!parent) return nullptr;
+    return MakeAliasingMemRef(parent, view.offset,
+                              GetDefinedMemRef(GetTileTypeWithMemRef(value->GetType()))->size_, value->span_);
+  }
+
+  VarPtr BranchViewRoot(const VarPtr& value) const {
+    const auto it = branch_views_.find(value.get());
+    return it == branch_views_.end() ? value : it->second.root;
+  }
+
+  // Two slices at the same origin may be siblings even when one contains all the
+  // other's bytes. Recreate the smaller descriptor at offset zero in the moved
+  // sibling so both results depend on one write to the declared slot.
+  CallPtr SliceFromCoveringSibling(const VarPtr& cover, const VarPtr& value) const {
+    const auto large = branch_views_.find(cover.get());
+    const auto small = branch_views_.find(value.get());
+    if (large == branch_views_.end() || small == branch_views_.end()) return nullptr;
+    const auto& outer = large->second.call;
+    const auto& inner = small->second.call;
+    if (!IsOp(outer, "tile.slice") || !IsOp(inner, "tile.slice") ||
+        BranchValue(outer->args_.front()) != BranchValue(inner->args_.front())) {
+      return nullptr;
+    }
+    const auto tile = GetTileTypeWithMemRef(cover->GetType());
+    const auto view = GetTileTypeWithMemRef(value->GetType());
+    if (outer->args_.size() > 4) {
+      const auto dropped = As<MakeTuple>(outer->args_[4]);
+      if (!dropped || !dropped->elements_.empty()) return nullptr;
+    }
+    const auto shape = As<MakeTuple>(inner->args_.at(1));
+    const auto parent = GetTileTypeWithMemRef(outer->args_.front()->GetType());
+    if (!shape || parent->shape_.size() != tile->shape_.size() ||
+        shape->elements_.size() != tile->shape_.size() ||
+        !ValidExtentsEqual(GetValidShape(tile), tile->shape_) ||
+        GetDefinedMemRef(view)->size_ > GetDefinedMemRef(tile)->size_ ||
+        CompareBaseAddress(GetDefinedMemRef(view), GetDefinedMemRef(tile)) != AddressRelation::kSame) {
+      return nullptr;
+    }
+    for (size_t i = 0; i < tile->shape_.size(); ++i) {
+      if (ProveValidExtentLessEqual(shape->elements_[i], tile->shape_[i]) != ProofResult::kTrue) {
+        return nullptr;
+      }
+    }
+    auto slice = MutableCopy(inner);
+    slice->args_[0] = cover;
+    slice->args_[2] = std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>(tile->shape_.size(), MakeZeroByteOffset()), inner->span_);
+    return slice;
+  }
+
+  // Rebuild each original descriptor from the relocated data, retaining view operands
+  // such as runtime valid extents. Cache shared prefixes and identical yield positions.
+  VarPtr RebuildBranchView(const VarPtr& value, const BranchTransfer& transfer,
+                           std::map<const Var*, VarPtr>* rebuilt, std::vector<StmtPtr>* statements) const {
+    if (auto it = rebuilt->find(value.get()); it != rebuilt->end()) {
+      return it->second;
+    }
+    const auto& original = branch_views_.at(value.get());
+    const auto sibling = transfer.sibling_slices.find(value.get());
+    const auto& call = sibling == transfer.sibling_slices.end() ? original.call : sibling->second;
+    const auto offset = sibling == transfer.sibling_slices.end() ? original.offset : MakeZeroByteOffset();
+    auto args = call->args_;
+    const auto parent = RebuildBranchView(BranchValue(args.front()), transfer, rebuilt, statements);
+    args.front() = parent;
+    const auto size = GetDefinedMemRef(GetTileTypeWithMemRef(value->GetType()))->size_;
+    const auto window = MakeAliasingMemRef(GetDefinedMemRef(GetTileTypeWithMemRef(parent->GetType())), offset,
+                                           size, value->span_);
+    const auto type = CloneTypeWithMemRef(value->GetType(), window);
+    const auto view = std::make_shared<Var>(value->name_hint_ + "_mv_view", type, value->span_);
+    const auto expr =
+        std::make_shared<Call>(call->op_, std::move(args), call->kwargs_, call->attrs_, type, call->span_);
+    statements->push_back(std::make_shared<AssignStmt>(view, expr, value->span_));
+    rebuilt->emplace(value.get(), view);
+    return view;
+  }
+
   StorageNameSupply names_;
 
   // The enabled pipeline establishes each phi's target before planning. Never
@@ -687,8 +889,11 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       }
       for (auto& [base, entries] : positioned_) {
         static_cast<void>(base);
-        std::sort(entries.begin(), entries.end(),
-                  [](const Entry& a, const Entry& b) { return a.begin < b.begin; });
+        std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+          if (a.begin != b.begin) return a.begin < b.begin;
+          if (a.end != b.end) return a.end > b.end;
+          return a.index < b.index;
+        });
         auto& maxima = prefix_end_[base];
         for (const auto& entry : entries) {
           maxima.push_back(maxima.empty() ? entry.end : std::max(maxima.back(), entry.end));
@@ -730,15 +935,59 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       }
       const int64_t begin = offset->value_;
       const int64_t end = RangeEnd(begin, query->size_, query->span_);
-      // Entries are sorted by start, so the first candidate is the first one
-      // starting at or after `begin`, less the single earlier one that may still
-      // cover `begin`.
-      auto it = std::lower_bound(entries.begin(), entries.end(), begin,
-                                 [](const Entry& entry, int64_t value) { return entry.begin < value; });
-      if (it != entries.begin() && std::prev(it)->end > begin) --it;
+      // Branch results can repeat a destination. Start at the first prefix
+      // extending past begin so every overlapping writer is visited.
+      const auto& maxima = prefix_end_.at(base);
+      auto first = std::upper_bound(maxima.begin(), maxima.end(), begin);
+      auto it = entries.begin() + (first - maxima.begin());
       for (; it != entries.end() && it->begin < end; ++it) {
         if (it->end > begin) fn(it->index);
       }
+    }
+
+    // In increasing start order, the previous interval ending furthest right covers
+    // every byte the next interval shares with earlier results. Checking that witness
+    // extends agreement on those bytes to the whole component. Keep the furthest writer
+    // as well: two stationary results need no check, but a write must agree with both.
+    // At a shared start, the widest result gets the first chance to supply a sibling view.
+    [[nodiscard]] std::vector<std::vector<size_t>> BranchOverlapWitnesses(
+        const std::vector<CarryCopy>& copies, size_t count) const {
+      std::vector<size_t> rank(count, copies.size());
+      for (size_t i = 0; i < copies.size(); ++i) rank[copies[i].index] = i;
+      std::vector<std::vector<size_t>> overlaps(count);
+      auto record = [&](size_t a, size_t b) {
+        if (rank[b] < rank[a]) std::swap(a, b);
+        if (a != b && rank[a] < copies.size()) overlaps[a].push_back(b);
+      };
+      for (const auto& [base, entries] : positioned_) {
+        const Entry* frontier = nullptr;
+        const Entry* writer = nullptr;
+        const Entry* same_start = nullptr;
+        for (const auto& entry : entries) {
+          if (entry.end <= entry.begin) continue;
+          if (!same_start || entry.begin != same_start->begin) same_start = &entry;
+          if (same_start != &entry) record(same_start->index, entry.index);
+          if (frontier && frontier != same_start && frontier->end > entry.begin) {
+            record(frontier->index, entry.index);
+          }
+          if (writer && writer != frontier && writer != same_start && writer->end > entry.begin) {
+            record(writer->index, entry.index);
+          }
+          if (!frontier || entry.end > frontier->end) frontier = &entry;
+          if (rank[entry.index] < copies.size() && (!writer || entry.end > writer->end)) writer = &entry;
+        }
+      }
+      // An unknown offset can touch the whole allocation. Anchor its component on a
+      // writer when available, and still check the concrete intervals among themselves.
+      for (const auto& [base, loose] : unpositioned_) {
+        const auto anchor = *std::min_element(loose.begin(), loose.end(),
+                                              [&](size_t a, size_t b) { return rank[a] < rank[b]; });
+        for (size_t i : loose) record(anchor, i);
+        if (auto it = positioned_.find(base); it != positioned_.end()) {
+          for (const auto& entry : it->second) record(anchor, entry.index);
+        }
+      }
+      return overlaps;
     }
 
     /// Every pair of indexed ranges that overlaps, as (lower index, higher index).
@@ -791,6 +1040,31 @@ class YieldFixupMutator : public StorageBoundaryMutator {
     std::map<const Var*, std::vector<int64_t>> prefix_end_;
     std::map<const Var*, std::vector<size_t>> unpositioned_;
   };
+
+  // An if result tuple and a loop carry tuple both transfer simultaneously.
+  // Snapshot cycle victims before any write, then emit copies in dependency order.
+  StmtPtr InsertOrderedYieldCopies(const StmtPtr& body, const YieldStmtPtr& yield,
+                                   std::vector<CarryCopy>* copies, const CarryRangeIndex& destinations,
+                                   const std::map<size_t, BranchTransfer>& transfers = {}) {
+    std::vector<StmtPtr> moves;
+    const auto order = OrderCarryCopies(copies, destinations, &moves);
+    auto new_yield = MutableCopy(yield);
+    for (size_t idx : order) {
+      const auto& copy = (*copies)[idx];
+      new_yield->value_[copy.index] = copy.moved_var;
+      moves.push_back(copy.move_stmt);
+    }
+    for (const auto& copy : *copies) {
+      const auto it = transfers.find(copy.index);
+      if (it == transfers.end()) continue;
+      std::map<const Var*, VarPtr> rebuilt{{it->second.source.get(), copy.moved_var}};
+      for (size_t position : it->second.positions) {
+        new_yield->value_[position] =
+            RebuildBranchView(BranchValue(yield->value_[position]), it->second, &rebuilt, &moves);
+      }
+    }
+    return InsertMovesAndReplaceYield(body, new_yield, moves);
+  }
 
   /// The byte range each carry owns, indexed by iter_arg position (null when the
   /// carry is not a tile with a MemRef).

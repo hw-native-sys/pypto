@@ -27,6 +27,7 @@ import re
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserTypeError
 
@@ -102,6 +103,38 @@ def _run_full_pipeline(program: ir.Program, last_pass: str) -> ir.Program:
         pipeline.add_pass(pass_obj)
         program = pipeline.run(program)
     return program
+
+
+def _branch_slice_program(windows: list[tuple[int, int, int]]) -> ir.Program:
+    """Yield slices described by (width, then offset, else offset) from two slots."""
+    cols = max(max(then_col, else_col) + width for width, then_col, else_col in windows)
+    names = ", ".join(f"r{i}" for i in range(len(windows)))
+    lines = [
+        "import pypto.language as pl",
+        'buf = pl.MemRef("buf", slots=2)',
+        "@pl.program",
+        "class BranchSlices:",
+        "    @pl.function(type=pl.FunctionType.InCore)",
+        f"    def main(self, x: pl.Tensor[[2, {cols}], pl.FP32], flag: pl.Scalar[pl.INT32],",
+        f"             out: pl.Out[pl.Tensor[[{len(windows)}, {cols}], pl.FP32]])"
+        f" -> pl.Tensor[[{len(windows)}, {cols}], pl.FP32]:",
+    ]
+    for slot, (arm, condition) in enumerate((("a", "if flag > 0:"), ("b", "else:"))):
+        lines.extend(
+            (
+                f"        {condition}",
+                f"            {arm}: pl.Tile[[1, {cols}], pl.FP32, buf[{slot}], pl.Mem.Vec]"
+                f" = pl.load(x, [{slot}, 0], [1, {cols}])",
+            )
+        )
+        for i, (width, then_col, else_col) in enumerate(windows):
+            offset = (then_col, else_col)[slot]
+            lines.append(f"            {arm}{i} = pl.tile.slice({arm}, [1, {width}], [0, {offset}])")
+        views = ", ".join(f"{arm}{i}" for i in range(len(windows)))
+        lines.append(f"            {names} = pl.yield_({views})")
+    lines.extend(f"        out = pl.store(r{i}, [{i}, 0], out)" for i in range(len(windows)))
+    lines.append("        return out")
+    return pl.parse_program("\n".join(lines))
 
 
 def _run_dsa_rp_pipeline(program: ir.Program) -> ir.Program:
@@ -815,6 +848,287 @@ class TestSlots:
         # Each MemRef spans its OWN slot, so [offset, offset + size_) stays inside
         # the allocation and the two slots do not overlap for MayAlias.
         assert memrefs["t0"].size_ == memrefs["t1"].size_ == slot_size
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_branches_use_the_same_two_slots_in_reverse_order(self, planner, tmp_path):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    t: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    pl.store(a, [1, 0], out)
+                    chosen = pl.yield_(t)
+                else:
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    u: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    pl.store(b, [1, 0], out)
+                    chosen = pl.yield_(u)
+                return pl.store(chosen, [0, 0], out)
+
+        with passes.PassContext([], memory_planner=planner):
+            ir.compile(Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True)
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_reuse_after_nested_branch_waits_for_joined_tile(self, planner, tmp_path):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    if flag > 1:
+                        keep: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                        inner = pl.yield_(keep)
+                    else:
+                        tmp: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                        inner = pl.yield_(tmp)
+                    chosen = pl.yield_(inner)
+                else:
+                    sibling: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    other: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    pl.store(sibling, [1, 0], out)
+                    chosen = pl.yield_(other)
+                overwrite: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                out = pl.store(overwrite, [1, 0], out)
+                return pl.store(chosen, [0, 0], out)
+
+        # Both planners must identify the write after the join. DSA-RP can report
+        # the copy into the result slot as the tile that write would clobber.
+        with pytest.raises(ValueError, match="and 'overwrite[^']*'.*live at the same time"):
+            with passes.PassContext([], memory_planner=planner):
+                ir.compile(
+                    Before, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), skip_ptoas=True
+                )
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_two_yielded_tiles_can_swap_declared_slots(self, planner, ascend_backend):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[4, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[3, 64], pl.FP32]],
+            ) -> pl.Tensor[[3, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    first, second, repeated = pl.yield_(a, b, a)
+                else:
+                    c: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [2, 0], [1, 64])
+                    d: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [3, 0], [1, 64])
+                    first, second, repeated = pl.yield_(c, d, c)
+                out = pl.store(first, [0, 0], out)
+                out = pl.store(second, [1, 0], out)
+                return pl.store(repeated, [2, 0], out)
+
+        with passes.PassContext([], memory_planner=planner):
+            after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+
+        def address(var):
+            return _const_offset(var.type.memref)
+
+        # Replay writes at their allocated byte addresses. Two sequential moves
+        # around a swap lose the second source, even though the program compiles.
+        contents = {}
+        for stmt in ir.flatten_to_stmts(branch.else_body):
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+                if stmt.value.op.name == ir.get_op("tile.load").name:
+                    offsets = stmt.value.args[1]
+                    assert isinstance(offsets, ir.MakeTuple) and isinstance(offsets.elements[0], ir.ConstInt)
+                    contents[address(stmt.var)] = offsets.elements[0].value
+                elif stmt.value.op.name == ir.get_op("tile.move").name:
+                    contents[address(stmt.var)] = contents[address(stmt.value.args[0])]
+        assert [contents[address(var)] for var in branch.return_vars] == [2, 3, 2]
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    @pytest.mark.parametrize(
+        ("source_cols", "view_cols", "then_col", "else_col"),
+        [(48, 64, 0, 0), (64, 64, 0, 0), (64, 32, 0, 0), (64, 32, 32, 32), (48, 32, 16, 16), (64, 32, 0, 32)],
+    )
+    def test_branch_transfer_preserves_each_yielded_view(
+        self, planner, source_cols, view_cols, then_col, else_col, ascend_backend
+    ):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[3, 64], pl.FP32]],
+            ) -> pl.Tensor[[3, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(
+                        x, [0, 0], [1, 64], valid_shape=[1, source_cols]
+                    )
+                    av = pl.tile.slice(a, [1, view_cols], [0, then_col], valid_shape=[1, 32])
+                    av_alias = av
+                    small, full, again = pl.yield_(av, a, av_alias)
+                else:
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(
+                        x, [1, 0], [1, 64], valid_shape=[1, source_cols]
+                    )
+                    bv = pl.tile.slice(b, [1, view_cols], [0, else_col], valid_shape=[1, 32])
+                    bv_alias = bv
+                    bv_again = bv_alias
+                    small, full, again = pl.yield_(bv_again, b, bv)
+                out = pl.store(small, [0, 0], out)
+                out = pl.store(full, [1, 0], out)
+                return pl.store(again, [2, 0], out)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            if then_col != else_col:
+                # Preserving the full tile and simultaneously overwriting its first half is impossible.
+                with pytest.raises(ValueError, match="require overlapping destination slots"):
+                    _run_full_pipeline(Before, "AllocateMemoryAddr")
+                return
+            after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+        stmts = ir.flatten_to_stmts(branch.else_body)
+        moves = [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.move").name
+        ]
+        (move,) = moves
+
+        def descriptor(var: ir.Expr) -> tuple[int, int]:
+            tile = var.type
+            assert isinstance(tile, ir.TileType) and tile.memref is not None
+            view = tile.tile_view
+            shape = view.valid_shape if view and view.valid_shape else tile.shape
+            cols = shape[-1]
+            assert isinstance(cols, ir.ConstInt)
+            return cols.value, _const_offset(tile.memref)
+
+        assert isinstance(move.value, ir.Call)
+        read_cols, src = descriptor(move.value.args[0])
+        write_cols, dst = descriptor(move.var)
+        assert read_cols == write_cols == source_cols and src != dst
+        result = next(s for s in stmts if isinstance(s, ir.YieldStmt))
+        slice_dst = dst + then_col * 4
+        assert [descriptor(var) for var in result.value] == [
+            (32, slice_dst),
+            (source_cols, dst),
+            (32, slice_dst),
+        ]
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    def test_branch_yields_only_covering_sibling_slices(self, planner, ascend_backend):
+        buf = pl.MemRef("buf", slots=2)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                x: pl.Tensor[[2, 64], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out: pl.Out[pl.Tensor[[2, 64], pl.FP32]],
+            ) -> pl.Tensor[[2, 64], pl.FP32]:
+                if flag > 0:
+                    a: pl.Tile[[1, 64], pl.FP32, buf[0], pl.Mem.Vec] = pl.load(x, [0, 0], [1, 64])
+                    a16 = pl.tile.slice(a, [1, 16], [0, 16])
+                    a32 = pl.tile.slice(a, [1, 32], [0, 16])
+                    short, wide = pl.yield_(a16, a32)
+                else:
+                    b: pl.Tile[[1, 64], pl.FP32, buf[1], pl.Mem.Vec] = pl.load(x, [1, 0], [1, 64])
+                    b_parent = b
+                    b16 = pl.tile.slice(b_parent, [1, 16], [0, 16])
+                    b32 = pl.tile.slice(b, [1, 32], [0, 16])
+                    short, wide = pl.yield_(b16, b32)
+                out = pl.store(short, [0, 0], out)
+                return pl.store(wide, [1, 0], out)
+
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            after = _run_full_pipeline(Before, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+        stmts = ir.flatten_to_stmts(branch.else_body)
+        (move,) = [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.move").name
+        ]
+        result = next(s for s in stmts if isinstance(s, ir.YieldStmt))
+
+        def window(var: ir.Expr) -> tuple[int, int]:
+            assert isinstance(var.type, ir.TileType) and var.type.memref is not None
+            return _const_offset(var.type.memref), var.type.memref.size_
+
+        # Transferring the 64-column parent would also write bytes outside both results.
+        assert window(move.var) == (16 * 4, 32 * 4)
+        assert [window(var) for var in result.value] == [(16 * 4, 16 * 4), (16 * 4, 32 * 4)]
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    @pytest.mark.parametrize(
+        ("windows", "expected_moves"),
+        [
+            pytest.param([(256, i * 8, i * 8) for i in range(32)], 32, id="dense"),
+            # A longer, earlier range must not hide the two siblings that can share a transfer.
+            pytest.param([(96, 8, 8), (32, 24, 24), (16, 24, 24)], 2, id="same-origin-siblings"),
+            # The last slice misses its immediate predecessor but conflicts with the first one.
+            pytest.param([(128, 0, 0), (8, 8, 8), (16, 48, 64)], None, id="hidden-conflict"),
+        ],
+    )
+    def test_shifted_branch_slice_overlaps(self, planner, windows, expected_moves, ascend_backend):
+        program = _branch_slice_program(windows)
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            if expected_moves is None:
+                with pytest.raises(ValueError, match="require overlapping destination slots"):
+                    _run_full_pipeline(program, "AllocateMemoryAddr")
+                return
+            after = _run_full_pipeline(program, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+        stmts = ir.flatten_to_stmts(branch.else_body)
+        moves = [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.move").name
+        ]
+        assert len(moves) == expected_moves
+        for var, (width, col, _) in zip(branch.return_vars, windows, strict=True):
+            assert isinstance(var.type, ir.TileType) and var.type.memref is not None
+            assert (_const_offset(var.type.memref), var.type.memref.size_) == (col * 4, width * 4)
 
     def test_slot_size_is_the_largest_tile_on_any_slot(self):
         """Slots are uniform, so one slot must hold the biggest bound tile.

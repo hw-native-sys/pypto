@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string>
@@ -84,6 +85,7 @@ class LifetimeAnalyzer : public IRVisitor {
     // var may belong to several families (e.g. a source yielded at >1 slot)
     // without those families merging, so we store a *set* of ids per var.
     std::map<const Var*, std::set<int>> phi_family_ids;
+    std::vector<int> else_first_offsets;
   };
 
   Result Analyze(const StmtPtr& func_body, const std::vector<VarPtr>& entry_vars = {}) {
@@ -112,8 +114,9 @@ class LifetimeAnalyzer : public IRVisitor {
     // Phase 2: Apply loop-aware lifetime extension
     auto effective_last_use = ComputeEffectiveLastUse();
 
-    return {std::move(ordered_defs_), std::move(var_def_order_), std::move(effective_last_use),
-            std::move(var_def_stmt_), std::move(var_family_ids_)};
+    std::partial_sum(branch_deltas_.begin(), branch_deltas_.end(), branch_deltas_.begin());
+    return {std::move(ordered_defs_), std::move(var_def_order_),  std::move(effective_last_use),
+            std::move(var_def_stmt_), std::move(var_family_ids_), std::move(branch_deltas_)};
   }
 
  protected:
@@ -193,6 +196,15 @@ class LifetimeAnalyzer : public IRVisitor {
       else_start = current_order_;
       VisitStmt(*op->else_body_);
       else_end = current_order_ - 1;
+      // Swapping the arms shifts each then point by the else length and each
+      // else point back by the then length. Range updates compose for nested
+      // branches; the prefix sum in Analyze recovers all offsets in one pass.
+      const int then_size = else_start - then_start;
+      const int else_size = current_order_ - else_start;
+      branch_deltas_.resize(current_order_ + 1);
+      branch_deltas_[then_start] += else_size;
+      branch_deltas_[else_start] -= then_size + else_size;
+      branch_deltas_[current_order_] += then_size;
     }
 
     // An scf.if return_var (phi) is NOT itself a tracked def -- it is materialized
@@ -296,6 +308,7 @@ class LifetimeAnalyzer : public IRVisitor {
   // Per-slot phi families: var -> set of family ids (see VisitStmt_(IfStmtPtr)).
   std::map<const Var*, std::set<int>> var_family_ids_;
   int next_family_id_ = 0;
+  std::vector<int> branch_deltas_;
 
   // scf.if phi return_var -> its branch-local yield-sources, so RecordRawUse can
   // redirect phi reads onto the tiles that actually hold the value.
@@ -601,7 +614,8 @@ LifetimeAnalysisResult AnalyzeAllocationLifetimesImpl(const StmtPtr& func_body,
           std::move(var_liveness),
           std::move(pipeline_membership),
           std::move(pipeline_load_tiles),
-          std::move(subrange_unsafe_groups)};
+          std::move(subrange_unsafe_groups),
+          std::move(result.else_first_offsets)};
 }
 
 }  // namespace
