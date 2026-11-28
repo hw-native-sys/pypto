@@ -66,6 +66,7 @@ class ParseCallbacks:
     """
 
     expression: Callable[[ast.expr], ir.Expr]
+    can_fold_expr: Callable[[ast.expr], bool]
     statement: Callable[[ast.stmt], None]
     body: Callable[[Sequence[ast.stmt]], None]
     assign: AssignCallback

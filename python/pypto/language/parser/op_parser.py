@@ -570,7 +570,11 @@ class OpParser:
         return constant.value
 
     def parse_op_kwargs(
-        self, call: ast.Call, *, expression_keywords: frozenset[str] = frozenset()
+        self,
+        call: ast.Call,
+        *,
+        expression_keywords: frozenset[str] = frozenset(),
+        inferred_operand: str | None = None,
     ) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
@@ -579,6 +583,7 @@ class OpParser:
         Args:
             call: Call AST node
             expression_keywords: Operand names that use positional expression parsing.
+            inferred_operand: Operand whose wrapper infers the dtype of Python constants.
 
         Returns:
             Dictionary of keyword argument names to values
@@ -605,21 +610,35 @@ class OpParser:
                 kwargs[key] = self.callbacks.expression(value)
             elif key == "dtype":
                 kwargs[key] = self.services.type_resolver.resolve_dtype(value)
-            elif (dumped_float := self.parse_dump_float_arg(value)) is not None:
-                kwargs[key] = dumped_float
-            elif isinstance(value, ast.Constant):
-                kwargs[key] = value.value
-            elif isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
-                kwargs[key] = self.resolve_unary_kwarg(value)
-            elif isinstance(value, ast.Name):
-                kwargs[key] = self.resolve_name_kwarg(value)
-            elif isinstance(value, ast.Attribute):
-                kwargs[key] = self.resolve_attribute_kwarg(value)
-            elif isinstance(value, ast.List):
-                kwargs[key] = self.resolve_list_kwarg(value)
             else:
-                kwargs[key] = self.callbacks.expression(value)
+                kwargs[key] = self.parse_op_value(value, infer_dtype=key == inferred_operand)
         return kwargs
+
+    def parse_op_value(self, value: ast.expr, *, infer_dtype: bool = False) -> Any:
+        """Preserve Python literals and captured values until the wrapper selects an operand dtype."""
+        if (dumped_float := self.parse_dump_float_arg(value)) is not None:
+            return dumped_float
+        if isinstance(value, ast.Constant):
+            return value.value
+        if (
+            infer_dtype
+            and isinstance(value, (ast.BinOp, ast.UnaryOp))
+            and self.callbacks.can_fold_expr(value)
+        ):
+            # Keep closure arithmetic in Python until the wrapper knows the source dtype.
+            # The expression parser applies the same scope check before folding into IR.
+            success, folded = self.services.expr_evaluator.try_eval_expr(value)
+            if success:
+                return folded
+        if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+            return self.resolve_unary_kwarg(value)
+        if isinstance(value, ast.Name):
+            return self.resolve_name_kwarg(value)
+        if isinstance(value, ast.Attribute):
+            return self.resolve_attribute_kwarg(value)
+        if isinstance(value, ast.List):
+            return self.resolve_list_kwarg(value)
+        return self.callbacks.expression(value)
 
     def resolve_unary_kwarg(self, value: ast.UnaryOp) -> Any:
         """Resolve a unary op kwarg value (e.g., -1)."""
@@ -758,13 +777,22 @@ class OpParser:
         # own literal dtype, so keep the two argument contracts explicit.
         # Mixed signatures such as ftof(value, dtype) need typed value operands
         # while retaining dtype/enum resolution in their other positional slots.
-        args = [
-            self.callbacks.expression(arg)
-            if expression_args or index in expression_arg_indices
-            else self.parse_op_positional_arg(arg)
-            for index, arg in enumerate(call.args)
-        ]
-        kwargs = self.parse_op_kwargs(call, expression_keywords=expression_keywords)
+        args: list[object] = []
+        is_tensor_gather_compare = module is _dsl_tensor and op_name == "gather_compare"
+        for index, arg in enumerate(call.args):
+            if expression_args or index in expression_arg_indices:
+                args.append(self.callbacks.expression(arg))
+            elif is_tensor_gather_compare and index == 1:
+                # The source sets the dtype for Python thresholds, including captured integers.
+                # Use the same rules as kvalue= so explicitly typed IR values retain their dtype.
+                args.append(self.parse_op_value(arg, infer_dtype=True))
+            else:
+                args.append(self.parse_op_positional_arg(arg))
+        kwargs = self.parse_op_kwargs(
+            call,
+            expression_keywords=expression_keywords,
+            inferred_operand="kvalue" if is_tensor_gather_compare else None,
+        )
         attrs = self.attrs.parse_op_attrs(call)
         op_func = getattr(module, op_name)
         span = self.services.span_tracker.get_span(call)
@@ -845,7 +873,7 @@ class OpParser:
             if folded is not None:
                 return folded
         # Prefer the DSL wrapper (owns type-checking + dispatch); fall back to
-        # the IR-builder layer for pass-internal ops like ``gather_mask``
+        # the IR-builder layer for pass-internal ops
         # that are emitted by the printer but have no DSL wrapper.
         if hasattr(_dsl_tensor, op_name):
             return self.dispatch_op(_dsl_tensor, "pl.tensor", op_name, call)

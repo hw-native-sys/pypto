@@ -166,6 +166,7 @@ class ASTParser:
         )
         self.callbacks = ParseCallbacks(
             self.parse_expression,
+            self._can_fold_expr,
             self.parse_statement,
             self._parse_body_siblings,
             self._assign_or_let,

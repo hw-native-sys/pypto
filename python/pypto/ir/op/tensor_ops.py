@@ -2409,14 +2409,7 @@ def gather_mask(
     output_dtype: int | DataType | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Parser-roundtrip entry for the mask form (printed op name ``tensor.gather_mask``).
-
-    The tensor DSL layer only exposes the unified ``gather``; this IR-builder
-    function exists so that round-trip parsing of printed ``pl.tensor.gather_mask(...)``
-    calls (which never happen in user code, but can appear in pass dumps) still
-    works via ``_dispatch_ir_builder_op``. Prefer ``gather(input, mask_pattern=...)``
-    in user code.
-    """
+    """Build a ``tensor.gather_mask`` call for fixed-pattern column selection."""
     return gather(input, mask_pattern=mask_pattern, output_dtype=output_dtype, span=span)
 
 
@@ -2430,14 +2423,7 @@ def gather_compare(
     count_dtype: int | DataType | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Parser-roundtrip entry for the compare form (printed op name ``tensor.gather_compare``).
-
-    The tensor DSL layer only exposes the unified ``gather``; this IR-builder
-    function exists so that round-trip parsing of printed ``pl.tensor.gather_compare(...)``
-    calls (which never happen in user code, but can appear in pass dumps) still
-    works via ``_dispatch_ir_builder_op``. Prefer
-    ``gather(input, kvalue=..., cmp_mode=..., out_cols=...)`` in user code.
-    """
+    """Build a ``tensor.gather_compare`` call returning indices and per-row counts."""
     return gather(
         input,
         kvalue=kvalue,
