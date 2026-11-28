@@ -147,31 +147,58 @@ nbytes = 256 * pl.FP32.get_byte()          # 1024, not 256
 输入；暂不支持 E1M2 量化。Tensor `pl.matmul_mx` 支持打包的 E2M1 和 E1M2 数据。两种格式均不支持 Ascend910/A2A3 执行。
 布局、别名与内存规划器限制见 [FP4](../../dev/fp4.md)。
 
-### 标量绑定的类型注解
+### 声明的标量 dtype 会做转换
 
-标量算术会把操作数统一归一到 `pl.INDEX`，所以即使输入不是 `INDEX`，结果也是：
-
-```python
-v = pl.cast(i, pl.INT32) + 1                        # pl.Scalar[pl.INDEX]
-```
-
-注解决定这个名字绑定时的 dtype，值会被转换过去与之匹配——赋值两侧始终一致：
+声明的标量 dtype 就是这个位置的类型。凡是声明它的地方——绑定注解、参数、入口槽位——
+放进去的值都必须是这个 dtype；如果只在宽度上不同，整数会被转换，而不是被拒绝：
 
 ```python
-v: pl.Scalar[pl.INT32] = pl.cast(i, pl.INT32) + 1   # 绑定 INT32；cast 由解析器补上
+v: pl.Scalar[pl.INT32] = pl.cast(i, pl.INT32) + 1   # 绑定 INT32；cast 由编译器补上
 v: pl.Scalar[pl.INDEX] = pl.cast(i, pl.INT32) + 1   # 绑定 INDEX；无需转换
 ```
 
-注解要写成你希望这个值被*存储*的 dtype：更窄的注解做的是转换，不是重解释。
-
-返回 INDEX 的调用也遵循相同规则，包括 `pl.tile.get_block_idx()`：
+标量算术会把操作数统一归一到 `pl.INDEX`，所以多数整数表达式都以 `INDEX` 到达，
+即使其输入不是：
 
 ```python
-v: pl.Scalar[pl.INT32] = pl.tile.get_block_idx()    # converts the INDEX result to INT32
+v = pl.cast(i, pl.INT32) + 1                        # pl.Scalar[pl.INDEX]
+v: pl.Scalar[pl.INT32] = pl.tile.get_block_idx()    # 返回的 INDEX 会转换成 INT32
 ```
 
-这种兼容性仅适用于整数/INDEX 类型对。对 INDEX 表达式使用 FP32 注解会被拒绝；
-浮点转换需要显式使用 `pl.cast`。
+调用位置遵循同一规则，这里更要紧，因为声明属于别人的签名：
+
+```python
+@pl.function
+def layer(self, ..., layer_idx: pl.Scalar[pl.INT32]):
+    ...
+
+for r in pl.range(n):
+    self.layer(..., r)          # r 是 INDEX；调用处完成转换，并打印为
+                                # _layer_idx_int32 = pl.cast(r, pl.INT32)
+```
+
+被调函数的签名只由它的声明决定，绝不由实参决定，因此一个 kernel 服务所有整数调用方。
+转换是可见的：打印出的 IR 里有一个临时量，你自己写 `pl.cast` 同样合法、幂等，打印结果相同。
+
+**哪些会转换。** 恰好是 `pl.INDEX` 在一端、固定宽度整数（`INT8`/`INT16`/`INT32`/`INT64`、
+`UINT8`/`UINT16`/`UINT32`/`UINT64`）在另一端的组合，方向不限。取值按回绕（wrap）转换，
+不是饱和：这个转换改变的是被调方如何读取该值，属于“放置”，不是带模式参数的数值请求。
+
+**哪些不转换。** 两个固定宽度 dtype 之间（`INT32` 传给 `UINT32` 参数）会被拒绝：
+语言没有为它们规定符号或宽度策略，这类转换必须显式书写。浮点、`pl.BOOL`、`pl.TASK_ID`、
+打包的 `pl.fp4e2m1x2` / `pl.fp4e1m2x2` 以及 4-bit 存储 dtype 同样拒绝——需要转换就写
+`pl.cast`。张量、tile 实参永远不会转成标量，也不会跨 dtype、shape 或布局转换。
+
+**Python 整数只检查，不转换。** 裸 int 不携带 dtype，所以声明必须能容纳它：超出声明范围的
+值会被拒绝，错误信息给出槽位和范围。而*带类型*的值方向相反，因为你已经声明了它的宽度：
+
+```python
+f(2**31)                        # 被拒绝：超出 pl.Scalar[pl.INT32]
+f(pl.const(2**31, pl.INDEX))    # 转换（回绕）进 INT32 槽位
+```
+
+该检查在每次派发时执行，不只在编译产物生成时执行：标量值从不参与编译产物缓存键，
+因此缓存命中同样会重新检查新值。
 
 ### 容器类型
 

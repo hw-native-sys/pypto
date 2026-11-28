@@ -173,34 +173,69 @@ quantization remains unsupported. Tensor `pl.matmul_mx` accepts packed E2M1 and 
 Ascend910/A2A3 execution remains unsupported for both formats. See
 [FP4](../../dev/fp4.md) for layout, alias, and memory-planner constraints.
 
-### Annotating a scalar binding
+### Declared scalar dtypes convert
 
-Scalar arithmetic normalizes its operands to `pl.INDEX`, so the result is
-`INDEX`-typed even when the inputs were not:
-
-```python
-v = pl.cast(i, pl.INT32) + 1                        # pl.Scalar[pl.INDEX]
-```
-
-An annotation decides the dtype the name is bound at, and the value is converted
-to match it — so the two sides of the assignment always agree:
+A declared scalar dtype is the type of its slot. Every position that declares one
+— a binding annotation, a parameter, an entry slot — holds a value of that dtype,
+and an integer value that differs only in width is converted rather than refused:
 
 ```python
 v: pl.Scalar[pl.INT32] = pl.cast(i, pl.INT32) + 1   # binds INT32; the cast is inserted for you
 v: pl.Scalar[pl.INDEX] = pl.cast(i, pl.INT32) + 1   # binds INDEX; nothing to convert
 ```
 
-Annotate the dtype you want the value *stored* at: a narrower annotation converts
-the value, it does not reinterpret it.
-
-INDEX-returning calls follow the same rule, including `pl.tile.get_block_idx()`:
+Scalar arithmetic normalizes its operands to `pl.INDEX`, so most integer
+expressions arrive as `INDEX` even when their inputs were not:
 
 ```python
-v: pl.Scalar[pl.INT32] = pl.tile.get_block_idx()    # converts the INDEX result to INT32
+v = pl.cast(i, pl.INT32) + 1                        # pl.Scalar[pl.INDEX]
+v: pl.Scalar[pl.INT32] = pl.tile.get_block_idx()    # the INDEX result converts to INT32
 ```
 
-This compatibility applies only to integer/INDEX pairs. An FP32 annotation on an
-INDEX expression is rejected; use an explicit `pl.cast` for a float conversion.
+The same rule holds at a call, which is the case that matters because the
+declaration belongs to someone else's signature:
+
+```python
+@pl.function
+def layer(self, ..., layer_idx: pl.Scalar[pl.INT32]):
+    ...
+
+for r in pl.range(n):
+    self.layer(..., r)          # r is INDEX; the call converts it, and prints
+                                # _layer_idx_int32 = pl.cast(r, pl.INT32)
+```
+
+The callee's signature is its declaration, never the argument's, so one kernel
+serves every integer caller. The conversion is visible: printed IR shows the
+temporary, and writing `pl.cast` yourself is legal, idempotent, and prints the
+same way.
+
+**What converts.** Exactly the pairs with `pl.INDEX` on one end and a fixed-width
+integer (`INT8`/`INT16`/`INT32`/`INT64`, `UINT8`/`UINT16`/`UINT32`/`UINT64`) on
+the other, in either direction. Values convert by wrapping, not by saturating —
+the conversion changes how the callee reads the value, so it is a placement, not
+a numerical request with a mode.
+
+**What does not.** Two fixed-width dtypes (`INT32` into a `UINT32` parameter)
+are refused: the language states no signedness or width policy between them, so
+their conversion stays explicit. Floats, `pl.BOOL`, `pl.TASK_ID`, packed
+`pl.fp4e2m1x2` / `pl.fp4e1m2x2`, and the 4-bit storage dtypes are refused too —
+use `pl.cast` for the conversion you mean. Tensor and tile arguments never
+convert into scalars or across dtypes, shapes or layouts.
+
+**A Python integer is checked, not converted.** A bare int carries no dtype, so
+the declaration must be able to hold it: a value outside the declared range is
+rejected, naming the slot and the range. A *typed* value goes the other way,
+because you already stated its width:
+
+```python
+f(2**31)                        # rejected: outside pl.Scalar[pl.INT32]
+f(pl.const(2**31, pl.INDEX))    # converted (wraps) into the INT32 slot
+```
+
+The check runs on every dispatch, not only when an artifact is compiled: a scalar
+value never splits the compiled artifact, so a cached artifact receiving a new
+value re-checks it.
 
 ### Container types
 
