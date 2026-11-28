@@ -488,7 +488,11 @@ def test_ptoas_conditional_dynamic_view_is_not_redeclared_as_allocation():
 
         def visit_assign_stmt(self, op):
             result = super().visit_assign_stmt(op)
-            if not isinstance(result.value, ir.Call) or result.value.op.name != "tile.reinterpret_view":
+            if (
+                not isinstance(result, ir.AssignStmt)
+                or not isinstance(result.value, ir.Call)
+                or result.value.op.name != ir.get_op("tile.reinterpret_view").name
+            ):
                 return result
             view = result.var
             phi = ir.Var("selected_view", view.type, view.span)
