@@ -863,19 +863,32 @@ ScopeOutliner::ScopeOutliner(std::string func_name, const std::unordered_map<con
  * current value — a reference after the last scope (the function's
  * ReturnStmt) resolves to the latest, never a stale intermediate.
  */
-ExprPtr ScopeOutliner::VisitExpr_(const VarPtr& op) {
-  auto it = store_target_renames_.find(op.get());
-  if (it != store_target_renames_.end()) {
-    return it->second;
-  }
-  return IRMutator::VisitExpr_(op);
+ExprPtr ScopeOutliner::VisitExpr_(const VarPtr& op) { return ResolveCallerBinding(op); }
+
+ExprPtr ScopeOutliner::VisitExpr_(const IterArgPtr& op) { return ResolveCallerBinding(op); }
+
+ExprPtr ScopeOutliner::VisitVarDefinition(const VarPtr& var) {
+  // A definition can introduce a new identity when its type changes. A loop
+  // header also owns its initializer, which may now name an outlined result.
+  if (auto iter_arg = As<IterArg>(var)) return IRMutator::VisitExpr_(iter_arg);
+  if (auto plain_var = As<Var>(var)) return IRMutator::VisitExpr_(plain_var);
+  return IRMutator::VisitVarDefinition(var);
 }
 
-ExprPtr ScopeOutliner::VisitExpr_(const IterArgPtr& op) {
-  // A post-store result replaces a use of the carry, not its header binding or
-  // initializer. Return the replacement before the base visitor rebuilds it.
-  auto it = store_target_renames_.find(op.get());
-  return it != store_target_renames_.end() ? it->second : IRMutator::VisitExpr_(op);
+VarPtr ScopeOutliner::ResolveCallerBinding(const VarPtr& var) const {
+  auto current = var;
+  while (true) {
+    // Store-target entries already point to the latest value in this body.
+    if (auto it = store_target_renames_.find(current.get()); it != store_target_renames_.end()) {
+      return it->second;
+    }
+    auto it = var_remap_.find(current.get());
+    if (it == var_remap_.end() || it->second.get() == current.get()) return current;
+    // Follow the mutator's existing bindings. Visiting the terminal Var could
+    // rewrite its shape or initializer and create a Var with no definition.
+    current = AsVarLike(it->second);
+    INTERNAL_CHECK_SPAN(current, var->span_) << "Caller binding must resolve to a variable";
+  }
 }
 
 /**
@@ -1145,7 +1158,7 @@ std::vector<IterArgPtr> ScopeOutliner::MakeCarryIterArgs(const std::vector<BodyS
   iter_args.reserve(renames.size());
   for (const auto& rename : renames) {
     auto iter_arg = std::make_shared<IterArg>(GenerateFreshSSAName(rename.original->name_hint_, "iter"),
-                                              rename.original->GetType(), rename.seed, span);
+                                              rename.seed->GetType(), rename.seed, span);
     RegisterVar(iter_arg);
     iter_args.push_back(iter_arg);
   }
@@ -1158,7 +1171,7 @@ std::vector<VarPtr> ScopeOutliner::MakeCarryReturnVars(const std::vector<BodySto
   return_vars.reserve(renames.size());
   for (const auto& rename : renames) {
     auto return_var = std::make_shared<Var>(GenerateFreshSSAName(rename.original->name_hint_, "rv"),
-                                            rename.original->GetType(), span);
+                                            rename.seed->GetType(), span);
     RegisterVar(return_var);
     return_vars.push_back(return_var);
   }
@@ -1273,9 +1286,8 @@ void ScopeOutliner::SplitAlreadyCarried(const std::vector<BodyStoreRename>& rena
                                         std::vector<BodyStoreRename>* carried,
                                         std::vector<VarPtr>* carried_values) const {
   for (const auto& rename : renames) {
-    // The rename's seed comes from var_objects_, which holds the *pre-visit* Var
-    // objects, so match the original iter_args first and the visited ones second
-    // (IRMutator clones an IterArg whose initValue this pass renamed).
+    // A loop header's IterArg may have been rebuilt to use a renamed initializer.
+    // Compare the seed with both the original and the visited header bindings.
     size_t slot = FindIterArgSlot(iter_args, rename.seed.get());
     if (slot == std::string::npos) slot = FindIterArgSlot(visited_iter_args, rename.seed.get());
     if (slot == std::string::npos) {
@@ -1407,7 +1419,16 @@ StmtPtr ScopeOutliner::VisitStmt_(const IfStmtPtr& op) {
 
   StmtPtr result_then = new_then_body;
   std::optional<StmtPtr> result_else = new_else_body;
-  std::vector<VarPtr> new_return_vars = op->return_vars_;
+  // Existing results are definitions in the parent scope. Remap their types
+  // after rewinding branch-local stores, before publishing synthesized carries.
+  std::vector<VarPtr> new_return_vars;
+  new_return_vars.reserve(op->return_vars_.size() + renames.size());
+  for (const auto& return_var : op->return_vars_) {
+    INTERNAL_CHECK_SPAN(return_var, op->span_) << "IfStmt has a null return_var";
+    auto result_var = As<Var>(VisitVarDefinition(return_var));
+    INTERNAL_CHECK_SPAN(result_var, op->span_) << "IfStmt return_var did not resolve to a Var";
+    new_return_vars.push_back(std::move(result_var));
+  }
   if (!renames.empty()) {
     // An `if` that already returns values must have both branches yielding, so
     // the missing-else shortcut below is only sound when it returned nothing.
@@ -1693,6 +1714,9 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   auto saved_var_objects = var_objects_;
   auto saved_known_names = known_names_;
   auto saved_required_outputs = required_outputs_;
+  // Outlined parameters bind the original captures. Caller loop bindings must
+  // only be resolved when reconstructing the call in the parent.
+  auto saved_var_remap = std::exchange(var_remap_, {});
   auto saved_renames = store_target_renames_;
   auto saved_renamed_by_value = renamed_by_value_;
   func_name_ = outlined_func_name;
@@ -1720,6 +1744,7 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   required_outputs_ = saved_required_outputs;
   store_target_renames_ = saved_renames;
   renamed_by_value_ = saved_renamed_by_value;
+  var_remap_ = std::move(saved_var_remap);
 
   // Create fresh parameters for the outlined function.
   // Infer param directions from the inner callee when possible (requires program_).
@@ -2099,22 +2124,11 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
   // Build the call site in the parent function
   auto global_var = std::make_shared<GlobalVar>(outlined_func_name);
   std::vector<ExprPtr> call_args;
+  call_args.reserve(input_vars.size());
   for (const auto& input_var : input_vars) {
-    // The argument must be the value current as of this scope. A store
-    // target written by an earlier sibling scope has been renamed; its
-    // latest Var lives in store_target_renames_ keyed on the original Var
-    // (the map is flat — see CreateFreshStoreTargetVar — so one lookup
-    // yields the current value regardless of how many scopes wrote it).
-    // Everything else passes through var_objects_ unchanged.
-    auto rename_it = store_target_renames_.find(input_var.get());
-    if (rename_it != store_target_renames_.end()) {
-      call_args.push_back(rename_it->second);
-      continue;
-    }
-    auto var_it = var_objects_.find(input_var.get());
-    CHECK(var_it != var_objects_.end())
-        << "Variable " << input_var->name_hint_ << " not found in var_objects";
-    call_args.push_back(var_it->second);
+    // Captures must use the current caller binding. A loop carry can have a
+    // new header binding when an earlier outlined scope rewrites its seed.
+    call_args.push_back(ResolveCallerBinding(input_var));
   }
 
   // ``with pl.at(..., deps=[...]) as tid:`` attaches metadata to the
@@ -2475,11 +2489,9 @@ void ScopeOutliner::RegisterVar(const VarPtr& var) {
  */
 VarPtr ScopeOutliner::CreateFreshStoreTargetVar(const VarPtr& original_var, const Span& span) {
   std::string fresh_name = GenerateFreshSSAName(original_var->name_hint_);
-  auto type = original_var->GetType();
-  auto fresh_var = std::make_shared<Var>(fresh_name, type, span);
-  auto current = store_target_renames_.find(original_var.get());
-  NoteStoreTargetRename(original_var, current != store_target_renames_.end() ? current->second : original_var,
-                        fresh_var);
+  auto seed = ResolveCallerBinding(original_var);
+  auto fresh_var = std::make_shared<Var>(fresh_name, seed->GetType(), span);
+  NoteStoreTargetRename(original_var, seed, fresh_var);
   SetStoreTargetRename(original_var, fresh_var);
   RegisterVar(fresh_var);
   return fresh_var;

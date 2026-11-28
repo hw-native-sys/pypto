@@ -4010,6 +4010,319 @@ class TestOutlineScopeInControlFlow:
         assert len(inner.iter_args) == 1
         assert len(inner.return_vars) == 1
 
+    def test_outlined_store_seed_and_branch_use_same_loop_carry(self):
+        """When outlining changes the loop seed, calls and branch yields must use the new binder."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                y: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                state = pl.create_tensor([8, 32], pl.FP32)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    seed = pl.load(x, [0, 0], [8, 32])
+                    pl.store(seed, [0, 0], state)
+                for i in pl.range(2):
+                    if i == 0:
+                        with pl.at(level=pl.Level.CORE_GROUP):
+                            old = pl.load(state, [0, 0], [8, 32])
+                            state = pl.store(pl.add(old, 1.0), [0, 0], state)
+                    else:
+                        with pl.at(level=pl.Level.CORE_GROUP):
+                            other = pl.load(state, [0, 0], [8, 32])
+                            state = pl.store(pl.mul(other, 2.0), [0, 0], state)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    result = pl.load(state, [0, 0], [8, 32])
+                    pl.store(result, [0, 0], y)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                state: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                seed = pl.load(x, [0, 0], [8, 32])
+                _stored = pl.store(seed, [0, 0], state)
+                return state
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_1(
+                self, carry: pl.InOut[pl.Tensor[[8, 32], pl.FP32]]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                old = pl.load(carry, [0, 0], [8, 32])
+                updated = pl.store(pl.add(old, 1.0), [0, 0], carry)
+                _stored = updated
+                return carry
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_2(
+                self, carry: pl.InOut[pl.Tensor[[8, 32], pl.FP32]]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                old = pl.load(carry, [0, 0], [8, 32])
+                updated = pl.store(pl.mul(old, 2.0), [0, 0], carry)
+                _stored = updated
+                return carry
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_3(
+                self,
+                state: pl.Tensor[[8, 32], pl.FP32],
+                y: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                result = pl.load(state, [0, 0], [8, 32])
+                _stored = pl.store(result, [0, 0], y)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                y: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                state = pl.create_tensor([8, 32], pl.FP32)
+                seed = self.main_incore_0(x, state)
+                for i, (carry,) in pl.range(2, init_values=(seed,)):
+                    # Both branches consume the loop binder and each yields its own store result.
+                    if i == 0:
+                        incremented = self.main_incore_1(carry)
+                        merged, _store_carry = pl.yield_(incremented, incremented)
+                    else:
+                        doubled = self.main_incore_2(carry)
+                        merged, _store_carry = pl.yield_(doubled, doubled)
+                    state_after = pl.yield_(merged)
+                result = self.main_incore_3(state_after, y)
+                return result
+
+        After = self._outline(Before)
+        ir.assert_structural_equal(After, Expected)
+        assert not self._structural_errors(After)
+
+    def test_dynamic_shape_capture_keeps_its_caller_binding(self):
+        """Renaming a tensor used in a shape must preserve existing capture identities."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[8, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                state = pl.create_tensor([8, 32], pl.FP32)
+                view = pl.tensor.slice(x, [pl.tensor.dim(state, 0), 32], [0, 0])
+                with pl.at(level=pl.Level.CORE_GROUP) as _seed_tid:
+                    seed = pl.load(x, [0, 0], [8, 32])
+                    pl.store(seed, [0, 0], state)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    value = pl.load(view, [0, 0], [8, 32])
+                    updated = pl.load(state, [0, 0], [8, 32])
+                    result = pl.store(pl.add(value, updated), [0, 0], out)
+                return result
+
+        # Text parsing lets the signature refer to an earlier tensor parameter.
+        Expected = text_parse("""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_0(
+        self,
+        x: pl.Tensor[[8, 32], pl.FP32],
+        state: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        seed = pl.load(x, [0, 0], [8, 32])
+        _stored = pl.store(seed, [0, 0], state)
+        return state
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_1(
+        self,
+        state: pl.Tensor[[8, 32], pl.FP32],
+        view: pl.Tensor[[pl.tensor.dim(state, 0), 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        value = pl.load(view, [0, 0], [8, 32])
+        updated = pl.load(state, [0, 0], [8, 32])
+        result = pl.store(pl.add(value, updated), [0, 0], out)
+        _stored = result
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        x: pl.Tensor[[8, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        state = pl.create_tensor([8, 32], pl.FP32)
+        view = pl.tensor.slice(x, [pl.tensor.dim(state, 0), 32], [0, 0])
+        seed_result = pl.submit(self.main_incore_0, x, state)
+        updated_state = seed_result[0]
+        _seed_tid = seed_result[1]
+        # The view keeps its definition, while the second call sees the updated state.
+        result = self.main_incore_1(updated_state, view, out)
+        return result
+""")
+
+        After = self._outline(Before)
+        ir.assert_structural_equal(After, Expected)
+        assert not self._structural_errors(After)
+
+    def test_synthesized_carry_keeps_the_seed_shape(self):
+        """A loop carry uses the shape of the view actually passed to the loop."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[8, 32], pl.FP32], out: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                state = pl.create_tensor([8, 32], pl.FP32)
+                with pl.at(level=pl.Level.CORE_GROUP) as _tid:
+                    pl.store(pl.load(x, [0, 0], [8, 32]), [0, 0], state)
+                view = pl.tensor.slice(out, [pl.tensor.dim(state, 0), 32], [0, 0])
+                for _ in pl.range(2):
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(x, [0, 0], [8, 32]), [0, 0], view)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.load(view, [0, 0], [8, 32]), [0, 0], out)
+                return out
+
+        Expected = text_parse("""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_0(
+        self, x: pl.Tensor[[8, 32], pl.FP32], state: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        stored = pl.store(pl.load(x, [0, 0], [8, 32]), [0, 0], state)
+        return state
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_1(
+        self,
+        x: pl.Tensor[[8, 32], pl.FP32],
+        state: pl.Tensor[[8, 32], pl.FP32],
+        view: pl.Out[pl.Tensor[[pl.tensor.dim(state, 0), 32], pl.FP32]],
+    ) -> pl.Tensor[[pl.tensor.dim(state, 0), 32], pl.FP32]:
+        stored = pl.store(pl.load(x, [0, 0], [8, 32]), [0, 0], view)
+        return view
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_2(
+        self,
+        state: pl.Tensor[[8, 32], pl.FP32],
+        view: pl.Tensor[[pl.tensor.dim(state, 0), 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        stored = pl.store(pl.load(view, [0, 0], [8, 32]), [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: pl.Tensor[[8, 32], pl.FP32], out: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        state = pl.create_tensor([8, 32], pl.FP32)
+        submitted = pl.submit(self.main_incore_0, x, state)
+        updated_state = submitted[0]
+        tid = submitted[1]
+        view = pl.tensor.slice(out, [pl.tensor.dim(updated_state, 0), 32], [0, 0])
+        for _, (carry,) in pl.range(2, init_values=(view,)):
+            stored = pl._dump.call(
+                self.main_incore_1,
+                [x, updated_state, carry],
+                pl.Tensor[[pl.tensor.dim(updated_state, 0), 32], pl.FP32],
+            )
+            merged = pl.yield_(stored)
+        result = self.main_incore_2(updated_state, merged, out)
+        return result
+""")
+
+        before_ssa = passes.convert_to_ssa()(Before)
+        # Text reparse of a plain call cannot recover the caller identity in
+        # tensor.dim inside its result type. Check the recorded structure instead.
+        verifier = passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+        with passes.PassContext([verifier]):
+            After = passes.outline_incore_scopes()(before_ssa)
+
+        ir.assert_structural_equal(After, Expected)
+        ir.assert_structural_equal(After, ir.deserialize(ir.serialize(After)), enable_auto_mapping=True)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TypeChecked)
+        assert not passes.PropertyVerifierRegistry.verify(props, After)
+
+    def test_if_result_shape_uses_the_visited_loop_binding(self):
+        """An existing if result refers to the loop binder used by its branches."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[8, 32], pl.FP32], out: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+            ) -> pl.Tensor[[8, 32], pl.FP32]:
+                state = pl.create_tensor([8, 32], pl.FP32)
+                with pl.at(level=pl.Level.CORE_GROUP) as _tid:
+                    pl.store(pl.load(x, [0, 0], [8, 32]), [0, 0], state)
+                for i, (carry,) in pl.range(2, init_values=(state,)):
+                    if i == 0:
+                        left = pl.tensor.slice(x, [pl.tensor.dim(carry, 0), 32], [0, 0])
+                        view = pl.yield_(left)
+                    else:
+                        right = pl.tensor.slice(x, [pl.tensor.dim(carry, 0), 32], [0, 0])
+                        view = pl.yield_(right)
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        pl.store(pl.load(view, [0, 0], [8, 32]), [0, 0], out)
+                    state_after = pl.yield_(carry)
+                return out
+
+        Expected = text_parse("""
+@pl.program
+class Expected:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_0(
+        self, x: pl.Tensor[[8, 32], pl.FP32], state: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        stored = pl.store(pl.load(x, [0, 0], [8, 32]), [0, 0], state)
+        return state
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def main_incore_1(
+        self,
+        state: pl.Tensor[[8, 32], pl.FP32],
+        view: pl.Tensor[[pl.tensor.dim(state, 0), 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[8, 32], pl.FP32]],
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        stored = pl.store(pl.load(view, [0, 0], [8, 32]), [0, 0], out)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self, x: pl.Tensor[[8, 32], pl.FP32], out: pl.Out[pl.Tensor[[8, 32], pl.FP32]]
+    ) -> pl.Tensor[[8, 32], pl.FP32]:
+        state = pl.create_tensor([8, 32], pl.FP32)
+        submitted = pl.submit(self.main_incore_0, x, state)
+        updated_state = submitted[0]
+        tid = submitted[1]
+        for i, (carry, output) in pl.range(2, init_values=(updated_state, out)):
+            if i == 0:
+                left = pl.tensor.slice(x, [pl.tensor.dim(carry, 0), 32], [0, 0])
+                view = pl.yield_(left)
+            else:
+                right = pl.tensor.slice(x, [pl.tensor.dim(carry, 0), 32], [0, 0])
+                view = pl.yield_(right)
+            stored = self.main_incore_1(carry, view, output)
+            state_after, result = pl.yield_(carry, stored)
+        return result
+""")
+
+        After = self._outline(Before)
+        ir.assert_structural_equal(After, Expected)
+        assert not self._structural_errors(After)
+
     def test_loop_writer_read_after_the_loop_is_threaded_as_a_carry(self):
         """The canonical shape: written by an in-loop scope, read by a later one."""
 

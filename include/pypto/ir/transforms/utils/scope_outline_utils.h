@@ -193,6 +193,7 @@ class ScopeOutliner : public IRMutator {
    */
   ExprPtr VisitExpr_(const VarPtr& op) override;
   ExprPtr VisitExpr_(const IterArgPtr& op) override;
+  ExprPtr VisitVarDefinition(const VarPtr& var) override;
 
   /**
    * @brief Process SeqStmts to analyze scope outputs using subsequent statements.
@@ -263,6 +264,9 @@ class ScopeOutliner : public IRMutator {
 
   /// Record vars that become visible in the enclosing body after a child control-flow statement.
   void NoteLocalDefinitions(const std::vector<VarPtr>& vars);
+
+  /// Resolve an existing caller binding without rewriting its type or initializer.
+  [[nodiscard]] VarPtr ResolveCallerBinding(const VarPtr& var) const;
 
   /// Record @p fresh as the current value of store target @p original.
   ///
