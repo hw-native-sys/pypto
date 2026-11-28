@@ -43,14 +43,19 @@ _POISON_PATTERNS = [
 ]
 
 
-def _poison_before_ctrl_write(monkeypatch: pytest.MonkeyPatch, write: str, poison: str) -> None:
+def _poison_before_ctrl_write(
+    monkeypatch: pytest.MonkeyPatch, write: str, poison: str, *, expect_vf_guard: bool = False
+) -> None:
     """Inject the inherited state inside the same A5 device guard as the entry write."""
     generate_wrapper = pto_backend._generate_kernel_wrapper
 
     def poison_inherited_ctrl(func, ptoas_code, **kwargs):
         source = generate_wrapper(func, ptoas_code, **kwargs)
-        assert source.count(write) == 1
-        return source.replace(write, poison + write, 1)
+        body, signature, entry = source.partition("void kernel_entry(__gm__ int64_t* args)")
+        if expect_vf_guard:
+            assert "struct __PyptoRegSatCtrlGuard" in body
+        assert signature and entry.count(write) == 1
+        return body + signature + entry.replace(write, poison + write, 1)
 
     monkeypatch.setattr(pto_backend, "_generate_kernel_wrapper", poison_inherited_ctrl)
 
@@ -333,6 +338,88 @@ def test_bf16_to_fp16_tile_cast_restores_ctrl60_after_reg_convert(test_config, m
     else:
         expected = src.to(torch.float16)
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@pytest.mark.platforms("a5")
+@pytest.mark.parametrize("reg_saturate", [True, False], ids=["sat", "nosat"])
+@pytest.mark.parametrize("cast_saturation_mode", ["on", "off"])
+def test_mixed_reg_convert_and_bf16_to_fp16_tile_cast_in_same_kernel(
+    test_config, monkeypatch, reg_saturate, cast_saturation_mode
+):
+    _poison_before_ctrl_write(
+        monkeypatch,
+        "    set_ctrl(sbitset1(get_ctrl(), 60));\n",
+        "    set_ctrl(sbitset0(get_ctrl(), 60));\n",
+        expect_vf_guard=True,
+    )
+
+    @pl.jit.incore
+    def mixed_kernel(
+        bf16: pl.Tensor[[2, LANES], pl.BF16],
+        fp32: pl.Tensor[[1, LANES], pl.FP32],
+        out_fp16_before: pl.Out[pl.Tensor[[1, LANES], pl.FP16]],
+        out_fp8: pl.Out[pl.Tensor[[1, LANES], pl.UINT8]],
+        out_fp16_after: pl.Out[pl.Tensor[[1, LANES], pl.FP16]],
+    ):
+        # Separate rows keep the two casts distinct through common subexpression elimination.
+        first = pl.load(bf16, [0, 0], [1, LANES], target_memory=pl.Mem.Vec)
+        before = pl.cast(first, pl.FP16, saturation_mode=cast_saturation_mode)
+        pl.store(before, [0, 0], out_fp16_before)
+
+        src = pl.reshape(pl.load(fp32, [0, 0], [1, LANES], target_memory=pl.Mem.Vec), [LANES])
+        dst = pl.tile.create([LANES], dtype=pl.UINT8, target_memory=pl.Mem.Vec)
+        with pl.reg_scope():
+            x = pl.reg.load(src, lanes=LANES)
+            y = pl.reg.convert(x, dtype=pl.FP8E4M3FN, rounding="R", saturate=reg_saturate)
+            raw = pl.reg.interpret_cast(y, dtype=pl.UINT8)
+            dst = pl.reg.store(dst, value=raw)
+        pl.store(pl.reshape(dst, [1, LANES]), [0, 0], out_fp8)
+
+        second = pl.load(bf16, [1, 0], [1, LANES], target_memory=pl.Mem.Vec)
+        after = pl.cast(second, pl.FP16, saturation_mode=cast_saturation_mode)
+        pl.store(after, [0, 0], out_fp16_after)
+        return out_fp16_before, out_fp8, out_fp16_after
+
+    @pl.jit
+    def entry(
+        bf16: pl.Tensor[[2, LANES], pl.BF16],
+        fp32: pl.Tensor[[1, LANES], pl.FP32],
+        out_fp16_before: pl.Out[pl.Tensor[[1, LANES], pl.FP16]],
+        out_fp8: pl.Out[pl.Tensor[[1, LANES], pl.UINT8]],
+        out_fp16_after: pl.Out[pl.Tensor[[1, LANES], pl.FP16]],
+    ):
+        return mixed_kernel(bf16, fp32, out_fp16_before, out_fp8, out_fp16_after)
+
+    config = _fresh_config(test_config)
+    if config.codegen_only:
+        entry.compile(config=config)
+        return
+
+    row = _repeat_to_lanes([-70000.0, 70000.0, -1.5, 1.5]).to(torch.bfloat16)
+    bf16 = torch.cat((row, -row))
+    fp32 = _repeat_to_lanes([-490.0, 490.0, -1.5, 1.5])
+    before = torch.zeros((1, LANES), dtype=torch.float16)
+    after = torch.zeros_like(before)
+    fp8 = torch.zeros((1, LANES), dtype=torch.uint8)
+    compiled = entry.compile(bf16, fp32, before, fp8, after, config=config)
+    compiled(bf16, fp32, before, fp8, after, config=config)
+
+    expected = bf16.float()
+    if cast_saturation_mode == "on":
+        expected = expected.clamp(-65504.0, 65504.0)
+    expected = expected.to(torch.float16)
+    torch.testing.assert_close(before, expected[:1], rtol=0, atol=0)
+    torch.testing.assert_close(after, expected[1:], rtol=0, atol=0)
+
+    cycles = fp8.reshape(-1, 4)
+    expected_bytes = [0xFE, 0x7E, 0xBC, 0x3C]
+    if not reg_saturate:
+        # E4M3FN permits either NaN sign (0x7F or 0xFF) in the two overflow lanes.
+        cycles = cycles.clone()
+        cycles[:, :2] &= 0x7F
+        expected_bytes[:2] = [0x7F, 0x7F]
+    expected_fp8 = torch.tensor(expected_bytes, dtype=torch.uint8).expand_as(cycles)
+    torch.testing.assert_close(cycles, expected_fp8, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
