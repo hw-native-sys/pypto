@@ -1580,6 +1580,26 @@ class TestVariableRebinding:
         assert "x =" in out
         assert "x_v1" not in out
 
+    def test_tuple_rebinding_reads_rhs_before_updating_targets(self):
+        src = """
+            def f(x):
+                one = x
+                one = one - x
+                power, one = helper(one)
+                one, power = power + one, one
+                return one, power
+        """
+        calls = []
+
+        def helper(value):
+            calls.append(value)
+            return value + 2, value + 1
+
+        namespace = {"helper": helper}
+        exec(self._transform(src), namespace)
+        assert namespace["f"](8) == (3, 1)
+        assert calls == [0]
+
     def test_chained_assignment_keeps_rhs_snapshot(self):
         """Chains evaluate once and do not read stale inlined or renamed targets."""
         src = """

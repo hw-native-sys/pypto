@@ -259,42 +259,50 @@ class BodyTransformer(ast.NodeTransformer):
             and (self._active_shape_fold(name) is not None or self._is_folded_graph_capture(name))
         )
 
+    def _bind_assign_name(self, target: ast.Name, value_meta: TensorMeta | None) -> ast.Name:
+        """Bind a store using the current scope's alpha-renaming policy."""
+        name = target.id
+        if name not in self._assign_count:
+            self._record_first_assign(name)
+            self._record_tensor_meta(name, value_meta)
+            return target
+        if self._needs_alpha_rename(name):
+            alias = self._rebind(name)
+            self._record_tensor_meta(alias, value_meta)
+        else:
+            # Scoped writes update the current loop- or branch-carried name.
+            alias = self._var_renames.get(name, name)
+            self._record_tensor_meta(alias, value_meta, reuses_name=True)
+        return ast.copy_location(ast.Name(id=alias, ctx=ast.Store()), target)
+
     def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
         """Handle a single-target name assignment with alpha-renaming support."""
-        var_name = cast(ast.Name, node.targets[0]).id
+        target = cast(ast.Name, node.targets[0])
         source = self._known_tensor_name(node.value.id) if isinstance(node.value, ast.Name) else None
         value_meta = self._meta.get(source) if source is not None else None
-        visited_value = self.visit(node.value)
+        node.value = self.visit(node.value)
         if self._simt_depth:
-            self._shape_inlined.pop(var_name, None)
-        if var_name in self._assign_count:
-            # Only rename at the same scope where the variable was first defined.
-            # Rebindings at a deeper scope (inside for/with) are loop-carried
-            # updates — do not rename them.
-            if self._needs_alpha_rename(var_name):
-                new_name = self._rebind(var_name)
-                self._record_tensor_meta(new_name, value_meta)
-                new_node = ast.Assign(
-                    targets=[ast.Name(id=new_name, ctx=ast.Store())],
-                    value=visited_value,
-                )
-                ast.copy_location(new_node, node)
-                ast.fix_missing_locations(new_node)
-                return new_node
-            # Deeper scope: if the variable has an active rename (from a bridge
-            # assignment), apply it to the LHS so the loop body consistently
-            # uses the renamed alias (e.g. x_v1 = some_op(x_v1)).
-            if var_name in self._var_renames:
-                renamed = self._var_renames[var_name]
-                node.targets = [ast.Name(id=renamed, ctx=ast.Store())]
-            self._record_tensor_meta(self._var_renames.get(var_name, var_name), value_meta, reuses_name=True)
-            node.value = visited_value
-            return node
-        # First assignment: record and keep original name.
-        self._record_first_assign(var_name)
-        self._record_tensor_meta(var_name, value_meta)
-        node.value = visited_value
+            self._shape_inlined.pop(target.id, None)
+        node.targets[0] = self._bind_assign_name(target, value_meta)
         return node
+
+    def _bind_unpack_target(
+        self, target: ast.expr, value: ast.expr | None, incoming_meta: Mapping[str, TensorMeta]
+    ) -> ast.expr:
+        if isinstance(target, ast.Name):
+            meta = incoming_meta.get(value.id) if isinstance(value, ast.Name) else None
+            bound = self._bind_assign_name(target, meta)
+            self._shape_inlined.pop(target.id, None)
+            return bound
+        if isinstance(target, ast.Tuple):
+            values = (
+                value.elts if isinstance(value, ast.Tuple) and len(value.elts) == len(target.elts) else None
+            )
+            target.elts = [
+                self._bind_unpack_target(item, values[index] if values is not None else None, incoming_meta)
+                for index, item in enumerate(target.elts)
+            ]
+        return target
 
     def _visit_chained_assign(self, node: ast.Assign) -> list[ast.stmt]:
         """Evaluate a chain's RHS once before rebinding and copying to its targets."""
@@ -496,8 +504,17 @@ class BodyTransformer(ast.NodeTransformer):
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             return self._visit_simple_assign(node)
 
-        # Keep destructuring as one assignment so all RHS reads see the
-        # previous iteration, including when two loop-carried values swap.
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Tuple):
+            # Resolve the full RHS before rebinding any of its destinations.
+            node.value = self.visit(node.value)
+            incoming_meta = {}
+            if isinstance(node.value, ast.Tuple):
+                incoming_meta = {
+                    name: meta for name, meta in self._meta.items() if self._var_renames.get(name) != name
+                }
+            node.targets[0] = self._bind_unpack_target(node.targets[0], node.value, incoming_meta)
+            return node
+
         if self._while_runtime_names:
             for target in node.targets:
                 self._retarget_while_store(target)
