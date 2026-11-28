@@ -374,6 +374,66 @@ class Program:
         assert "pto.tmatmul.mx.acc" in _emit_incore_mlir(program, planner=planner)
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("producer", ["bound-extract", "bound-extract-reuse", "move"])
+@pytest.mark.parametrize("overlap", [False, True])
+def test_mx_scale_extract_interferes_with_other_scale_producers(planner, producer, overlap):
+    # Consuming the last extract first lets InsertMxScaleAddr rewrite it to
+    # bind_scale_addr + extract_into; the earlier extract still needs codegen's
+    # early binding. A TMOV producer also writes to the paired hardware address.
+    if producer.startswith("bound-extract"):
+        other = "sa1 = pl.tile.extract(sam, 0, 4, [64, 4], target_memory=pl.Mem.LeftScale)"
+    else:
+        other = "sa1 = pl.move(sam1, pl.Mem.LeftScale)"
+    first, second = ("sa1", "sa0") if producer == "bound-extract" else ("sa0", "sa1")
+    direct = "sa0 = pl.tile.extract(sam, 0, 0, [64, 4], target_memory=pl.Mem.LeftScale)"
+    mma = f"acc = pl.matmul_mx(a0, {first}, b0, sb0)"
+    if producer == "bound-extract-reuse":
+        # The already rewritten scale is still used after the second write.
+        reuse = "acc = pl.matmul_mx_acc(acc, a0, sa0, b0, sb0)"
+        body = [direct, mma, other, reuse] if overlap else [direct, mma, reuse, other]
+    elif overlap:
+        body = [direct, other, mma]
+    else:
+        body = [other, mma, direct] if first == "sa1" else [direct, mma, other]
+    body_source = "\n        ".join(body)
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def main(
+        self,
+        a: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+        b: pl.Tensor[[128, 256], pl.FP8E4M3FN],
+        sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+        sb: pl.Tensor[[4, 256], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        am = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        bm = pl.load(b, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+        sam = pl.load(sa, [0, 0], [64, 8], target_memory=pl.Mem.Mat)
+        sam1 = pl.load(sa, [0, 4], [64, 4], target_memory=pl.Mem.Mat)
+        sbm = pl.load(sb, [0, 0], [4, 256], target_memory=pl.Mem.Mat)
+        a0 = pl.tile.extract(am, 0, 0, [64, 128], target_memory=pl.Mem.Left)
+        b0 = pl.tile.extract(bm, 0, 0, [128, 256], target_memory=pl.Mem.Right)
+        sb0 = pl.move(sbm, pl.Mem.RightScale)
+        {body_source}
+        acc = pl.matmul_mx_acc(acc, a0, {second}, b0, sb0)
+        return pl.store(acc, [0, 0], out)
+""")
+    if overlap:
+        lowered = ir.python_print(_run_default_pipeline(program, planner=planner))
+        if producer.startswith("bound-extract"):
+            assert "tile.bind_scale_addr" in lowered and "tile.extract_into" in lowered
+        assert "tile.tget_scale_addr" in lowered
+        with pytest.raises(
+            ValueError, match="Overlapping MX scale extractions cannot share a data allocation"
+        ):
+            _emit_incore_mlir(program, planner=planner)
+    else:
+        assert "pto.tmatmul.mx.acc" in _emit_incore_mlir(program, planner=planner)
+
+
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_mx_scale_extract_accepts_dominating_reshape(tmp_path, planner):
