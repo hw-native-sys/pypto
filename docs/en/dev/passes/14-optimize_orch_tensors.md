@@ -74,7 +74,42 @@ Refined output view types propagate through store results, local aliases, tuple 
 
 **Problem**: When orchestration passes a sliced tensor (`tensor.slice`) as an `In` argument to an InCore function, the InCore function's parameter has contiguous strides (computed from its own shape), not the parent tensor's strides. This causes incorrect memory access when the slice is a non-contiguous view of the parent.
 
-**Solution**: Analyze `tensor.slice(parent, size, offset)` patterns in orchestration. When a slice result is passed as an `In` argument to an InCore call, attach the parent tensor's shape-derived strides via `TensorView` on the InCore function's `In` param type, so `tile.load` uses the correct memory layout.
+For an InCore `In` parameter, the pass resolves the input's physical layout at each Call or Submit.
+Calls to the same kernel with different static input strides use separate definitions. Matching layouts
+continue to share a definition. For example, reshaping four complete rows of a `[32, 32768]` ND tensor
+to `[32, 4096]` gives a row stride of 4096. Slicing the first 4096 columns from all 32 rows gives the
+same shape with a row stride of 32768. If both views pass through the same graph helper parameter
+into a single InCore call site, that site requires one input pitch. The pass reports a stride conflict
+in either call order, including when the helper reshapes the input before calling the kernel.
+For an outlined transpose, the resolved caller pitch replaces the stride inferred from the slice's
+shape. Explicit AIV parameter declarations still require matching caller strides.
+For a packed ND kernel with a dynamic inner extent, such as `[8, W]`, the row
+stride follows the runtime width when every incoming view is packed. Calls with widths 256 and 320
+can therefore share that kernel. A packed ND reshape from `[8, W]` to `[4, 2 * W]`
+preserves this proof, so its result also keeps shape-derived runtime strides. The same rule applies
+to packed DN inputs: for `[H, 8]` the column stride follows the runtime height.
+
+Graph helpers bind dynamic extents from their own argument descriptors. Slices retaining all
+physical inner axes therefore preserve packing even when a leading extent shrinks. A packed
+reshape validates source packing independently from result pitch. Packed `[8, 256]` and
+`[4, 512]` inputs reshaped to `[4, 512]` both have result strides `[512, 1]`.
+Only statically known result strides stop source-pitch consensus checks. A dynamic reshape
+such as `[4, 2 * W]` retains caller-pitch dependence. After a Graph binding or control-flow
+join, passing such a view (or a slice of it) to a fixed-stride kernel is rejected when its
+physical strides cannot be resolved. Explicit fixed AIV strides are checked for whole
+reshape results as well as slices.
+
+Symbolic InCore layouts not already covered by the packed runtime proof require an equality
+proof after substituting the operand's actual logical shape into the kernel input's bare dimension
+symbols. Symbols not bound by those axes cannot establish this proof. A pitched `[8, W]` input with strides `[2 * W, 1]`
+matches the same kernel contract; a packed `[8, 2 * W]` input does not, because the kernel rebinds
+its `W` to the actual width and would then double the pitch. Shape and stride provenance travel
+together through aliases and metadata views. Shared symbolic operands on this path also require
+compatible logical shapes on every path. Dynamic window extents that may clamp remain unknown in this proof;
+unproved layouts are rejected even after a runtime pipeline inlines the Graph helper.
+Scope-local integer aliases and static `tensor.dim` axes, including negative axes, resolve
+constant metadata strides. Branch joins retain only equal constants; loop initial values
+do not establish an invariant.
 
 Refined input view types also propagate through local aliases, tuple construction, and tuple projections, so subsequent uses retain the parent strides and assignments remain type-symmetric.
 
@@ -98,8 +133,10 @@ the resolved layout to ND, matching slice type deduction; dropping only leading
 axes preserves DN. Metadata-only transpose and view operations derive storage from
 their source, including non-trailing axis swaps. Shape/dtype reinterprets must
 meet the operator's packed-storage contract after slice strides are resolved.
-In orchestration, the additional reshape constraint is checked only when its result reaches an AIV
-operand; unrelated InCore and unused reshape paths retain their existing behavior.
+In orchestration, the additional reshape constraint is checked when its result reaches an AIV
+operand or an InCore input reached through Graph bindings or control-flow joins.
+Packed runtime inputs can have different widths while satisfying that constraint. Standalone
+InCore and unused reshape paths retain their existing reshape behavior.
 Refined types propagate through AIV For/While carries (including nested tuples), loop results, matching branch joins, and SIMT launch arguments and their
 SSA results. Metadata views inside AIV bodies and result-alias operations re-deduce their result types from the refined
 arguments while preserving call attributes. Loop backedges and branch yields must agree with the refined storage
