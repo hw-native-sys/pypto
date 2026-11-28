@@ -212,6 +212,11 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     ``deps=`` (the parser enforces this where statically provable), so the
     dispatch-point read observes the current value.
 
+    The optional ``calendar_hash=<int-expr>`` kwarg is valid when submitting a
+    ``@pl.jit.graph`` / ``FunctionType.Graph`` callee and passes an explicit
+    ``uint64_t`` bucket ID to A5 Graph Calendar online PGO via
+    ``simpler::hbg::GraphSubmitOptions``.
+
     The return annotation is ``Any`` (not ``NoReturn``) because the parser
     intercepts the call and binds a 2-tuple to the LHS — downstream code
     that does ``out, tid = pl.submit(...)`` would not type-check under

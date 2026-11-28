@@ -298,7 +298,12 @@ def _omitted_output_metas(
 ) -> dict[str, TensorMeta]:
     """Read only truly omitted Out slots; never repair an unknown supplied operand."""
     supplied = _call_binding.build_param_mapping(
-        dep._param_names(), _call_binding.call_arg_refs(call, orchestrator=dep._func_type == "orchestration")
+        dep._param_names(),
+        _call_binding.call_arg_refs(
+            call,
+            orchestrator=dep._func_type == "orchestration",
+            graph=dep._func_type == "graph",
+        ),
     )
     definition = _ast_analysis.get_func_def(dep._func)
     outputs = _classify_params(definition)[0]
@@ -369,6 +374,7 @@ def _dep_out_metas(
         local,
         deps.resolve_expr,
         orchestrator=dep is not None and dep._func_type == "orchestration",
+        graph=dep is not None and dep._func_type == "graph",
     )
     constexpr = _call_site_constexpr(dep, call, deps) if dep is not None else {}
     if submitted and dep is not None:
@@ -469,7 +475,12 @@ def _dep_result_metas(
         return None
     dep_params, _ = deps.io[dep_name]
     seed_meta = _call_tensor_metas(
-        call, dep_params, local, deps.resolve_expr, orchestrator=dep._func_type == "orchestration"
+        call,
+        dep_params,
+        local,
+        deps.resolve_expr,
+        orchestrator=dep._func_type == "orchestration",
+        graph=dep._func_type == "graph",
     )
     constexpr = _call_site_constexpr(dep, call, deps)
     seed_meta.update(_omitted_output_metas(dep, call, constexpr))
@@ -650,6 +661,7 @@ def _call_site_constexpr(dep: "JITFunction", call: ast.Call, deps: _DepScan) -> 
             deps.scope.namespace,
             deps.scope.shadowed,
             orchestrator=dep._func_type == "orchestration",
+            graph=dep._func_type == "graph",
         )
     except TypeError:
         return {}
@@ -2740,10 +2752,11 @@ def _call_tensor_metas(
     resolve_expr: Callable[[ast.expr], TensorMeta | None] | None,
     *,
     orchestrator: bool,
+    graph: bool = False,
 ) -> dict[str, TensorMeta]:
     """Bind named and expression arguments using the same point-in-time metadata."""
     expressions = _call_binding.build_param_mapping(
-        parameters, _call_binding.call_arg_nodes(call, orchestrator=orchestrator)
+        parameters, _call_binding.call_arg_nodes(call, orchestrator=orchestrator, graph=graph)
     )
     metas: dict[str, TensorMeta] = {}
     for name, expr in expressions.items():
@@ -2809,10 +2822,13 @@ def resolve_dep_call_metadata(  # noqa: PLR0913 — carries the caller's wrapper
     dep_param_names = dep._param_names()
     call_name = dep_call_name or dep.__name__
     orchestrator = dep._func_type == "orchestration"
+    graph = dep._func_type == "graph"
     call_args = (
-        _call_binding.call_arg_refs(call_node, orchestrator=orchestrator)
+        _call_binding.call_arg_refs(call_node, orchestrator=orchestrator, graph=graph)
         if call_node is not None
-        else _call_binding.extract_call_args_for_dep(caller_func, call_name, orchestrator=orchestrator)
+        else _call_binding.extract_call_args_for_dep(
+            caller_func, call_name, orchestrator=orchestrator, graph=graph
+        )
     )
 
     def remember_call(
@@ -2894,13 +2910,19 @@ def resolve_dep_call_metadata(  # noqa: PLR0913 — carries the caller's wrapper
     if resolve_expr is not None and call_node is not None:
         dep_tensor_meta.update(
             _call_tensor_metas(
-                call_node, dep_param_names, all_tensor_meta, resolve_expr, orchestrator=orchestrator
+                call_node,
+                dep_param_names,
+                all_tensor_meta,
+                resolve_expr,
+                orchestrator=orchestrator,
+                graph=graph,
             )
         )
     if resolve_scalar is not None and call_node is not None:
         # Live bindings supersede the entry's scalar map after reassignments.
         arguments = _call_binding.build_param_mapping(
-            dep_param_names, _call_binding.call_arg_nodes(call_node, orchestrator=orchestrator)
+            dep_param_names,
+            _call_binding.call_arg_nodes(call_node, orchestrator=orchestrator, graph=graph),
         )
         dep_scalar_dtypes = {
             name: dtype
@@ -2932,6 +2954,7 @@ def resolve_dep_call_metadata(  # noqa: PLR0913 — carries the caller's wrapper
                 scope.namespace,
                 scope.shadowed,
                 orchestrator=orchestrator,
+                graph=graph,
             )
         dep_tensor_meta.update(_omitted_output_metas(dep, call_node, binding))
 

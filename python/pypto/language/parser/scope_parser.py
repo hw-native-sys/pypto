@@ -2122,11 +2122,11 @@ class ScopeParser:
         # rejected: a Graph does not place a kernel or accept a predicate.
         keywords: dict[str, ast.keyword] = {}
         for kw in context_expr.keywords:
-            if kw.arg not in ("deps", "dumps"):
+            if kw.arg not in ("deps", "dumps", "calendar_hash"):
                 raise ParserSyntaxError(
                     f"pl.graph() got unexpected keyword argument '{kw.arg or '**kwargs'}'",
                     span=span,
-                    hint="Use a region name, optional `deps=[...]` / `dumps=[...]`, "
+                    hint="Use a region name, optional `deps=[...]` / `dumps=[...]` / `calendar_hash=...`, "
                     "and an optional `as done` completion capture.",
                 )
             if kw.arg in keywords:
@@ -2148,6 +2148,11 @@ class ScopeParser:
         previous_capture = (
             self.services.scope_manager.lookup_var(capture_name) if capture_name is not None else None
         )
+        calendar_hash = (
+            self.dispatch.parse_calendar_hash_kwarg("pl.graph()", [keywords["calendar_hash"]])
+            if "calendar_hash" in keywords
+            else None
+        )
         scope_attrs = self.parse_at_meta(
             keywords.get("deps"),
             None,
@@ -2157,6 +2162,7 @@ class ScopeParser:
             None,
             span,
             construct="pl.graph",
+            calendar_hash=calendar_hash,
         )
         tid_var = self.emit_scope_task_id_placeholder(scope_attrs, span)
         exported = self.parse_scope_body(stmt, ir.ScopeKind.Graph, span, name_hint=name, attrs=scope_attrs)
@@ -2384,6 +2390,7 @@ class ScopeParser:
         span: "ir.Span",
         *,
         construct: str = "pl.at",
+        calendar_hash: "ir.Expr | None" = None,
     ) -> "list[tuple[str, Any]] | None":
         """Build the ScopeStmt ``attrs`` list from a ``pl.at(...)`` ``deps=`` /
         ``no_dep_args=`` / ``dumps=`` / ``predicate=`` kwarg set and a
@@ -2437,6 +2444,7 @@ class ScopeParser:
             and optional_vars is None
             and not allow_early_resolve
             and predicate is None
+            and calendar_hash is None
         ):
             return None
 
@@ -2485,6 +2493,9 @@ class ScopeParser:
         if predicate is not None:
             self.dispatch.validate_predicate_deps(f"{construct}()", predicate, dep_vars, span)
             attrs.append(("predicate", predicate))
+
+        if calendar_hash is not None:
+            attrs.append(("calendar_hash", calendar_hash))
 
         return attrs if attrs else None
 

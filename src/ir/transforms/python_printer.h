@@ -325,6 +325,9 @@ class IRPythonPrinter : public IRVisitor {
   // scope printers and the ``pl.at`` (InCore / Hierarchy) ones.
   bool PrintScopePredicateAttr(const ScopeStmtPtr& op);
 
+  // Emit ``calendar_hash=<expr>`` if the scope carries ``kAttrCalendarHash``.
+  bool PrintScopeCalendarHashAttr(const ScopeStmtPtr& op);
+
   // Emit ``windowize=True`` for an explicitly opted-in InCore scope.
   bool PrintScopeWindowizeAttr(const ScopeStmtPtr& op);
 

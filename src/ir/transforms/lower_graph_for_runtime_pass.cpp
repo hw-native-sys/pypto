@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <deque>
 #include <memory>
 #include <string>
@@ -75,7 +76,7 @@ class GraphLowerer : public IRMutator {
     CheckEnclosingManualScope(in_manual_scope_, op->span_);
     MarkGraphHelper(inline_caller_);
     for (const auto& [key, value] : op->attrs_) {
-      CHECK_SPAN(key == kAttrDumpVars, op->span_)
+      CHECK_SPAN(key == kAttrDumpVars || key == kAttrCalendarHash, op->span_)
           << "TMR cannot lower Graph scope '" << op->name_hint_ << "' with boundary attribute '" << key
           << "'. Put dependencies and completion captures on the individual tasks, or target "
              "host_build_graph.";
@@ -88,15 +89,18 @@ class GraphLowerer : public IRMutator {
 
   ExprPtr VisitExpr_(const CallPtr& op) override {
     if (graph_names_.empty() && inline_names_.empty()) return op;
+    bool strip_calendar_hash = false;
     if (auto callee = GraphCallee(op->op_)) {
       CheckEnclosingManualScope(in_manual_scope_, op->span_);
       MarkGraphHelper(inline_caller_);
-      // InlineFunctions transfers dump selections to the kernel dispatches.
-      // Other call-site metadata would disappear when the boundary is spliced.
+      // InlineFunctions transfers dump selections to the kernel dispatches;
+      // calendar_hash is an A5 Calendar PGO hint and is dropped when TMR inlines
+      // the Graph body. Other call-site metadata would disappear when spliced.
       for (const auto& [key, value] : op->attrs_) {
-        CHECK_SPAN(key == kAttrDumpVars, op->span_)
+        CHECK_SPAN(key == kAttrDumpVars || key == kAttrCalendarHash, op->span_)
             << "TMR cannot lower Graph call to '" << callee->name_ << "' with boundary attribute '" << key
             << "'. Apply dispatch options to the individual tasks, or target host_build_graph.";
+        if (key == kAttrCalendarHash) strip_calendar_hash = true;
       }
       CHECK_SPAN(op->kwargs_.empty(), op->span_)
           << "TMR cannot lower Graph call to '" << callee->name_ << "' with keyword metadata.";
@@ -104,7 +108,17 @@ class GraphLowerer : public IRMutator {
       if (inline_caller_) inline_callers_[target->name_].push_back(*inline_caller_);
       if (in_manual_scope_) manual_inline_calls_.push_back(op);
     }
-    return IRMutator::VisitExpr_(op);
+    auto visited = IRMutator::VisitExpr_(op);
+    if (!strip_calendar_hash) return visited;
+    auto call = As<Call>(visited);
+    if (!call) return visited;
+    std::vector<std::pair<std::string, std::any>> attrs;
+    attrs.reserve(call->attrs_.size());
+    for (const auto& kv : call->attrs_) {
+      if (kv.first != kAttrCalendarHash) attrs.push_back(kv);
+    }
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(attrs), call->GetType(),
+                                  call->span_);
   }
 
   ExprPtr VisitExpr_(const SubmitPtr& op) override {

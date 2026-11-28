@@ -126,6 +126,13 @@ predecessors order that outer task; they are not stored as internal edges of the
 recorded Definition. Graph functions still write into caller-supplied tensors;
 computed values and recorded-internal TaskIds cannot be returned to the caller.
 The runtime reuses the Definition within an orchestration run.
+To share an A5 Graph Calendar online PGO plan across runs with different scalar
+arguments but similar execution cost, pass an integer scalar expression as
+`calendar_hash=` on `pl.graph("layer", calendar_hash=bucket)`,
+`pl.submit(layer, ..., calendar_hash=bucket)`, or a direct Graph call
+`layer(..., calendar_hash=bucket)` (including `0` as an explicit bucket ID).
+Runtimes without A5 Calendar PGO ignore `calendar_hash` (TMR drops it when
+inlining the Graph).
 
 For `tensormap_and_ringbuffer`, call the Graph as an ordinary function or use a
 Graph scope without an outer dependency or completion capture. The compiler

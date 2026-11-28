@@ -2190,6 +2190,12 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     // registered when the earlier scope was outlined.
     scope_predicate = VisitExpr(scope_predicate);
   }
+  ExprPtr scope_calendar_hash = op->GetAttr<ExprPtr>(kAttrCalendarHash, nullptr);
+  if (scope_calendar_hash) {
+    CHECK_SPAN(op->GetScopeKind() == ScopeKind::Graph, op->span_)
+        << "calendar_hash is only valid on pl.graph(...) scopes";
+    scope_calendar_hash = VisitExpr(scope_calendar_hash);
+  }
 
   // Dependency edges (or an early-resolve flag, or a dispatch predicate)
   // force the Submit shape: deps live in the typed ``Submit::deps_`` field,
@@ -2299,6 +2305,9 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     if (!arg_dir_override_indices.empty()) {
       submit_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
     }
+    if (scope_calendar_hash) {
+      submit_attrs.emplace_back(kAttrCalendarHash, std::move(scope_calendar_hash));
+    }
     // Launch spec in the first-class Submit fields — the same shape
     // ``pl.spmd_submit(..., core_num=N)`` produces, so printing / codegen /
     // verification take one path.
@@ -2318,6 +2327,9 @@ StmtPtr ScopeOutliner::OutlineScope(const ScopeStmtPtr& op,
     }
     if (!arg_dir_override_indices.empty()) {
       call_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
+    }
+    if (scope_calendar_hash) {
+      call_attrs.emplace_back(kAttrCalendarHash, std::move(scope_calendar_hash));
     }
     // Launch spec last: the printer emits bespoke keys first and the rest in
     // ``attrs_`` order, and a reparse rebuilds them in printed order — so

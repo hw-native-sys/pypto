@@ -101,6 +101,10 @@ def decode(w: pl.Tensor, hidden: pl.InOut[pl.Tensor]):
 显式前驱约束的是这次调用的外层任务，不会进入已录制 Definition 的内部边。
 Graph 函数仍然写入调用方提供的张量，不能向调用方返回新计算的值或图内任务号。
 运行时在一次编排执行中复用 Definition。
+若希望在 A5 Graph Calendar 在线 PGO 中让标量实参不同但计算开销相近的多次运行共享同一份
+调度计划，可在 `pl.graph("layer", calendar_hash=bucket)`、`pl.submit(layer, ..., calendar_hash=bucket)`
+或直接 Graph 调用 `layer(..., calendar_hash=bucket)` 上传入整数标量表达式作为 `calendar_hash`
+（`0` 也是合法的显式桶号）。不支持 A5 Calendar PGO 的运行时会忽略该提示（TMR 展开 Graph 时直接丢弃）。
 
 以 `tensormap_and_ringbuffer` 为目标时，直接调用 Graph 函数，或使用无需外层依赖和完成号
 的 Graph 作用域。编译器会拒绝以 Graph 为目标的 `pl.submit`，以及通过 `deps=` 或

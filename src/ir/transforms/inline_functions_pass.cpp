@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -975,6 +976,11 @@ class InlineCallsMutator : public IRMutator {
     return copy;
   }
 
+  StmtPtr VisitStmt_(const GraphScopeStmtPtr& op) override {
+    if (auto hoisted = HoistNestedInlineCalls(op)) return SpliceHoisted(*hoisted, op->span_);
+    return IRMutator::VisitStmt_(op);
+  }
+
   bool Changed() const { return changed_; }
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -1427,6 +1433,23 @@ class InlineCallsMutator : public IRMutator {
         auto copy = MutableCopy(branch);
         copy->condition_ = std::move(new_condition);
         rewritten = copy;
+      }
+    } else if (auto scope = As<GraphScopeStmt>(stmt)) {
+      // The hash is evaluated at dispatch, before entering the outlined body.
+      for (size_t i = 0; i < scope->attrs_.size(); ++i) {
+        const auto& [key, v] = scope->attrs_[i];
+        if (key != kAttrCalendarHash) continue;
+        if (const auto* expr = std::any_cast<ExprPtr>(&v); expr && *expr) {
+          auto new_expr = hoister.Hoist(*expr);
+          if (new_expr != *expr) {
+            auto new_attrs = scope->attrs_;
+            new_attrs[i].second = std::move(new_expr);
+            auto copy = MutableCopy(scope);
+            copy->attrs_ = std::move(new_attrs);
+            rewritten = copy;
+          }
+        }
+        break;
       }
     } else if (auto yield = As<YieldStmt>(stmt)) {
       std::vector<ExprPtr> new_values;

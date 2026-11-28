@@ -13,7 +13,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir.printer import python_print
-from pypto.language.parser.diagnostics import ParserSyntaxError
+from pypto.language.parser.diagnostics import ParserSyntaxError, ParserTypeError
 
 
 def _vars(span: ir.Span) -> tuple[ir.Var, ir.Var]:
@@ -118,7 +118,106 @@ def test_print_reparse_round_trip():
     out1 = python_print(func, format=False)
     assert 'pl.graph("layer")' in out1
     out2 = python_print(pl.parse(out1), format=False)
-    assert out1 == out2, f"Round-trip diverged:\n=== first ===\n{out1}\n=== second ===\n{out2}"
+    assert out1 == out2
+
+
+def test_calendar_hash_print_reparse_round_trip():
+    """``calendar_hash=`` on ``pl.graph`` round-trips for literals, vars, and expressions."""
+    src = (
+        "@pl.function(type=pl.FunctionType.Orchestration)\n"
+        "def main(x: pl.Tensor[[64], pl.FP32], n: pl.Scalar[pl.INT64]) -> pl.Tensor[[64], pl.FP32]:\n"
+        '    with pl.graph("zero_bucket", calendar_hash=0):\n'
+        "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "            y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, x)\n"
+        '    with pl.graph("expr_bucket", calendar_hash=n // 128):\n'
+        "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "            z: pl.Tensor[[64], pl.FP32] = pl.tensor.add(y, y)\n"
+        "    return z"
+    )
+    func = pl.parse(src)
+    out1 = python_print(func, format=False)
+    assert 'pl.graph("zero_bucket", calendar_hash=0)' in out1
+    assert 'pl.graph("expr_bucket", calendar_hash=n // 128)' in out1
+    out2 = python_print(pl.parse(out1), format=False)
+    assert out1 == out2
+
+
+def test_calendar_hash_none_is_omitted():
+    """``calendar_hash=None`` is treated as absent."""
+    src = (
+        "@pl.function(type=pl.FunctionType.Orchestration)\n"
+        "def main(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+        '    with pl.graph("layer", calendar_hash=None):\n'
+        "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "            y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, x)\n"
+        "    return y"
+    )
+    out = python_print(pl.parse(src), format=False)
+    assert "calendar_hash" not in out
+
+
+@pytest.mark.parametrize("bad_expr", ["True", "1.5", "x"])
+def test_calendar_hash_rejects_non_integer_types(bad_expr: str):
+    """``pl.graph(..., calendar_hash=...)`` rejects bool, float, and tensor values."""
+    src = (
+        "@pl.function(type=pl.FunctionType.Orchestration)\n"
+        "def main(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+        f'    with pl.graph("layer", calendar_hash={bad_expr}):\n'
+        "        with pl.at(level=pl.Level.CORE_GROUP):\n"
+        "            y: pl.Tensor[[64], pl.FP32] = pl.tensor.add(x, x)\n"
+        "    return y"
+    )
+    with pytest.raises(ParserTypeError, match=r"calendar_hash must be an integer scalar expression"):
+        pl.parse(src)
+
+
+def test_external_graph_call_records_calendar_hash():
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph_fn(c: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        return c
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def caller(c: pl.Tensor[[64], pl.FP32], bucket: pl.Scalar[pl.INT64]):
+        graph_fn(c, calendar_hash=0)
+        graph_fn(c, calendar_hash=bucket)
+
+    assert isinstance(caller.body, ir.SeqStmts)
+    literal, dynamic = caller.body.stmts
+    assert isinstance(literal, ir.EvalStmt) and isinstance(literal.expr, ir.Call)
+    assert isinstance(dynamic, ir.EvalStmt) and isinstance(dynamic.expr, ir.Call)
+    zero = literal.expr.attrs["calendar_hash"]
+    assert isinstance(zero, ir.ConstInt) and zero.value == 0
+    assert dynamic.expr.attrs["calendar_hash"] is caller.params[1]
+
+
+def test_external_graph_call_rejects_unknown_and_unpacked_keywords():
+    @pl.function(type=pl.FunctionType.Graph)
+    def graph_fn(c: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        return c
+
+    with pytest.raises(ParserSyntaxError, match="does not accept keyword argument 'unknown'"):
+
+        @pl.function
+        def unknown(c: pl.Tensor[[64], pl.FP32]):
+            graph_fn(c, unknown=1)
+
+    with pytest.raises(ParserSyntaxError, match=r"does not accept keyword argument '\*\*kwargs'"):
+
+        @pl.function
+        def unpacked(c: pl.Tensor[[64], pl.FP32]):
+            graph_fn(c, **{"calendar_hash": 0})
+
+
+def test_external_non_graph_call_rejects_calendar_hash():
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(c: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        return c
+
+    with pytest.raises(ParserTypeError, match="does not accept keyword argument 'calendar_hash'"):
+
+        @pl.function
+        def caller(c: pl.Tensor[[64], pl.FP32]):
+            kernel(c, calendar_hash=0)
 
 
 if __name__ == "__main__":

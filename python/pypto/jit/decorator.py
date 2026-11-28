@@ -637,7 +637,10 @@ class JITFunction:
                 cache_key = (id(caller), call_name)
                 if cache_key not in call_args_cache:
                     call_args_cache[cache_key] = _call_binding.extract_call_args_for_dep(
-                        caller._func, call_name, orchestrator=dep._func_type == "orchestration"
+                        caller._func,
+                        call_name,
+                        orchestrator=dep._func_type == "orchestration",
+                        graph=dep._func_type == "graph",
                     )
                 if id(dep) in seen:
                     continue

@@ -20,7 +20,8 @@ inside the fragment remain in the IR. The generated orchestration submits the
 individual tasks on each execution.
 
 Graph boundary dump tags are forwarded through the same path as Inline dump
-tags. An explicit `Submit` targeting a Graph function is a compile error on
+tags. An optional `calendar_hash` PGO bucket hint is dropped when TMR inlines a
+Graph call or scope. An explicit `Submit` targeting a Graph function is a compile error on
 TMR. Other metadata attached to a Graph call or scope also produces a diagnostic,
 including outer dependencies and a captured completion TaskId on a Graph scope.
 Those dependencies and IDs refer to the outer scheduling boundary removed by

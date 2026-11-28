@@ -956,6 +956,30 @@ inline constexpr const char* kAttrSyncStart = "sync_start";
 inline constexpr const char* kAttrTaskTimingSlot = "task_timing_slot";
 
 /**
+ * @brief Reserved attr key for an explicit A5 Graph Calendar PGO bucket ID
+ * (``calendar_hash=<int-expr>`` on ``pl.graph(...)``, ``pl.submit(...)``, or
+ * a direct Graph call).
+ *
+ * Value type: ``ExprPtr`` — an integer-typed scalar expression evaluated in
+ * the dispatching scope (e.g. a ``ConstInt``, a caller-local scalar ``Var``,
+ * or integer arithmetic over caller locals).
+ *
+ * On a ``GraphScopeStmt``, ``OutlineGraphScopes`` moves this attr onto the
+ * synthesised ``Call`` or ``Submit`` after remapping its Vars. On TMR,
+ * ``LowerGraphForRuntime`` drops the hint when inlining the Graph body. On
+ * HBG, orchestration codegen emits
+ * ``simpler::hbg::GraphSubmitOptions{static_cast<uint64_t>(<expr>)}`` as the
+ * final argument to ``rt_submit_graph``.
+ */
+inline constexpr const char* kAttrCalendarHash = "calendar_hash";
+
+[[nodiscard]] inline bool IsValidCalendarHashExpr(const ExprPtr& expr) {
+  if (!expr) return false;
+  auto scalar = std::dynamic_pointer_cast<const ScalarType>(expr->GetType());
+  return scalar && (scalar->dtype_.IsInt() || scalar->dtype_ == DataType::INDEX);
+}
+
+/**
  * @brief True for a ``Call`` attr key whose value is a single ``ExprPtr``
  * naming an IR subtree evaluated in the node's own scope.
  *
@@ -973,7 +997,7 @@ inline constexpr const char* kAttrTaskTimingSlot = "task_timing_slot";
  * separately because a Var is remapped rather than recursed into.
  */
 [[nodiscard]] inline bool IsExprValuedCallAttr(const std::string& key) {
-  return key == kAttrWorker || key == kAttrCoreNum;
+  return key == kAttrWorker || key == kAttrCoreNum || key == kAttrCalendarHash;
 }
 
 /**

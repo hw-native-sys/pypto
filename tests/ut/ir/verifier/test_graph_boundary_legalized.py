@@ -478,5 +478,85 @@ def test_graph_submit_rejects_unsupported_launch_metadata(launch):
             passes.legalize_graph_boundary()(outlined)
 
 
+def test_graph_calendar_hash_verifier_accepts_int_and_rejects_invalid_attr():
+    """Valid integer calendar_hash passes; hand-built invalid attrs fail both gate and verifier."""
+    src = (
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        f"{GRAPH_BODY}"
+        "    @pl.function\n"
+        "    def main(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], bucket: pl.Scalar[pl.INT64]) "
+        "-> pl.Tensor[[128, 128], pl.FP32]:\n"
+        "        self.layer(a, c, calendar_hash=bucket)\n"
+        "        return c\n"
+    )
+    program = pl.parse_program(src)
+    assert not _graph_diags(program)
+
+    # Hand-built invalid float calendar_hash on a Graph call must be rejected by both verifier and pass.
+    bad_float_src = (
+        "@pl.program\n"
+        "class BadFloat:\n"
+        "    @pl.function(type=pl.FunctionType.Graph)\n"
+        "    def layer(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        f"{GRAPH_BODY}"
+        "    @pl.function\n"
+        "    def main(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+        '        self.layer(a, c, attrs={"calendar_hash": pl.const(1.5, pl.FP32)})\n'
+        "        return c\n"
+    )
+    bad_float = pl.parse_program(bad_float_src)
+    assert any("invalid calendar_hash" in d.message for d in _graph_diags(bad_float))
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(bad_float))
+        with pytest.raises(ValueError, match="invalid calendar_hash"):
+            passes.legalize_graph_boundary()(outlined)
+
+
+@pytest.mark.parametrize("context", ["graph_free", "inside_graph", "alongside_graph"])
+@pytest.mark.parametrize("dispatch", ["call", "submit"])
+def test_calendar_hash_rejected_on_non_graph_target(context, dispatch):
+    # Raw attrs bypass the DSL keyword check, so both IR checks must enforce ownership.
+    signature = (
+        "(self, a: pl.Tensor[[128, 128], pl.FP32], "
+        "c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:\n"
+    )
+    sibling = ""
+    if context == "alongside_graph":
+        sibling = f"    @pl.function(type=pl.FunctionType.Graph)\n    def layer{signature}{GRAPH_BODY}"
+    caller_type = "Graph" if context == "inside_graph" else "Orchestration"
+    attrs = 'attrs={"calendar_hash": pl.const(0, pl.INT64)}'
+    launch = (
+        f"self.copy(a, c, {attrs})"
+        if dispatch == "call"
+        else f"_out, _tid = pl.submit(self.copy, a, c, {attrs})"
+    )
+    bad_target_src = (
+        "@pl.program\n"
+        "class BadTarget:\n"
+        "    @pl.function(type=pl.FunctionType.InCore)\n"
+        f"    def copy{signature}"
+        "        t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [0, 0], [128, 128])\n"
+        "        return pl.store(t, [0, 0], c)\n"
+        f"{sibling}"
+        f"    @pl.function(type=pl.FunctionType.{caller_type})\n"
+        f"    def caller{signature}"
+        f"        {launch}\n"
+        "        return c\n"
+    )
+    bad_target = pl.parse_program(bad_target_src)
+    assert any("carries calendar_hash" in d.message for d in _graph_diags(bad_target))
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        outlined = passes.outline_incore_scopes()(passes.convert_to_ssa()(bad_target))
+        with pytest.raises(ValueError, match="carries calendar_hash"):
+            passes.legalize_graph_boundary()(outlined)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

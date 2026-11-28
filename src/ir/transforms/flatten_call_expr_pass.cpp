@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <memory>
 #include <optional>
 #include <string>
@@ -185,6 +186,32 @@ class FlattenCallExprMutator : public IRMutator {
     // at the point of use so it follows the same storage and context aliases as an unpack.
     if (As<TupleGetItemExpr>(value) && AsTensorTypeLike(value->GetType())) return BindToTemp(value);
     return ExtractCallToTemp(value);
+  }
+
+  bool FlattenCalendarHashAttr(const std::vector<std::pair<std::string, std::any>>& attrs,
+                               std::vector<std::pair<std::string, std::any>>* out) {
+    bool changed = false;
+    for (const auto& [k, v] : attrs) {
+      if (k == kAttrCalendarHash) {
+        if (const auto* expr = std::any_cast<ExprPtr>(&v); expr && *expr) {
+          auto flattened = FlattenArgument(*expr);
+          if (flattened.get() != expr->get()) {
+            if (!changed) {
+              *out = attrs;
+              changed = true;
+            }
+            for (auto& kv : *out) {
+              if (kv.first == kAttrCalendarHash) {
+                kv.second = std::move(flattened);
+                break;
+              }
+            }
+          }
+        }
+        break;
+      }
+    }
+    return changed;
   }
 
   /**
@@ -417,10 +444,18 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const GraphScopeStmtPtr& op) {
+  std::vector<std::pair<std::string, std::any>> new_attrs;
+  const bool attrs_changed = FlattenCalendarHashAttr(op->attrs_, &new_attrs);
   auto new_body = FlattenScopeBody(op->body_);
-  if (new_body.get() == op->body_.get()) return op;
+  if (!attrs_changed && new_body.get() == op->body_.get()) return op;
+  std::vector<std::pair<std::string, std::any>> attrs_to_use;
+  if (attrs_changed) {
+    attrs_to_use = std::move(new_attrs);
+  } else {
+    attrs_to_use = op->attrs_;
+  }
   return std::make_shared<const GraphScopeStmt>(op->name_hint_, std::move(new_body), op->span_,
-                                                op->leading_comments_, op->attrs_);
+                                                op->leading_comments_, std::move(attrs_to_use));
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const RegScopeStmtPtr& op) {
@@ -498,8 +533,17 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const CallPtr& op) {
     new_args.push_back(std::move(value));
   }
 
-  if (changed) {
-    return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
+  std::vector<std::pair<std::string, std::any>> new_attrs;
+  const bool attrs_changed = FlattenCalendarHashAttr(op->attrs_, &new_attrs);
+  if (changed || attrs_changed) {
+    std::vector<std::pair<std::string, std::any>> attrs_to_use;
+    if (attrs_changed) {
+      attrs_to_use = std::move(new_attrs);
+    } else {
+      attrs_to_use = op->attrs_;
+    }
+    return std::make_shared<Call>(op->op_, new_args, op->kwargs_, std::move(attrs_to_use), op->GetType(),
+                                  op->span_);
   }
   return op;
 }
@@ -519,11 +563,19 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const SubmitPtr& op) {
     new_args.push_back(std::move(value));
   }
 
-  if (changed) {
+  std::vector<std::pair<std::string, std::any>> new_attrs;
+  const bool attrs_changed = FlattenCalendarHashAttr(op->attrs_, &new_attrs);
+  if (changed || attrs_changed) {
+    std::vector<std::pair<std::string, std::any>> attrs_to_use;
+    if (attrs_changed) {
+      attrs_to_use = std::move(new_attrs);
+    } else {
+      attrs_to_use = op->attrs_;
+    }
     // deps_ are TaskId Vars/Arrays, never nested calls — pass through unchanged.
-    return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_, op->GetType(),
-                                    op->span_, op->core_num_, op->sync_start_, op->allow_early_resolve_,
-                                    op->predicate_);
+    return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, std::move(attrs_to_use),
+                                    op->GetType(), op->span_, op->core_num_, op->sync_start_,
+                                    op->allow_early_resolve_, op->predicate_);
   }
   return op;
 }

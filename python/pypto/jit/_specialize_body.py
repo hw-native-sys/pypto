@@ -22,7 +22,12 @@ from pypto.language.diagnostics import ParserError
 from pypto.pypto_core import arith, ir
 
 from . import _specialize_values as values
-from ._call_syntax import PLACEMENT_KEYWORDS, SUBMIT_DISPATCH_KEYWORDS, dependency_call
+from ._call_syntax import (
+    GRAPH_DISPATCH_KEYWORDS,
+    PLACEMENT_KEYWORDS,
+    SUBMIT_DISPATCH_KEYWORDS,
+    dependency_call,
+)
 from ._specialize_types import DynDim, TensorMeta
 
 if TYPE_CHECKING:
@@ -680,6 +685,8 @@ class BodyTransformer(ast.NodeTransformer):
             # Only HOST entries discover chip orchestrators as JIT dependencies.
             if is_submit:
                 dispatch_keys = SUBMIT_DISPATCH_KEYWORDS
+            elif callee is not None and callee.func_type == "graph":
+                dispatch_keys = GRAPH_DISPATCH_KEYWORDS
             elif callee is not None and callee.func_type in (None, "orchestration"):
                 dispatch_keys = PLACEMENT_KEYWORDS
             else:

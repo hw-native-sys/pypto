@@ -228,6 +228,7 @@ class DispatchSemantics:
         allow_early_resolve: bool,
         predicate: "ir.Expr | None",
         timing_slot: int | None,
+        calendar_hash: "ir.Expr | None" = None,
         span: "ir.Span",
     ) -> None:
         """Reject per-task metadata on a Submit nested inside ``pl.cluster()``.
@@ -253,6 +254,8 @@ class DispatchSemantics:
             metadata_fields.append("predicate")
         if timing_slot is not None:
             metadata_fields.append("timing_slot")
+        if calendar_hash is not None:
+            metadata_fields.append("calendar_hash")
         if not metadata_fields:
             return
 
@@ -709,6 +712,51 @@ class DispatchSemantics:
         if slot is not None:
             extra_attrs["task_timing_slot"] = slot
         return slot
+
+    def parse_calendar_hash_kwarg(self, construct: str, keywords: list[ast.keyword]) -> "ir.Expr | None":
+        """Extract the optional ``calendar_hash=<int-expr>`` Graph PGO bucket ID.
+
+        Accepted on ``pl.graph(...)``, ``pl.submit(self.graph_fn, ...)``, and
+        direct calls to ``FunctionType.Graph`` functions. Returns an
+        integer-typed scalar IR expression (converted to ``uint64_t`` in
+        orchestration codegen for ``simpler::hbg::GraphSubmitOptions``), or
+        ``None`` when absent or explicitly ``None``.
+        """
+        kw = next((k for k in keywords if k.arg == "calendar_hash"), None)
+        if kw is None:
+            return None
+        if isinstance(kw.value, ast.Constant) and kw.value.value is None:
+            return None
+        value_span = self.services.span_tracker.get_span(kw.value)
+        if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool):
+            raise ParserTypeError(
+                f"'{construct}' calendar_hash must be an integer scalar expression, got bool",
+                span=value_span,
+                hint="Pass an integer bucket ID (e.g. `calendar_hash=0` or `calendar_hash=seq_len // 128`).",
+            )
+        expr = self.callbacks.expression(kw.value)
+        expr_type = expr.type
+        if not isinstance(expr_type, ir.ScalarType) or expr_type.dtype not in INTEGER_DTYPES:
+            raise ParserTypeError(
+                f"'{construct}' calendar_hash must be an integer scalar expression, got {expr_type}",
+                span=value_span,
+                hint="Pass an integer bucket ID (e.g. `calendar_hash=0` or `calendar_hash=seq_len // 128`).",
+            )
+        return expr
+
+    def record_calendar_hash_attr(
+        self, construct: str, keywords: list[ast.keyword], extra_attrs: dict[str, Any], span: "ir.Span"
+    ) -> "ir.Expr | None":
+        """Parse ``calendar_hash=`` and record its Call/Submit attr when present."""
+        calendar_hash = self.parse_calendar_hash_kwarg(construct, keywords)
+        if calendar_hash is not None:
+            if "calendar_hash" in extra_attrs:
+                raise ParserSyntaxError(
+                    f"Function '{construct}' got duplicate 'calendar_hash' in keyword argument and attrs",
+                    span=span,
+                )
+            extra_attrs["calendar_hash"] = calendar_hash
+        return calendar_hash
 
     def parse_submit_predicate_kwarg(self, method_name: str, keywords: list[ast.keyword]) -> ir.Expr | None:
         """Extract the optional ``predicate=(<tensor>[<indices>] <op> <int>)`` kwarg.
