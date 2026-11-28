@@ -183,11 +183,16 @@ class TileProvenanceChecker : public ir::IRVisitor {
         const auto src_type = As<TileType>(call->args_[0]->GetType());
         const auto src_cols =
             src_type && src_type->shape_.size() == 2 ? As<ir::ConstInt>(src_type->shape_[1]) : nullptr;
+        const auto dst_rows =
+            tile_type->shape_.size() == 2 ? As<ir::ConstInt>(tile_type->shape_[0]) : nullptr;
         const auto dst_cols =
             tile_type->shape_.size() == 2 ? As<ir::ConstInt>(tile_type->shape_[1]) : nullptr;
-        // The slice's type gives its logical width. The emitted subview
-        // keeps the parent's physical pitch until an explicit materialization.
-        if (!src_cols || !dst_cols || src_cols->value_ <= 0 || src_cols->value_ != dst_cols->value_) {
+        // Cropping a single row leaves a contiguous window. Multi-row slices
+        // retain the parent's pitch and need its full width to be packed.
+        const bool contiguous =
+            (dst_rows && dst_rows->value_ == 1) ||
+            (src_cols && dst_cols && src_cols->value_ > 0 && src_cols->value_ == dst_cols->value_);
+        if (!contiguous) {
           non_packed_slices_.insert(op->var_.get());
         }
       }

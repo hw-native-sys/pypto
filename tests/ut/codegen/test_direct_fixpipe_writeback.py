@@ -162,6 +162,40 @@ class Program:
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize(
+    "pool_shape, offset",
+    [
+        pytest.param([1, 16384], [0, 4096], id="flat_pool"),
+        pytest.param([4, 8192], [2, 1024], id="row_window"),
+    ],
+)
+def test_direct_bf16_writeback_to_reshaped_single_row_slice(tmp_path, planner, pool_shape, offset):
+    annotation = (
+        f': pl.Tile[{pool_shape}, pl.BF16, pl.MemRef("ub"), pl.Mem.Vec]'
+        if planner == passes.MemoryPlanner.PYPTO
+        else ""
+    )
+    program = pl.parse_program(f"""
+import pypto.language as pl
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(self, x: pl.Tensor[[32, 64], pl.BF16], y: pl.Tensor[[64, 128], pl.BF16]):
+        lhs = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+        rhs = pl.tile.load(y, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        acc = pl.tile.matmul(lhs, rhs)
+        pool{annotation} = pl.tile.create({pool_shape}, pl.BF16, target_memory=pl.Mem.Vec)
+        flat = pl.tile.slice(pool, [1, 4096], {offset})
+        mailbox = pl.tile.reshape(flat, [32, 128])
+        pl.tpush_to_aiv(acc, split=0, dst=mailbox, aiv_subblockid=0)
+""")
+    mlir = generated_mlir(program, planner=planner)
+    assert "pto.textract " not in mlir
+    cpp = compile_native(tmp_path, mlir, planner=planner).read_text()
+    assert "AccToVecMode::SingleModeVec0" in cpp
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 @pytest.mark.parametrize("cropped", [False, True], ids=["full_width_rows", "column_crop"])
 @pytest.mark.parametrize("binding", ["", "_unused = "], ids=["statement", "assignment"])
 @pytest.mark.parametrize(
