@@ -7,6 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 import subprocess
+from textwrap import indent
 
 import pypto
 import pypto.language as pl
@@ -15,6 +16,7 @@ from pypto import backend, codegen, ir
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.diagnostics import InvalidOperationError
+from pypto.pypto_core import passes
 
 
 @pytest.fixture(autouse=True)
@@ -29,21 +31,23 @@ def lower(program):
     return PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
 
 
-def generated_mlir(program):
-    lowered = lower(program)
-    generated = codegen.PTOCodegen().generate(lowered)
+def generated_mlir(program, *, planner=passes.MemoryPlanner.PYPTO):
+    with passes.PassContext([], memory_planner=planner):
+        lowered = lower(program)
+    generated = codegen.PTOCodegen().generate(lowered, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
     return generated if isinstance(generated, str) else "\n".join(generated.values())
 
 
-def compile_native(tmp_path, mlir, *, output_name="writeback.cpp"):
+def compile_native(tmp_path, mlir, *, output_name="writeback.cpp", planner=passes.MemoryPlanner.PYPTO):
     ptoas = find_ptoas_binary()
     if ptoas is None:
         pytest.skip("PTOAS is unavailable")
     pto = tmp_path / "writeback.pto"
     output = tmp_path / output_name
     pto.write_text(mlir)
+    level = "level2" if planner == passes.MemoryPlanner.PTOAS else "level3"
     subprocess.run(
-        [str(ptoas), "--pto-arch=a5", "--pto-level=level3", str(pto), "-o", str(output)],
+        [str(ptoas), "--pto-arch=a5", f"--pto-level={level}", str(pto), "-o", str(output)],
         check=True,
         timeout=60,
         capture_output=True,
@@ -120,6 +124,145 @@ def test_direct_final_qk_writeback(tmp_path):
     assert "TMOV<STPhase::Final" in cpp and "AccToVecMode::DualModeSplitM" in cpp
 
 
+@pytest.mark.parametrize("lane, final", [(0, False), (1, False), (1, True)])
+def test_direct_bf16_writeback_to_selected_aiv(tmp_path, lane, final):
+    phase = ", st_phase=pl.STPhase.Final" if final else ""
+    matmul_phase = ", acc_phase=pl.AccPhase.Partial" if final else ""
+    accumulate = "acc = pl.tile.matmul_acc(acc, lhs, rhs, acc_phase=pl.AccPhase.Final)" if final else ""
+    program = pl.parse_program(f"""
+import pypto.language as pl
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(self, x: pl.Tensor[[96, 64], pl.BF16], y: pl.Tensor[[64, 256], pl.BF16]):
+        lhs = pl.tile.load(x, [0, 0], [96, 64], target_memory=pl.Mem.Mat)
+        rhs = pl.tile.load(y, [0, 0], [64, 256], target_memory=pl.Mem.Mat)
+        acc = pl.tile.matmul(lhs, rhs{matmul_phase})
+        {accumulate}
+        mailbox = pl.tile.create([96, 256], pl.BF16, target_memory=pl.Mem.Vec)
+        pl.tpush_to_aiv(acc, split=0, dst=mailbox, aiv_subblockid={lane}{phase})
+""")
+    printed = ir.python_print(program)
+    assert f"aiv_subblockid={lane}" in printed
+    ir.assert_structural_equal(program, pl.parse_program(printed))
+
+    mlir = generated_mlir(program)
+    transfers = [line for line in mlir.splitlines() if "accToVecMode" in line]
+    assert len(transfers) == 1
+    move = transfers[0]
+    assert "pto.tmov " in move and f"#pto.acc_to_vec_mode<single_mode_vec{lane}>" in move
+    assert "loc=acc, dtype=f32, rows=96, cols=256" in move
+    assert "loc=vec, dtype=bf16, rows=96, cols=256" in move
+    assert ("#pto<st_phase final>" in move) == final
+    assert "pto.tpush" not in mlir and "pto.tinsert " not in mlir
+    cpp = compile_native(tmp_path, mlir).read_text()
+    assert f"AccToVecMode::SingleModeVec{lane}" in cpp
+    assert "bfloat16_t" in cpp
+    assert ("TMOV<STPhase::Final" in cpp) == final
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("cropped", [False, True], ids=["full_width_rows", "column_crop"])
+@pytest.mark.parametrize("binding", ["", "_unused = "], ids=["statement", "assignment"])
+@pytest.mark.parametrize(
+    "columns, build_mailbox",
+    [
+        pytest.param(128, "mailbox = pl.tile.slice(parent, [32, 128], [32, 0])", id="slice"),
+        pytest.param(128, "mailbox = pl.tile.slice(parent, [32, 128], [row, 0])", id="dynamic_row_slice"),
+        pytest.param(
+            256,
+            "window = pl.tile.slice(parent, [16, 256], [0, 0])\nmailbox = pl.reshape(window, [32, 128])",
+            id="reshape",
+        ),
+        pytest.param(
+            128,
+            "if choose_first:\n"
+            "    mailbox = pl.tile.slice(parent, [32, 128], [0, 0])\n"
+            "else:\n"
+            "    mailbox = pl.tile.slice(parent, [32, 128], [32, 0])",
+            id="if_result",
+        ),
+    ],
+)
+def test_direct_bf16_writeback_checks_mailbox_pitch(
+    tmp_path, planner, cropped, binding, columns, build_mailbox
+):
+    parent_cols = columns * (2 if cropped else 1)
+    program = pl.parse_program(f"""
+import pypto.language as pl
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(self, x: pl.Tensor[[32, 64], pl.BF16], y: pl.Tensor[[64, 128], pl.BF16],
+               choose_first: pl.Scalar[pl.BOOL], row: pl.Scalar[pl.INDEX]):
+        lhs = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+        rhs = pl.tile.load(y, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        acc = pl.tile.matmul(lhs, rhs)
+        parent = pl.tile.create([64, {parent_cols}], pl.BF16, target_memory=pl.Mem.Vec)
+{indent(build_mailbox, "        ")}
+        {binding}pl.tpush_to_aiv(acc, split=0, dst=mailbox, aiv_subblockid=0)
+""")
+    if cropped:
+        with pytest.raises(ValueError, match="requires a contiguous destination"):
+            generated_mlir(program, planner=planner)
+    else:
+        mlir = generated_mlir(program, planner=planner)
+        assert "pto.textract " not in mlir
+        cpp = compile_native(tmp_path, mlir, planner=planner).read_text()
+        assert "AccToVecMode::SingleModeVec0" in cpp
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize(
+    "parent_cols, build_mailbox",
+    [
+        pytest.param(128, "mailbox = pl.tile.slice(parent, [32, 128], [32, col])", id="slice"),
+        pytest.param(
+            128,
+            "mailbox = pl.tile.slice(parent, [32, 128], [32, col], valid_shape=[32, 128])",
+            id="explicit_valid_shape",
+        ),
+        pytest.param(
+            128,
+            "window = pl.tile.slice(parent, [32, 128], [32, col])\nmailbox = window",
+            id="alias",
+        ),
+        pytest.param(
+            256,
+            "window = pl.tile.slice(parent, [16, 256], [0, col])\nmailbox = pl.reshape(window, [32, 128])",
+            id="reshape",
+        ),
+        pytest.param(
+            128,
+            "if choose_first:\n"
+            "    mailbox = pl.tile.slice(parent, [32, 128], [0, 0])\n"
+            "else:\n"
+            "    mailbox = pl.tile.slice(parent, [32, 128], [32, col])",
+            id="if_result",
+        ),
+    ],
+)
+def test_direct_bf16_writeback_rejects_unproven_mailbox_alignment(planner, parent_cols, build_mailbox):
+    # The runtime offset may be zero, but its alignment cannot be proved.
+    # Extracting the window would make FixPipe write into a different allocation.
+    program = pl.parse_program(f"""
+import pypto.language as pl
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(self, x: pl.Tensor[[32, 64], pl.BF16], y: pl.Tensor[[64, 128], pl.BF16],
+               col: pl.Scalar[pl.INDEX], choose_first: pl.Scalar[pl.BOOL]):
+        lhs = pl.tile.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+        rhs = pl.tile.load(y, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        acc = pl.tile.matmul(lhs, rhs)
+        parent = pl.tile.create([64, {parent_cols}], pl.BF16, target_memory=pl.Mem.Vec)
+{indent(build_mailbox, "        ")}
+        pl.tpush_to_aiv(acc, split=0, dst=mailbox, aiv_subblockid=0)
+""")
+    with pytest.raises(ValueError, match="tpush_to_aiv.*statically 32-byte aligned"):
+        generated_mlir(program, planner=planner)
+
+
 @pytest.mark.parametrize(
     "store_phase, producer_phase",
     [
@@ -191,7 +334,7 @@ class Program:
 
 
 def test_unsupported_writeback_split_rejected():
-    with pytest.raises(InvalidOperationError, match="supports only split=1"):
+    with pytest.raises(InvalidOperationError, match="requires split=1 or split=0"):
         pl.parse_program("""
 import pypto.language as pl
 @pl.program
@@ -201,6 +344,34 @@ class Program:
         acc = pl.tile.create([64,64],pl.FP32,target_memory=pl.Mem.Acc)
         channel = pl.tile.create([64,256],pl.FP32,target_memory=pl.Mem.Vec)
         pl.tile.tpush_to_aiv(acc,split=2,dst=channel)
+""")
+
+
+@pytest.mark.parametrize(
+    "dtype, dst_shape, options, diagnostic",
+    [
+        ("BF16", "[64, 64]", "split=0", "requires aiv_subblockid 0 or 1"),
+        ("BF16", "[64, 64]", "split=0, aiv_subblockid=2", "aiv_subblockid must be 0 or 1"),
+        ("BF16", "[64, 64]", "split=0, aiv_subblockid=True", "compile-time Python int"),
+        ("BF16", "[64, 64]", "split=0, aiv_subblockid=lane", "compile-time Python int"),
+        ("FP32", "[64, 64]", "split=0, aiv_subblockid=0", "requires a BF16 destination"),
+        ("BF16", "[32, 64]", "split=1", "requires a FP32 destination"),
+        ("FP32", "[32, 64]", "split=1, aiv_subblockid=0", "aiv_subblockid requires split=0"),
+        ("BF16", "[96, 64]", "split=0, aiv_subblockid=0", "requires a complete destination"),
+        ("BF16", "[96, 64]", "split=0, aiv_subblockid=1, offset=[32, 0]", "requires a complete destination"),
+    ],
+)
+def test_invalid_direct_bf16_writeback(dtype, dst_shape, options, diagnostic):
+    with pytest.raises(InvalidOperationError, match=diagnostic):
+        pl.parse_program(f"""
+import pypto.language as pl
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def kernel(self, lane: pl.Scalar[pl.INT64]):
+        acc = pl.tile.create([64, 64], pl.FP32, target_memory=pl.Mem.Acc)
+        mailbox = pl.tile.create({dst_shape}, pl.{dtype}, target_memory=pl.Mem.Vec)
+        pl.tile.tpush_to_aiv(acc, dst=mailbox, {options})
 """)
 
 

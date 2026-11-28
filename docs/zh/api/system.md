@@ -37,11 +37,16 @@ pl.system.tfree_to_aic(received)
 保持 `outgoing` 的存储有效，直到 AIC 消费方用 `tfree_to_aiv` 释放对应的 V2C slot。
 示例中的 C2V 释放只针对 `received`。
 
-该操作数仅适用于 AIV 侧 Vec Tile entry 和 split=1/2/3/4。
-no-split（`split=0`）、GlobalTensor entry 以及 AIC 侧的
-`tpush_to_aiv` / `tpop_from_aiv` 不接受该参数。已有 split、形状、布局和
-初始化契约仍然有效；该参数不创建管道，也不修改 init schema。
-特别是 PyPTO 继续拒绝 V2C push 的 odd split 3/4。
+FIFO 的显式 lane 要求 AIV 侧 Vec Tile entry 和 split=1/2/3/4。
+已有的 split、形状、布局和初始化规则仍适用，包括 V2C push 的
+odd split 3/4 限制。
+
+在 A5 上，`pl.system.tpush_to_aiv(acc, split=0, dst=mailbox, aiv_subblockid=1)`
+从 AIC 通过 FixPipe 直写 AIV1。此写法接受编译期 Python 整数 0 或 1，
+将完整的 FP32 Acc 转成同形状的连续 BF16 Vec tile，写入偏移为
+`[0, 0]`，行跨度按 32 字节对齐。若 mailbox 是切片，编译器还必须能证明
+其起始地址按 32 字节对齐。调用方负责匹配对端 UB 地址，并显式
+同步生产与消费。
 该矩阵描述编译器契约；设备执行需要分别验证每个架构。
 
 | 路径 | A3 | A5 |
@@ -49,19 +54,20 @@ no-split（`split=0`）、GlobalTensor entry 以及 AIC 侧的
 | 显式 lane，Vec push/pop，split 1/2 | PTOAS 支持该操作数 | PTOAS 支持该操作数；保留 V2C 布局适配 |
 | 显式 lane，C2V pop，split 3/4 | 遵守已有 GM-backed odd split 规则 | 遵守已有 GM-backed odd split 规则 |
 | 显式 lane，V2C push，split 3/4 | 保留 PyPTO 限制 | 后端拒绝 odd V2C |
-| no-split / GlobalTensor / AIC 侧 lane | 拒绝 | 拒绝 |
+| FIFO 中的 split=0、GlobalTensor 或 AIC 侧 lane | 拒绝 | 拒绝 |
+| BF16 `dst`、split=0、静态 lane 的 `tpush_to_aiv` 直写 | 拒绝 | 通过 FixPipe 写入指定的物理 AIV |
 
-运行时由作者保证动态 lane 属于 `{0, 1}`，按匹配的 split 协议提供各个
+在 FIFO 模式中，由作者保证动态 lane 属于 `{0, 1}`，按匹配的 split 协议提供各个
 逻辑 lane，并配对 push/pop/free 次数与 pipe ID。不插入运行时范围检查；
 越界常量会被拒绝。逻辑 lane 的选择不会把操作迁移到其他物理核，
 也不会改变执行它的 kernel。
 
-实际效果取决于后端传输路径。A5 的直接 Acc→UB C2V 管道返回当前
+FIFO lane 的效果取决于后端传输路径。A5 的 Acc→UB C2V 管道返回当前
 AIV 的本地 UB 槽；显式 pop lane 不会把该槽重定位到另一个物理 AIV。
 该路径应使用匹配的物理 lane。当前固定版本的 GM-backed C2V 实现将
 lane 用于 GM 数据分带偏移；该路径仍需单独进行真机验证。
 
-PTO-ISA CPU 模拟器尚未实现显式 lane 重载。这些端点在 `__CPU_SIM`
+PTO-ISA CPU 模拟器尚未实现显式 lane 的 FIFO 重载。这些端点在 `__CPU_SIM`
 下报告编译期诊断；不会删除 lane 来选择其他重载。NPU 执行与
 PyTorch 参考 FIFO 属于独立路径。
 

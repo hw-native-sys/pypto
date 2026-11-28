@@ -38,11 +38,17 @@ pl.system.tfree_to_aic(received)
 Keep `outgoing` live until the AIC consumer releases its V2C slot with
 `tfree_to_aiv`. The C2V release shown here only releases `received`.
 
-Only AIV-side Vec Tile entries and split codes 1/2/3/4 accept the operand.
-No-split (`split=0`), GlobalTensor entries, and AIC-side `tpush_to_aiv` /
-`tpop_from_aiv` do not. Existing split, shape, layout and initialization
-contracts still apply; this argument does not create a pipe or change its
-schema. In particular, PyPTO continues to reject odd V2C push codes 3/4.
+In FIFO mode, explicit lanes require an AIV-side Vec Tile entry and split
+codes 1/2/3/4. Existing split, shape, layout and initialization contracts
+still apply, including the restriction on odd V2C push codes 3/4.
+
+On A5, `pl.system.tpush_to_aiv(acc, split=0, dst=mailbox, aiv_subblockid=1)`
+selects AIV1 for a direct FixPipe writeback from AIC. This form takes a
+compile-time Python integer 0 or 1 and converts the entire FP32 Acc into
+a same-shaped contiguous BF16 Vec mailbox at offset `[0, 0]`. The row pitch
+must be 32-byte aligned. For a mailbox slice, the compiler must also be able
+to prove 32-byte alignment of its base address. The caller supplies the peer
+UB address and orders the producer and consumer with explicit synchronization.
 The matrix describes compiler contracts; device execution needs separate
 validation for each architecture.
 
@@ -51,21 +57,22 @@ validation for each architecture.
 | Explicit lane, Vec push/pop, split 1/2 | PTOAS operand supported | PTOAS operand supported; V2C layout adapter retained |
 | Explicit lane, C2V pop, split 3/4 | Existing GM-backed odd split rules apply | Existing GM-backed odd split rules apply |
 | Explicit lane, V2C push, split 3/4 | PyPTO restriction retained | Backend rejects odd V2C |
-| No-split / GlobalTensor / AIC-side lane | Rejected | Rejected |
+| FIFO lane with split=0, GlobalTensor, or on the AIC side | Rejected | Rejected |
+| Direct `tpush_to_aiv` with BF16 `dst`, split=0, and static lane | Rejected | FixPipe writeback to the selected physical AIV |
 
-At runtime the author must keep dynamic lanes in `{0, 1}`, provide each logical
+In FIFO mode the author must keep dynamic lanes in `{0, 1}`, provide each logical
 lane exactly as required by the matching split protocol, and pair push/pop/free
 counts and pipe IDs. No runtime range guard is inserted. A constant outside
 that range is rejected. Selecting a logical lane does not move the operation
 to another physical core or change the executing kernel.
 
-The effect follows the backend transport. A5's direct Acc→UB C2V pipe returns
+The FIFO lane follows the backend transport. A5's Acc→UB C2V pipe returns
 the executing AIV's local UB slot; an explicit pop lane does not remap that
 slot to the other physical AIV. Use the matching physical lane on this path.
 The pinned GM-backed C2V implementation uses the lane for its GM band offset;
 that route needs separate device validation.
 
-PTO-ISA CPU simulation does not implement the explicit-lane overloads. Such
+PTO-ISA CPU simulation does not implement the explicit-lane FIFO overloads. Such
 endpoints report a compile-time diagnostic under `__CPU_SIM`; the lane is
 never removed to select a different overload. NPU execution and the PyTorch
 reference FIFO are separate paths.

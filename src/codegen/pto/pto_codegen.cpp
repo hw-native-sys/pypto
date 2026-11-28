@@ -131,22 +131,14 @@ std::string FormatFloatConstant(double value, DataType dtype) {
   return os.str();
 }
 
-// Validate the borrowed-Tile ABI using IR value flow, before allocation and phi
-// handles erase view identity. Each dependency edge is visited once by a
-// monotone worklist; ordered lookups keep the analysis O(N log N), including
-// loop backedges. Fresh producers such as tile.extract end view provenance.
-class SimtTileProvenanceChecker : public ir::IRVisitor {
+// Check Tile view provenance before allocation and phi handles erase it.
+// Each worklist visits an alias edge at most once (O(N log N) with ordered
+// lookups), including loop backedges.
+class TileProvenanceChecker : public ir::IRVisitor {
  public:
   void Check(const StmtPtr& body) {
     VisitStmt(body);
-    std::vector<const ir::Var*> worklist(views_.begin(), views_.end());
-    for (size_t i = 0; i < worklist.size(); ++i) {
-      const auto users = users_.find(worklist[i]);
-      if (users == users_.end()) continue;
-      for (const auto* user : users->second) {
-        if (views_.insert(user).second) worklist.push_back(user);
-      }
-    }
+    if (!launches_.empty()) Propagate(views_);
     for (const auto& launch : launches_) {
       for (const auto& arg : launch->args_) {
         if (!As<TileType>(arg->GetType())) continue;
@@ -156,6 +148,12 @@ class SimtTileProvenanceChecker : public ir::IRVisitor {
                "materialize the window with tile.extract before launching";
       }
     }
+    if (!single_lane_writebacks_.empty()) Propagate(non_packed_slices_);
+    for (const auto& fixpipe_call : single_lane_writebacks_) {
+      const auto mailbox = ir::AsVarLike(fixpipe_call->args_[1]);
+      CHECK_SPAN(mailbox && !non_packed_slices_.count(mailbox.get()), fixpipe_call->span_)
+          << "Single-lane tpush_to_aiv requires a contiguous destination with its full physical row pitch";
+    }
   }
 
  protected:
@@ -164,27 +162,40 @@ class SimtTileProvenanceChecker : public ir::IRVisitor {
   void VisitExpr(const ExprPtr&) override {}
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (!As<TileType>(op->var_->GetType())) return;
-    if (ir::AsVarLike(op->value_)) {
-      AddEdge(op->value_, op->var_);
-    } else if (auto call = As<ir::Call>(op->value_)) {
+    const auto call = As<ir::Call>(op->value_);
+    // Binding the result of a side-effecting writeback gives it UnknownType.
+    RecordSingleLaneWriteback(call);
+    const auto tile_type = As<TileType>(op->var_->GetType());
+    if (!tile_type) return;
+    if (call) {
       // YieldFixup may insert tile.move into the canonical branch storage;
-      // it is not proof of an independent dense allocation. Require explicit
-      // tile.extract for materialization of an otherwise unsupported view.
-      // assemble updates input 0 without changing its physical layout. The
-      // inserted source's view provenance does not describe the destination.
+      // it is not proof of an independent dense allocation. The other ops
+      // update input 0 and keep that destination's physical pitch.
       if (ir::IsOp(call, "tile.move") || ir::IsOp(call, "tile.set_validshape") ||
           ir::IsOp(call, "tile.assemble")) {
         AddEdge(call->args_[0], op->var_);
-      } else if (ir::op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
+        return;
+      }
+      if (ir::op_predicates::IsBufferAliasingViewOp(call->op_->name_)) {
         views_.insert(op->var_.get());
-      } else if (const auto* entry = ir::LookupOpEntry(call->op_)) {
-        if (const auto input = entry->GetOutputReusesInputArg()) {
-          AddEdge(call->args_[*input], op->var_);
+      }
+      if (ir::IsOp(call, "tile.slice")) {
+        const auto src_type = As<TileType>(call->args_[0]->GetType());
+        const auto src_cols =
+            src_type && src_type->shape_.size() == 2 ? As<ir::ConstInt>(src_type->shape_[1]) : nullptr;
+        const auto dst_cols =
+            tile_type->shape_.size() == 2 ? As<ir::ConstInt>(tile_type->shape_[1]) : nullptr;
+        // The slice's type gives its logical width. The emitted subview
+        // keeps the parent's physical pitch until an explicit materialization.
+        if (!src_cols || !dst_cols || src_cols->value_ <= 0 || src_cols->value_ != dst_cols->value_) {
+          non_packed_slices_.insert(op->var_.get());
         }
       }
     }
+    if (auto source = ir::op_predicates::GetBufferAliasSource(op->value_)) AddEdge(source, op->var_);
   }
+
+  void VisitStmt_(const EvalStmtPtr& op) override { RecordSingleLaneWriteback(As<ir::Call>(op->expr_)); }
 
   void VisitStmt_(const IfStmtPtr& op) override {
     yield_targets_.push_back(op->return_vars_);
@@ -199,7 +210,7 @@ class SimtTileProvenanceChecker : public ir::IRVisitor {
     if (yield_targets_.empty()) return;
     const auto& targets = yield_targets_.back();
     INTERNAL_CHECK_SPAN(op->value_.size() == targets.size(), op->span_)
-        << "Internal error: SIMT provenance yield arity mismatch";
+        << "Internal error: Tile provenance yield arity mismatch";
     for (size_t i = 0; i < targets.size(); ++i) AddEdge(op->value_[i], targets[i]);
   }
 
@@ -211,6 +222,23 @@ class SimtTileProvenanceChecker : public ir::IRVisitor {
   }
 
  private:
+  void RecordSingleLaneWriteback(const CallPtr& call) {
+    if (call && ir::IsOp(call, "tile.tpush_to_aiv_direct") && call->GetKwarg<int>("split", 0) == 0) {
+      single_lane_writebacks_.push_back(call);
+    }
+  }
+
+  void Propagate(std::set<const ir::Var*>& values) const {
+    std::vector<const ir::Var*> worklist(values.begin(), values.end());
+    for (size_t i = 0; i < worklist.size(); ++i) {
+      const auto users = users_.find(worklist[i]);
+      if (users == users_.end()) continue;
+      for (const auto* user : users->second) {
+        if (values.insert(user).second) worklist.push_back(user);
+      }
+    }
+  }
+
   void AddEdge(const ExprPtr& source, const VarPtr& target) {
     if (!As<TileType>(target->GetType())) return;
     const auto var = ir::AsVarLike(source);
@@ -231,8 +259,10 @@ class SimtTileProvenanceChecker : public ir::IRVisitor {
 
   std::map<const ir::Var*, std::vector<const ir::Var*>> users_;
   std::set<const ir::Var*> views_;
+  std::set<const ir::Var*> non_packed_slices_;
   std::vector<std::vector<VarPtr>> yield_targets_;
   std::vector<ir::SimtLaunchStmtPtr> launches_;
+  std::vector<CallPtr> single_lane_writebacks_;
 };
 
 // Implemented by the generated kernel wrapper rather than by PTO MLIR. Keep
@@ -1392,7 +1422,9 @@ void PTOCodegen::EmitUrmaTransferAdapterDeclarations() {
 }
 
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
-  if (!simt_functions_.empty()) SimtTileProvenanceChecker().Check(func->body_);
+  if (!simt_functions_.empty() || func->func_type_ == ir::FunctionType::AIC) {
+    TileProvenanceChecker().Check(func->body_);
+  }
   parameter_backed_tile_bases_.clear();
   if (UsesBufferIR(func)) {
     GenerateBufferFunction(func);

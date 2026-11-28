@@ -237,6 +237,7 @@ print(pto_code)
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
 | `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst`；支持的 ND Vec 复制 / A5 BF16 NZ Vec-to-Mat 插入 / FIXPIPE 写回使用 `pto.tinsert`，其他情况使用 `pto.subview` + `pto.tmov` |
 | `tile.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col], st_phase=...)` | A5 split-M FIXPIPE 直接写回：`pto.tinsert`，或整窗 final 写回使用带 `stPhase=final` 的 `pto.tmov` |
+| `tile.tpush_to_aiv(acc, split=0, dst=bf16_dst, aiv_subblockid=lane)` | A5 FP32 Acc → BF16 Vec 直写：使用 `single_mode_vec0` 或 `single_mode_vec1` 的 `pto.tmov` |
 | `tile.mark_remote_written(tile)` | 不产生指令；为寄存器分析标记对端已初始化的 UB 区间 |
 | `tile.set_validshape(tile, vr, vc)` | 发 `pto.set_validshape`；操作数是视图时报错（见下） |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |

@@ -844,8 +844,8 @@ def test_aiv_lane_omission_and_wrong_direction():
     tile = ir.Var("tile", ir.TileType([16, 16], DataType.FP32), ir.Span.unknown())
     assert len(tile_ops.tpush_to_aic(tile, split=0).args) == 1
     assert not tile_ops.tpop_from_aic(split=0).args
-    with pytest.raises(TypeError, match="aiv_subblockid"):
-        getattr(tile_ops, "tpush_to_aiv")(tile, split=1, aiv_subblockid=0)
+    with pytest.raises(ValueError, match="requires an explicit dst when using aiv_subblockid"):
+        tile_ops.tpush_to_aiv(tile, split=1, aiv_subblockid=0)
     with pytest.raises(TypeError, match="aiv_subblockid"):
         getattr(tile_ops, "tpop_from_aiv")(split=1, aiv_subblockid=0)
 

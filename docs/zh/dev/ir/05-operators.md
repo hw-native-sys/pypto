@@ -708,7 +708,7 @@ A5 buffer token 操作返回 `UnknownType`，固定在 CUBE lane。EmitC 将 M �
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
 | `tile.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `split`，可选 `id` |
-| `tile.tpush_to_aiv_direct`（内部） | 3 (Acc, dst, offset) | 直接推送到对端 UB，不使用 FIFO | `split=1`，`st_phase` |
+| `tile.tpush_to_aiv_direct`（内部） | 3 (Acc, dst, offset) | 直接写入对端 UB。Split 1 向两个 AIV 各发送一半 FP32 行，支持分片偏移。Split 0 见[显式 AIV lane](../../api/system.md#显式-aiv-lane)。 | `split`，`st_phase`，可选 `aiv_subblockid` |
 | `tile.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `split`，可选 `id` |
 | `tile.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `split`，可选 `id` |
 | `tile.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `split`，可选 `id` |

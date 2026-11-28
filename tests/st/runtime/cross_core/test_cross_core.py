@@ -1242,22 +1242,33 @@ def test_acc_store_cache_policy_preserves_results(case_run, policy):
     case_run.assert_passed()
 
 
-def _direct_push(final: bool):
+def _direct_push(final: bool, *, bf16: bool):
+    dtype = pl.BF16 if bf16 else pl.FP32
+
     @pl.jit.incore(level=pl.Level.AIC)
     def produce(
         a: pl.Tensor[[64, 64], pl.BF16],
         b: pl.Tensor[[64, 128], pl.BF16],
     ):
-        mailbox: pl.Tile[[32, 128], pl.FP32, pl.MemRef("ub"), pl.Mem.Vec] = pl.tile.create(
-            [32, 128], pl.FP32, target_memory=pl.Mem.Vec
+        mailbox: pl.Tile[[32, 128], dtype, pl.MemRef("ub"), pl.Mem.Vec] = pl.tile.create(
+            [32, 128], dtype, target_memory=pl.Mem.Vec
         )
-        left = pl.tile.load(a, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
-        if final:
+        if bf16:
+            right = pl.tile.load(b, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+            left0 = pl.tile.load(a, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+            acc0 = pl.tile.matmul(left0, right)
+            pl.tpush_to_aiv(acc0, split=0, dst=mailbox, aiv_subblockid=0)
+            left1 = pl.tile.load(a, [32, 0], [32, 64], target_memory=pl.Mem.Mat)
+            acc1 = pl.tile.matmul(left1, right)
+            pl.tpush_to_aiv(acc1, split=0, dst=mailbox, aiv_subblockid=1)
+        elif final:
+            left = pl.tile.load(a, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
             right = pl.tile.load(b, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
             acc = pl.tile.matmul(left, right, acc_phase=pl.AccPhase.Partial)
             acc = pl.tile.matmul_acc(acc, left, right, acc_phase=pl.AccPhase.Final)
             pl.tpush_to_aiv(acc, split=1, dst=mailbox, st_phase=pl.STPhase.Final)
         else:
+            left = pl.tile.load(a, [0, 0], [64, 64], target_memory=pl.Mem.Mat)
             for part in pl.range(2):
                 right = pl.tile.load(b, [0, part * 64], [64, 64], target_memory=pl.Mem.Mat)
                 acc = pl.tile.matmul(left, right)
@@ -1268,10 +1279,10 @@ def _direct_push(final: bool):
         pl.system.set_intra_block(20, pipe=pl.PipeType.FIX)
 
     @pl.jit.incore(level=pl.Level.AIV)
-    def consume(out: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+    def consume(out: pl.Out[pl.Tensor[[64, 128], dtype]]):
         pl.func_attr({"split_aiv": True, "split": pl.SplitMode.NONE})
-        mailbox: pl.Tile[[32, 128], pl.FP32, pl.MemRef("ub"), pl.Mem.Vec] = pl.tile.create(
-            [32, 128], pl.FP32, target_memory=pl.Mem.Vec
+        mailbox: pl.Tile[[32, 128], dtype, pl.MemRef("ub"), pl.Mem.Vec] = pl.tile.create(
+            [32, 128], dtype, target_memory=pl.Mem.Vec
         )
         pl.system.wait_intra_block(4, pipe=pl.PipeType.MTE3)
         pl.tile.mark_remote_written(mailbox)
@@ -1281,7 +1292,7 @@ def _direct_push(final: bool):
     def group(
         a: pl.Tensor[[64, 64], pl.BF16],
         b: pl.Tensor[[64, 128], pl.BF16],
-        out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        out: pl.Out[pl.Tensor[[64, 128], dtype]],
     ):
         produce(a, b)
         return consume(out)
@@ -1290,7 +1301,7 @@ def _direct_push(final: bool):
     def main(
         a: pl.Tensor[[64, 64], pl.BF16],
         b: pl.Tensor[[64, 128], pl.BF16],
-        out: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+        out: pl.Out[pl.Tensor[[64, 128], dtype]],
     ):
         with pl.spmd(1):
             out = group(a, b, out)
@@ -1299,21 +1310,25 @@ def _direct_push(final: bool):
     return main
 
 
-def _direct_push_case(final: bool):
+def _direct_push_case(final: bool, *, bf16: bool = False):
     a = torch.arange(1, 65, dtype=torch.bfloat16).reshape(64, 1).expand(64, 64).contiguous()
     b = torch.arange(1, 129, dtype=torch.bfloat16).expand(64, 128).contiguous()
-    out = torch.zeros(64, 128)
+    out = torch.zeros(64, 128, dtype=torch.bfloat16 if bf16 else torch.float32)
 
     def golden(tensors):
         product = tensors["a"].float() @ tensors["b"].float()
+        if bf16:
+            # The two 32-row products differ, so swapping or broadcasting either lane fails.
+            return product.bfloat16()
         return product * 2 if final else product
 
+    name = "direct_bf16_selected_lane" if bf16 else ("direct_final" if final else "direct_column_fragments")
     return st.case(
-        _direct_push(final),
+        _direct_push(final, bf16=bf16),
         a,
         b,
         out,
-        name="direct_final" if final else "direct_column_fragments",
+        name=name,
         golden=golden,
         rtol=0,
         atol=0,
@@ -1321,7 +1336,7 @@ def _direct_push_case(final: bool):
 
 
 @pytest.mark.platforms("a5")
-@st.cases(_direct_push_case(False), _direct_push_case(True))
+@st.cases(_direct_push_case(False), _direct_push_case(True), _direct_push_case(False, bf16=True))
 def test_direct_tpush_to_aiv(case_run):
     case_run.assert_passed()
 
