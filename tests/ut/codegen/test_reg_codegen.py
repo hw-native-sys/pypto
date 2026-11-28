@@ -586,33 +586,40 @@ def test_vf_storage_generators_and_masks_compile(dtype, active, tmp_path):
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("predicate", ["eq", "ne", "lt", "le", "gt", "ge"])
 @pytest.mark.parametrize("scalar", [False, True])
-def test_vf_comparison_predicates_compile(predicate, scalar, tmp_path):
+@pytest.mark.parametrize(
+    "dtype, lanes, value",
+    [(DataType.FP32, 64, 2.0), (DataType.UINT8, 256, 128), (DataType.UINT16, 128, 32768)],
+)
+def test_vf_comparison_predicates_compile(predicate, scalar, dtype, lanes, value, tmp_path):
     ib = IRBuilder()
     with ib.function("comparison", span=SPAN, type=ir.FunctionType.AIV) as f:
-        dst = ib.let("dst", tile.full([128], dtype=DataType.FP32, value=0))
+        dst = ib.let("dst", tile.full([lanes], dtype=dtype, value=0))
         with ib.reg_scope(SPAN):
-            x = ib.emit_reg(
-                "x",
-                "reg.broadcast",
-                [ir.ConstFloat(1, DataType.FP32, SPAN)],
-                {"lanes": 64, "dtype": DataType.FP32},
-                SPAN,
+            lhs = (
+                ir.ConstFloat(float(value), dtype, SPAN)
+                if dtype.is_float()
+                else ir.ConstInt(int(value), dtype, SPAN)
             )
-            seed = ib.emit_reg("seed", "reg.full_mask", [], {"lanes": 64}, SPAN)
-            rhs = ir.ConstFloat(0, DataType.FP32, SPAN) if scalar else x
+            threshold = ir.ConstFloat(1, dtype, SPAN) if dtype.is_float() else ir.ConstInt(1, dtype, SPAN)
+            attrs = {"lanes": lanes, "dtype": dtype}
+            x = ib.emit_reg("x", "reg.broadcast", [lhs], attrs, SPAN)
+            y = ib.emit_reg("y", "reg.broadcast", [threshold], attrs, SPAN)
+            seed = ib.emit_reg("seed", "reg.full_mask", [], {"lanes": lanes}, SPAN)
             condition = ib.emit_reg(
                 "condition",
                 "reg.compares" if scalar else "reg.compare",
-                [x, rhs, seed],
+                [x, threshold if scalar else y, seed],
                 {"predicate": predicate},
                 SPAN,
             )
-            value = ib.emit_reg("value", "reg.select", [condition, x, x], span=SPAN)
-            ib.emit_reg_store("out", dst, value, span=SPAN)
+            selected = ib.emit_reg("selected", "reg.select", [condition, x, y], span=SPAN)
+            ib.emit_reg_store("out", dst, selected, span=SPAN)
     with passes.PassContext([]):
         program = passes.init_mem_ref()(ir.Program([f.get_result()], "Comparison", SPAN))
     source = generate(program)
     assert f'cmp = "{predicate}"' in source
+    assert ("pto.vmi.vcmps " if scalar else "pto.vmi.vcmp ") in source
+    assert f"!pto.vmi.mask<{lanes}xpred>" in source
     assert "pto.vmi.vsel " in source
     compile_review_pto(source, tmp_path)
 
@@ -1461,6 +1468,34 @@ def test_squeeze_store_micro_carries_ureg_and_flushes_after_loop(dtype, lanes, t
 @pytest.mark.parametrize("dtype,lanes", [("UINT16", 128), ("UINT32", 64)])
 def test_squeeze_store_micro_compiles_with_ptoas(dtype, lanes, tmp_path):
     compile_review_pto(generate(squeeze_store_program(dtype, lanes)), tmp_path)
+
+
+@pytest.mark.ptoas_compile
+def test_uint16_comparisons_feed_squeeze_store(tmp_path):
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def select_positions():
+    src = pl.tile.full([128], pl.UINT16, 32768)
+    dst = pl.tile.full([128], pl.UINT16, 65535)
+    with pl.reg_scope():
+        keys = pl.reg.load(src, lanes=128)
+        cutoff = pl.reg.broadcast(32767, lanes=128, dtype=pl.UINT16)
+        seed = pl.reg.full_mask(lanes=128)
+        above_cutoff = pl.reg.compare(keys, cutoff, seed, predicate="gt")
+        keep = pl.reg.compares(keys, 127, above_cutoff, predicate="gt")
+        indices = pl.reg.index_gen(0, lanes=128, dtype=pl.UINT16)
+        state = pl.reg.squeeze_store_init(dst)
+        packed = pl.reg.squeeze_store_step(state, dst, indices, keep)
+        _written = pl.reg.squeeze_store_flush(packed, dst)
+""")
+    assert isinstance(function, ir.Function)
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(ir.Program([function], "SelectPositions", SPAN))
+    source = generate(program)
+    assert "pto.vcmp " in source and "pto.vcmps " in source
+    assert "pto.vsqz " in source
+    assert "!pto.mask<b16>" in source
+    compile_review_pto(source, tmp_path)
 
 
 def test_squeeze_store_codegen_recovers_after_failed_generation():
