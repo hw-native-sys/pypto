@@ -131,6 +131,18 @@ bool IsMxProvableNonNegative(const ExprPtr& expr, const MxOffsetFacts& facts, in
     return IsMxProvableNonNegative(add->left_, facts, budget) &&
            IsMxProvableNonNegative(add->right_, facts, budget);
   }
+  // An explicit lower bound (for example max(row, 0)) makes an aligned
+  // scale window safe even when its dynamic row origin is otherwise unknown.
+  if (auto max = As<Max>(expr)) {
+    return IsMxProvableNonNegative(max->left_, facts, budget) ||
+           IsMxProvableNonNegative(max->right_, facts, budget);
+  }
+  // Floor remainder with a positive divisor is nonnegative even when the
+  // dividend (for example a panel index assigned to a core) is not known.
+  if (auto mod = As<FloorMod>(expr)) {
+    auto denominator = As<ConstInt>(mod->right_);
+    return denominator && denominator->value_ > 0;
+  }
   if (auto floordiv = As<FloorDiv>(expr)) {
     auto denominator = As<ConstInt>(floordiv->right_);
     if (!denominator || denominator->value_ <= 0) return false;

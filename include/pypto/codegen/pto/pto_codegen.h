@@ -374,6 +374,14 @@ class PTOCodegen : public CodegenBase {
    */
   [[nodiscard]] ir::VarPtr GetCurrentResultVar() const;
 
+  /// Bind an extracted MX scale buffer before TEXTRACT writes its contents.
+  /// The InsertMxScaleAddr pass supplies the paired data operand at its consumer.
+  void EmitMxScaleExtractBinding(const std::string& scale, const std::string& scale_type,
+                                 const ir::Span& span);
+
+  /// True when the identical scale/data binding was emitted before extraction.
+  [[nodiscard]] bool HasEarlyMxScaleExtractBinding(const ir::ExprPtr& scale, const ir::ExprPtr& data) const;
+
   /**
    * @brief Get tensor_view type string for a TensorType (e.g., "!pto.tensor_view<?x?xf32>")
    */
@@ -1129,13 +1137,16 @@ class PTOCodegen : public CodegenBase {
                                                       const ir::VarPtr& then_value,
                                                       const ir::VarPtr& else_value) const;
 
+  /// Whether the named allocation or view descriptor dominates the current region.
+  [[nodiscard]] bool HasDominatingTileDescriptor(const std::string& name) const;
+
   /**
    * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.
    *
    * The head prologue is rendered after the body and prepended, so a handle
    * declared here dominates every use — including uses inside `scf.if` branches
    * and reads after the region. Returns false (and declares nothing) when the
-   * handle already has an `alloc_tile`.
+   * handle already has an `alloc_tile` or is a dominating view descriptor.
    */
   bool DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields);
 
@@ -1328,11 +1339,13 @@ class PTOCodegen : public CodegenBase {
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).
     std::set<std::string> emitted_tile_alloc_names;
-    /// Declaration region for each emitted/staged alloc. Region 0 is the
+    /// Declaration region for each emitted/staged alloc_tile. Region 0 is the
     /// function body/head; every SCF region gets a unique ID, including sibling
     /// branches at the same nesting depth. Only active ancestor regions dominate
     /// the current emission point. Keep this separate from function-wide dedup.
     std::map<std::string, size_t> tile_alloc_scope;
+    /// Fresh view descriptors share region IDs, but are not allocation handles.
+    std::map<std::string, size_t> tile_view_scope;
     std::vector<size_t> tile_alloc_scope_stack{0};
     std::set<size_t> active_tile_alloc_scopes{0};
     size_t next_tile_alloc_scope = 0;
@@ -1341,6 +1354,10 @@ class PTOCodegen : public CodegenBase {
     ir::VarPtr current_result_var;
     std::string current_result_buf;
     std::shared_ptr<const ir::TileType> current_result_tile_type;
+    std::map<const ir::Var*, ir::VarPtr> mx_scale_extract_data;
+    /// Paired L0 data derived from a boxed slice, requiring descriptor-based binding.
+    std::set<const ir::Var*> mx_scale_subview_data;
+    std::set<const ir::Var*> early_bound_mx_scale_extracts;
 
     std::string gm_slot_buffer_ssa;
     DataType gm_slot_buffer_dtype = DataType::FP32;
@@ -1437,6 +1454,7 @@ class PTOCodegen : public CodegenBase {
       memref_identity_mixed_types.clear();
       emitted_tile_alloc_names.clear();
       tile_alloc_scope.clear();
+      tile_view_scope.clear();
       tile_alloc_scope_stack = {0};
       active_tile_alloc_scopes = {0};
       next_tile_alloc_scope = 0;
@@ -1451,6 +1469,9 @@ class PTOCodegen : public CodegenBase {
       current_result_var.reset();
       current_result_buf.clear();
       current_result_tile_type = nullptr;
+      mx_scale_extract_data.clear();
+      mx_scale_subview_data.clear();
+      early_bound_mx_scale_extracts.clear();
 
       gm_slot_buffer_ssa.clear();
       gm_slot_buffer_dtype = DataType::FP32;

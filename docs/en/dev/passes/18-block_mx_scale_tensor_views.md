@@ -140,6 +140,8 @@ non-negativity. It understands:
 - scalar SSA definitions;
 - constants, multiplication, addition, and subtraction for divisibility;
 - positive power-of-two floor division, including forms such as `k0 // 32`;
+- `max` with a provably non-negative operand, and floor remainder with a
+  positive constant divisor, for non-negativity (e.g. `max(row, 0)` or `panel % 9`);
 - loop variables with constant start and step;
 - the non-negative results of `tile.get_block_idx` and `tile.get_block_num`;
 - scalar arguments propagated through every Call and Submit site.

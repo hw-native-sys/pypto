@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
+#include "pypto/ir/transforms/utils/lifetime_analysis.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -1439,6 +1440,299 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   fs_.current_function = func;
   fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(func->body_, func->params_);
 
+  // TEXTRACT writes the scale tile immediately. Unlike TMOV, PTOAS 0.78 does
+  // not move a later tget_scale_addr ahead of that write. Index the MX pairs
+  // once so the extraction emitter can bind the address before writing it.
+  {
+    class MxScaleBindingCollector : public ir::IRVisitor {
+     public:
+      std::map<const ir::Var*, ir::VarPtr> bindings;
+      std::set<const ir::Var*> extracts;
+      std::map<const ir::Var*, size_t> uses;
+      std::map<const ir::Var*, size_t> binding_uses;
+      std::vector<std::pair<ir::VarPtr, ir::VarPtr>> all_bindings;
+      std::map<const ir::Var*, ir::VarPtr> scale_aliases;
+      std::set<const ir::Var*> data_subviews;
+      // The allocation analyzer tracks the concrete producers, not phi or
+      // loop-carried SSA handles. Keep their incoming value graph separately.
+      std::map<const ir::Var*, std::vector<ir::VarPtr>> incoming_values;
+      std::map<const ir::Var*, size_t> definitions;
+      size_t next_definition = 1;
+
+     protected:
+      void VisitStmt_(const ir::AssignStmtPtr& stmt) override {
+        auto call = As<ir::Call>(stmt->value_);
+        auto tile = As<ir::TileType>(stmt->var_->GetType());
+        if (tile && (tile->GetMemorySpace() == ir::MemorySpace::LeftScale ||
+                     tile->GetMemorySpace() == ir::MemorySpace::RightScale)) {
+          if (ir::IsOp(call, "tile.extract")) extracts.insert(stmt->var_.get());
+          // Follow the registry's storage alias contract, including metadata
+          // updates and descriptor views. A late alias is not a new scale write.
+          if (auto scale = ir::AsVarLike(ir::op_predicates::GetBufferAliasSource(stmt->value_))) {
+            scale_aliases.emplace(stmt->var_.get(), scale);
+          }
+          if (ir::IsOp(call, "tile.bind_scale_addr")) {
+            if (auto data = ir::AsVarLike(call->args_[0])) {
+              all_bindings.emplace_back(stmt->var_, data);
+            }
+          }
+        } else if (tile && (tile->GetMemorySpace() == ir::MemorySpace::Left ||
+                            tile->GetMemorySpace() == ir::MemorySpace::Right)) {
+          if (ir::IsOp(call, "tile.slice")) data_subviews.insert(stmt->var_.get());
+          if (auto source = ir::op_predicates::GetBufferAliasSource(stmt->value_)) {
+            RecordIncoming(stmt->var_, source);
+          }
+        }
+        // Count only RHS uses; assignment targets are definitions.
+        VisitExpr(stmt->value_);
+        definitions[stmt->var_.get()] = next_definition++;
+      }
+      void RecordIncoming(const ir::VarPtr& target, const ir::ExprPtr& value) {
+        if (!As<ir::TileType>(target->GetType())) return;
+        // Preserve an unknown incoming edge rather than silently ignoring it.
+        incoming_values[target.get()].push_back(ir::AsVarLike(value));
+      }
+      void RecordYields(const std::vector<ir::VarPtr>& targets, const ir::StmtPtr& body) {
+        auto yield = ir::transform_utils::GetLastYieldStmt(body);
+        if (!yield) return;
+        for (size_t i = 0; i < std::min(targets.size(), yield->value_.size()); ++i) {
+          RecordIncoming(targets[i], yield->value_[i]);
+        }
+      }
+      void RecordLoopSources(const std::vector<ir::IterArgPtr>& args, const std::vector<ir::VarPtr>& returns,
+                             const ir::StmtPtr& body) {
+        auto yield = ir::transform_utils::GetLastYieldStmt(body);
+        for (size_t i = 0; i < args.size(); ++i) {
+          RecordIncoming(args[i], args[i]->initValue_);
+          if (yield && i < yield->value_.size()) RecordIncoming(args[i], yield->value_[i]);
+          if (i < returns.size()) RecordIncoming(returns[i], args[i]);
+        }
+      }
+      void VisitStmt_(const ir::IfStmtPtr& stmt) override {
+        ir::IRVisitor::VisitStmt_(stmt);
+        RecordYields(stmt->return_vars_, stmt->then_body_);
+        if (stmt->else_body_) RecordYields(stmt->return_vars_, *stmt->else_body_);
+        for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
+      }
+      void VisitStmt_(const ir::ForStmtPtr& stmt) override {
+        for (const auto& arg : stmt->iter_args_) definitions[arg.get()] = next_definition++;
+        ir::IRVisitor::VisitStmt_(stmt);
+        RecordLoopSources(stmt->iter_args_, stmt->return_vars_, stmt->body_);
+        for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
+      }
+      void VisitStmt_(const ir::WhileStmtPtr& stmt) override {
+        for (const auto& arg : stmt->iter_args_) definitions[arg.get()] = next_definition++;
+        ir::IRVisitor::VisitStmt_(stmt);
+        RecordLoopSources(stmt->iter_args_, stmt->return_vars_, stmt->body_);
+        for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
+      }
+      void VisitExpr_(const ir::VarPtr& var) override { ++uses[var.get()]; }
+      void VisitExpr_(const ir::CallPtr& call) override {
+        if (ir::IsOp(call, "tile.tget_scale_addr")) {
+          auto scale = ir::AsVarLike(call->args_[0]);
+          auto data = ir::AsVarLike(call->args_[1]);
+          if (scale && data) {
+            ++binding_uses[scale.get()];
+            all_bindings.emplace_back(scale, data);
+            auto [it, inserted] = bindings.emplace(scale.get(), data);
+            if (!inserted && it->second != data) it->second.reset();
+          }
+        }
+        ir::IRVisitor::VisitExpr_(call);
+      }
+    };
+    MxScaleBindingCollector collector;
+    for (const auto& param : func->params_) collector.definitions[param.get()] = 0;
+    collector.VisitStmt(func->body_);
+    // Direct extraction is supported only for its paired MX operands. Check
+    // every extracted scale, including one whose only binding is hidden behind
+    // an alias or a control-flow result, before filtering the binding map.
+    for (const auto* scale : collector.extracts) {
+      CHECK_SPAN(collector.uses[scale] == collector.binding_uses[scale], scale->span_)
+          << "MX scale TEXTRACT output must only be used by its paired MX matmul";
+    }
+    // Only the producer's own destination can be rebound before TEXTRACT.
+    for (auto it = collector.bindings.begin(); it != collector.bindings.end();) {
+      if (!collector.extracts.count(it->first)) {
+        it = collector.bindings.erase(it);
+      } else {
+        CHECK_SPAN(it->second, it->first->span_)
+            << "MX scale TEXTRACT requires a single corresponding data tile";
+        const auto def = collector.definitions.find(it->second.get());
+        // The scale's live range must be contained in that of its data tile.
+        // A scale-first producer could otherwise overlap another scale while
+        // the allocator reuses the two non-overlapping L0 data addresses.
+        CHECK_SPAN(def != collector.definitions.end() && def->second < collector.definitions.at(it->first),
+                   it->first->span_)
+            << "Define the MX data tile before extracting its corresponding scale tile";
+        ++it;
+      }
+    }
+    // Boxed Left/Right slice MemRefs use logical row-major byte offsets,
+    // not the hardware fractal addresses. Follow storage/view and control-flow
+    // aliases to the original allocations. Use their whole backing ranges for
+    // interference checks: disjoint logical windows need not be disjoint in L0.
+    struct DataFootprint {
+      bool has_subview = false;
+      bool unknown = false;
+      std::vector<ir::MemRefPtr> refs;
+    };
+    std::map<const ir::Var*, DataFootprint> footprints;
+    if (!collector.bindings.empty()) {
+      for (const auto& [scale, data] : collector.all_bindings) {
+        auto [it, inserted] = footprints.try_emplace(data.get());
+        if (!inserted) continue;
+        auto& footprint = it->second;
+        std::vector<const ir::Var*> pending{data.get()};
+        std::set<const ir::Var*> visited;
+        while (!pending.empty()) {
+          const auto* var = pending.back();
+          pending.pop_back();
+          if (!visited.insert(var).second) continue;
+          footprint.has_subview |= collector.data_subviews.count(var) != 0;
+          auto incoming = collector.incoming_values.find(var);
+          if (incoming != collector.incoming_values.end()) {
+            for (const auto& source : incoming->second) {
+              if (source) {
+                pending.push_back(source.get());
+              } else {
+                footprint.unknown = true;
+              }
+            }
+          } else if (auto type = ir::GetTileTypeWithMemRef(var->GetType())) {
+            footprint.refs.push_back(ir::GetDefinedMemRef(type));
+          } else {
+            footprint.unknown = true;
+          }
+        }
+        if (footprint.has_subview) {
+          fs_.mx_scale_subview_data.insert(data.get());
+          footprint.unknown |= footprint.refs.empty();
+        } else {
+          // Preserve the existing precise MemRef comparison for ordinary data
+          // descriptors, rather than inflating all aliases to their roots.
+          footprint.refs.clear();
+          if (auto type = ir::GetTileTypeWithMemRef(data->GetType())) {
+            footprint.refs.push_back(ir::GetDefinedMemRef(type));
+          }
+        }
+      }
+    }
+    // Direct TEXTRACT writes can interfere with any scale bound to the same
+    // data allocation: TMOV's binding is hoisted by PTOAS, and the pass may
+    // already have rewritten a different TEXTRACT to bind_scale_addr +
+    // extract_into. Keep those bindings in the interference check, even though
+    // they do not need the early-binding codegen path themselves.
+    if (!collector.bindings.empty() && collector.all_bindings.size() > 1) {
+      const auto liveness = ir::AnalyzeAllocationLifetimes(func).var_liveness;
+      auto root = [&](const ir::Var* scale) {
+        auto it = collector.scale_aliases.find(scale);
+        while (it != collector.scale_aliases.end()) {
+          scale = it->second.get();
+          it = collector.scale_aliases.find(scale);
+        }
+        return scale;
+      };
+      // Extend the producer's individual live range through both DPS aliases
+      // and later tget_scale_addr results, without conflating reused MemRefs.
+      std::map<const ir::Var*, int> last_uses;
+      for (const auto& [var, interval] : liveness) {
+        const auto* producer = root(var);
+        auto [it, inserted] = last_uses.emplace(producer, interval.second);
+        if (!inserted) it->second = std::max(it->second, interval.second);
+      }
+      // Follow untracked phi/loop handles to their possible concrete producers,
+      // including the init and backedge of loop carries. Union the intervals and
+      // binding-result uses; a cycle or an unknown terminal must never make the
+      // check optimistic. If no tracked origin is available, conservatively
+      // treat the value as live for the whole function.
+      auto scale_lifetime = [&](const ir::Var* producer) {
+        const auto unknown = std::make_pair(0, std::numeric_limits<int>::max());
+        int first = std::numeric_limits<int>::max();
+        int last = 0;
+        std::vector<const ir::Var*> pending{producer};
+        std::set<const ir::Var*> visited;
+        while (!pending.empty()) {
+          const auto* var = root(pending.back());
+          pending.pop_back();
+          if (!visited.insert(var).second) continue;
+          if (auto use = last_uses.find(var); use != last_uses.end()) {
+            last = std::max(last, use->second);
+          }
+          if (auto interval = liveness.find(var); interval != liveness.end()) {
+            first = std::min(first, interval->second.first);
+            last = std::max(last, interval->second.second);
+          } else {
+            auto incoming = collector.incoming_values.find(var);
+            if (incoming == collector.incoming_values.end() || incoming->second.empty()) return unknown;
+            for (const auto& source : incoming->second) {
+              if (!source) return unknown;
+              pending.push_back(source.get());
+            }
+          }
+        }
+        return first == std::numeric_limits<int>::max() ? unknown : std::make_pair(first, last);
+      };
+      struct ScaleLifetime {
+        const ir::Var* scale;
+        ir::VarPtr data;
+        int first;
+        int last;
+        bool early;
+      };
+      std::vector<ScaleLifetime> scales;
+      std::set<std::pair<const ir::Var*, const ir::Var*>> seen;
+      for (const auto& [scale, data] : collector.all_bindings) {
+        const auto* producer = root(scale.get());
+        if (!seen.emplace(producer, data.get()).second) continue;
+        const auto [first, last] = scale_lifetime(producer);
+        scales.push_back({producer, data, first, last, collector.bindings.count(producer) != 0});
+      }
+      // Sweep in definition order, comparing only simultaneously live scales.
+      std::sort(scales.begin(), scales.end(),
+                [](const ScaleLifetime& a, const ScaleLifetime& b) { return a.first < b.first; });
+      for (size_t i = 0; i < scales.size(); ++i) {
+        const auto& a = scales[i];
+        auto a_type = As<ir::TileType>(a.data->GetType());
+        for (size_t j = i + 1; j < scales.size(); ++j) {
+          const auto& b = scales[j];
+          if (a.last < b.first) break;
+          if (a.scale == b.scale || (!a.early && !b.early)) continue;
+          auto b_type = As<ir::TileType>(b.data->GetType());
+          if (a_type && b_type && a_type->GetMemorySpace() != b_type->GetMemorySpace()) continue;
+          bool overlaps = a.data == b.data;
+          const auto& a_footprint = footprints.at(a.data.get());
+          const auto& b_footprint = footprints.at(b.data.get());
+          if ((a_footprint.has_subview && a_footprint.unknown) ||
+              (b_footprint.has_subview && b_footprint.unknown)) {
+            overlaps = true;
+          }
+          for (const auto& a_ref : a_footprint.refs) {
+            for (const auto& b_ref : b_footprint.refs) {
+              auto a_off = As<ir::ConstInt>(a_ref->byte_offset_);
+              auto b_off = As<ir::ConstInt>(b_ref->byte_offset_);
+              // Fixed offsets are absolute within each L0 address space.
+              // PTOAS offsets are relative to the planner's allocation identity.
+              if ((emit_tile_addr_ && a_off && b_off) || a_ref->base_ == b_ref->base_) {
+                bool ranges_overlap = true;
+                if (a_off && b_off && a_ref->slot_count_ == 1 && b_ref->slot_count_ == 1) {
+                  ranges_overlap = a_off->value_ <= b_off->value_
+                                       ? static_cast<uint64_t>(b_off->value_ - a_off->value_) < a_ref->size_
+                                       : static_cast<uint64_t>(a_off->value_ - b_off->value_) < b_ref->size_;
+                }
+                overlaps |= ranges_overlap;
+              }
+            }
+          }
+          CHECK_SPAN(!overlaps, b.scale->span_)
+              << "Overlapping MX scale extractions cannot share a data allocation; "
+                 "consume the first scale before extracting the next one";
+        }
+      }
+    }
+    fs_.mx_scale_extract_data = std::move(collector.bindings);
+  }
+
   // Index every `<var> = <tuple>[i]` binding once. A multi-output op's Call does
   // not carry its DPS destinations in args_ — the parser desugars them into
   // separate AssignStmts — so an emitter has to look them up. Resolving each
@@ -2507,6 +2801,30 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
 
   AllocTileFields fields = ComputeAllocTileFields(tile_type);
 
+  // On A5 the MX scale address is the corresponding L0 data byte address
+  // divided by 16 (see PTO ISA GetScaleAddr). When PyPTO owns a fixed L0
+  // allocation, materialize that address directly. A runtime tget_scale_addr
+  // between TEXTRACTs would otherwise add MTE1 -> S -> MTE1 dependencies even
+  // though the two slot addresses are compile-time constants. Boxed L0
+  // subviews do not have trustworthy MemRef byte offsets: bind through their
+  // actual emitted descriptors instead of applying the static shortcut.
+  const auto paired_data = fs_.mx_scale_extract_data.find(tile_var.get());
+  if (emit_tile_addr_ && backend_->GetHandler()->GetPtoTargetArch() == "a5" &&
+      paired_data != fs_.mx_scale_extract_data.end() && paired_data->second) {
+    auto data_tile = ir::GetTileTypeWithMemRef(paired_data->second->GetType());
+    auto data_memref = data_tile ? ir::GetDefinedMemRef(data_tile) : nullptr;
+    auto scale_memref = ir::GetDefinedMemRef(tile_type);
+    auto address = data_memref ? As<ir::ConstInt>(data_memref->byte_offset_) : nullptr;
+    constexpr int64_t kA5MxScaleAddressRatio = 16;
+    if (address && address->value_ >= 0 && address->value_ % kA5MxScaleAddressRatio == 0 &&
+        data_memref->slot_count_ == 1 && scale_memref->slot_count_ == 1 &&
+        !IsParameterBackedTile(data_tile) && !fs_.mx_scale_subview_data.count(paired_data->second.get()) &&
+        !FindSubviewAncestor(LookupVarName(paired_data->second))) {
+      fields.addr_ssa = GetOrEmitConstant(address->value_ / kA5MxScaleAddressRatio, DataType::INT64);
+      fs_.early_bound_mx_scale_extracts.insert(tile_var.get());
+    }
+  }
+
   std::ostringstream line;
   line << tile_buf << " = pto.alloc_tile";
   if (!fields.addr_ssa.empty()) line << " addr = " << fields.addr_ssa;
@@ -2652,11 +2970,12 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir
   const std::string ident = MemRefIdentityKey(memref);
   auto it = fs_.memref_identity_to_mlir.find(ident);
   if (it == fs_.memref_identity_to_mlir.end()) return "";
-  // A mixed-type identity must never re-type the shared SSA. Its declaration
-  // must dominate this if: function-wide emitted-name dedup also contains
-  // allocations from completed sibling branches/loops, which cannot be reused.
+  // A mixed-type identity must never re-type the shared SSA. A view also
+  // requires exact common yield identity, rather than just shared storage.
+  // Its definition must dominate this if: function-wide emitted-name dedup
+  // contains allocations from completed sibling regions, which cannot be reused.
   // Before declaration, the pre-populated type may come from another alias.
-  if (fs_.memref_identity_mixed_types.count(ident) != 0) {
+  if (fs_.memref_identity_mixed_types.count(ident) != 0 || fs_.tile_view_scope.count(it->second)) {
     const auto memory_space = tile_type->GetMemorySpace();
     if (!memory_space.has_value()) return "";
     // InitMemRef may inherit only the then arm's storage. That does not prove
@@ -2682,9 +3001,7 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir
     // A previous merge may have rejected the identity's canonical sibling
     // allocation and bound its result to a new head handle. Follow the actual
     // common yield binding; the identity map can still name that rejected handle.
-    auto scope = fs_.tile_alloc_scope.find(shared_handle);
-    if (scope == fs_.tile_alloc_scope.end() || fs_.active_tile_alloc_scopes.count(scope->second) == 0 ||
-        GetSSATileBufType(shared_handle) != expected_type) {
+    if (!HasDominatingTileDescriptor(shared_handle) || GetSSATileBufType(shared_handle) != expected_type) {
       return "";
     }
     return shared_handle;
@@ -2692,7 +3009,21 @@ std::string PTOCodegen::TryGetSharedTileBufHandle(const std::shared_ptr<const ir
   return it->second;
 }
 
+bool PTOCodegen::HasDominatingTileDescriptor(const std::string& name) const {
+  const auto alloc_scope = fs_.tile_alloc_scope.find(name);
+  const auto view_scope = fs_.tile_view_scope.find(name);
+  return (alloc_scope != fs_.tile_alloc_scope.end() &&
+          fs_.active_tile_alloc_scopes.count(alloc_scope->second)) ||
+         (view_scope != fs_.tile_view_scope.end() && fs_.active_tile_alloc_scopes.count(view_scope->second));
+}
+
 bool PTOCodegen::DeclareTileBufAtHead(const std::string& ssa_name, const AllocTileFields& fields) {
+  // Both arms may yield the same dominating view. Its SSA is already defined
+  // by the view op; reuse it without staging a second alloc_tile or copying it.
+  if (fs_.tile_view_scope.count(ssa_name)) {
+    INTERNAL_CHECK(HasDominatingTileDescriptor(ssa_name)) << "Internal error: shared view must dominate if";
+    return false;
+  }
   if (!fs_.emitted_tile_alloc_names.insert(ssa_name).second) {
     return false;  // already declared — in the head, or inline earlier in the body
   }
@@ -2728,6 +3059,12 @@ void PTOCodegen::RegisterTileViewName(const std::string& ssa_name, const std::st
         fs_.c2v_views[ssa_name] = view->second;
       }
     }
+  }
+  // Fresh views define SSA descriptors but are not alloc_tile declarations.
+  // Keep their dominance separate so allocation hoisting cannot redeclare a
+  // view at the function head. Address-backed views keep their alloc scope.
+  if (!fs_.tile_alloc_scope.count(ssa_name)) {
+    fs_.tile_view_scope.try_emplace(ssa_name, fs_.tile_alloc_scope_stack.back());
   }
   const auto source = fs_.tile_view_names.find(reshape_source);
   fs_.tile_view_names[ssa_name] = source != fs_.tile_view_names.end()
@@ -3340,6 +3677,34 @@ void PTOCodegen::VisitExpr_(const CallPtr& op) {
 std::string PTOCodegen::GetCurrentResultTarget() const { return fs_.current_result_buf; }
 
 ir::VarPtr PTOCodegen::GetCurrentResultVar() const { return fs_.current_result_var; }
+
+void PTOCodegen::EmitMxScaleExtractBinding(const std::string& scale, const std::string& scale_type,
+                                           const ir::Span& span) {
+  auto result = GetCurrentResultVar();
+  auto it = fs_.mx_scale_extract_data.find(result.get());
+  if (it == fs_.mx_scale_extract_data.end()) return;
+  CHECK_SPAN(it->second, span) << "MX scale TEXTRACT requires a single corresponding data tile";
+  const auto& data = it->second;
+  const auto data_name = LookupVarName(data);
+  // The data value must already be live when its scale is written. Otherwise
+  // the independently planned L0 data lifetime could reuse an address while
+  // two scales are simultaneously live. Checking only the registered name
+  // would also accept a descriptor whose alloc_tile has not been emitted.
+  // For an in-place alias, LookupVarName resolves to the dominating handle.
+  CHECK_SPAN(HasDominatingTileDescriptor(data_name), span)
+      << "Define the MX data tile before extracting its corresponding scale tile";
+  if (fs_.early_bound_mx_scale_extracts.count(result.get())) return;
+  Emit("pto.tget_scale_addr ins(" + data_name + " : " + GetExprTypeAnnotation(data) + ") outs(" + scale +
+       " : " + scale_type + ")");
+  fs_.early_bound_mx_scale_extracts.insert(result.get());
+}
+
+bool PTOCodegen::HasEarlyMxScaleExtractBinding(const ir::ExprPtr& scale, const ir::ExprPtr& data) const {
+  auto scale_var = ir::AsVarLike(scale);
+  if (!scale_var || !fs_.early_bound_mx_scale_extracts.count(scale_var.get())) return false;
+  auto it = fs_.mx_scale_extract_data.find(scale_var.get());
+  return it != fs_.mx_scale_extract_data.end() && it->second == ir::AsVarLike(data);
+}
 
 std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::VarPtr& tuple_var,
                                                                size_t arity) const {

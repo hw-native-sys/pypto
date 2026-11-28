@@ -63,6 +63,25 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 
 已有的显式 `tget_scale_addr` 也会使状态失效。因此重复执行 pass 会保守地再增加一层绑定；标准 lowering pipeline 只运行该 pass 一次。
 
+### 直接抽取到 L0 scale buffer
+
+对于由 `tile.extract` 直接生成的 scale tile，codegen 在发射 `textract` 之前将目标与
+对应的 MX data 操作数配对。不同于 Mat 到 scale 的 `tmov`，PTOAS 0.78 不会将后续
+`tget_scale_addr` 前移到这次写入之前。对于固定且对齐的 A5 L0 分配，codegen 直接
+指定 scale 地址（`data_byte_address / 16`），避免抽取之间的 scalar pipe 依赖。
+Boxed L0 subview 及其别名的逻辑 MemRef 偏移不表示物理 fractal 地址，因此通过
+实际 descriptor 发射运行时绑定。其他情况下，在对应 data tile 已定义后、抽取之前
+发射地址绑定。
+直接 scale 抽取要求先定义配对的 data tile，且 scale 结果直接传给配对的 MX 绑定（中间不经过别名），
+使 scale 的生命周期不会超过其 L0 data 分配的生命周期。
+提前绑定的抽取 scale 与共享同一 L0 data 分配的其他 scale 生命周期不得重叠，
+包括 `bind_scale_addr` + `extract_into` 和 Mat 到 scale 的 `tmov` 生产者。
+对于控制流选择或循环携带的 scale，检查涵盖全部输入生产者的生命周期。
+元数据更新及其他保留 buffer 的别名会追溯到原始写入操作。
+对于 boxed L0 subview，重叠检查使用完整底层分配范围，而非逻辑 slice 偏移。
+应先消费第一个 scale，再写入下一个 scale。如果 data view 的 descriptor 定义支配
+抽取操作，也允许使用该 view。
+
 ## 相关
 
 - 算子注册与类型检查：`src/ir/op/tile_ops/matmul_mx.cpp`
