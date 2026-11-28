@@ -113,6 +113,20 @@ auto expr_memrefs = memref_collectors::CollectShapedTypeMemRefs(expr);
 auto used = memref_collectors::CollectUsedBasePtrs(func->body_);
 ```
 
+## Scalar offset facts
+
+`scalar_offset_facts.h` provides `ScalarOffsetFactStore` in
+`pypto::ir::scalar_offset_facts`. Construct it once from the input program.
+Its `Facts()` callbacks borrow the store and look up unique scalar definitions,
+symbolic loop starts and steps, block indices and counts, and distinct scalar
+arguments at `Call` and `Submit` sites. Submit arguments account for omitted
+outputs before trailing communication contexts.
+
+`IsProvableMultipleOf` checks power-of-two alignment. `IsProvableNonNegative`
+checks sign. Both follow every source of an outlined parameter and share a
+256-node budget within each proof. Ambiguous bindings, unknown sources and
+cyclic parameter dependencies cannot establish a fact.
+
 ## Other Shared Utilities
 
 | Header | Utilities |

@@ -64,7 +64,7 @@
  * Loads support matmul operands only (``target_memory=Mat``),
  * whole-byte dtypes, static shapes, fractal-aligned shapes and slice offsets. A
  * slice offset may be symbolic when its alignment is *provable* — see
- * ``NzOffsetFactStore`` below and ``DivideIndexExactly`` in
+ * the shared ``ScalarOffsetFactStore`` and ``BlockNzOffsets`` in
  * ``tensor_view_semantics.h``. Everything outside that is rejected with a
  * diagnostic naming the authoring fix — an NZ tensor must never be silently
  * mis-addressed. A2/A3 supports plain FP32 Acc -> FP32 NZ stores over complete
@@ -81,7 +81,6 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -104,11 +103,11 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/scalar_offset_facts.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/vec_nz_store.h"
 #include "pypto/ir/type.h"
@@ -212,87 +211,6 @@ bool IsWholeTensorFlatten(const CallPtr& op) {
   }
   return logical_elements == flat_extent->value_;
 }
-
-/// Index bindings a symbolic slice offset has to be proven against.
-///
-/// A slice offset arrives at the ``tile.load`` as the SSA name it was bound to,
-/// so the arithmetic that makes it fractal-aligned lives elsewhere in the
-/// function — in the ``AssignStmt`` that defined it (``n0 = nb * 256``) or in
-/// the ``ForStmt`` that bounds it (``for k0 in pl.pipeline(512, 4096, 512)``).
-/// This collects both in one read-only walk, so the rewrite itself stays a
-/// constant-time lookup and the pass stays O(N).
-///
-/// Collected from the *pre-mutation* body: the mutator only substitutes NZ
-/// tensor Vars, so an index Var is the same node before and after.
-class NzOffsetFactStore {
- public:
-  explicit NzOffsetFactStore(const StmtPtr& body) {
-    if (!body) return;
-    Collector collector(this);
-    collector.VisitStmt(body);
-  }
-
-  /// A view of this store. The callbacks capture ``this``, so the store must
-  /// outlive every use of the returned facts.
-  [[nodiscard]] tensor_view_semantics::NzOffsetFacts Facts() const {
-    tensor_view_semantics::NzOffsetFacts facts;
-    facts.definition = [this](const VarPtr& var) -> ExprPtr {
-      auto it = definitions_.find(var);
-      return it == definitions_.end() ? nullptr : it->second;
-    };
-    facts.loop_range = [this](const VarPtr& var) -> std::pair<ExprPtr, ExprPtr> {
-      auto it = loop_bindings_.find(var);
-      if (it == loop_bindings_.end()) return {nullptr, nullptr};
-      return it->second;
-    };
-    facts.is_non_negative = [this](const VarPtr& var) {
-      // The SPMD block index is a lane number, so it is never negative.
-      return non_negative_vars_.count(var) != 0;
-    };
-    return facts;
-  }
-
- private:
-  class Collector : public IRVisitor {
-   public:
-    explicit Collector(NzOffsetFactStore* store) : store_(store) {}
-
-   protected:
-    void VisitStmt_(const AssignStmtPtr& op) override {
-      // Scalars only: a tensor / tile definition can never be part of an index
-      // expression, and keeping them out bounds the map to the index IR.
-      if (op->var_ && As<ScalarType>(op->var_->GetType())) {
-        store_->definitions_.emplace(op->var_, op->value_);
-        // A block index or block count is a lane number, so it is non-negative
-        // by construction. That is an operator fact rather than a structural
-        // one, which is why it is recorded here rather than derived by the
-        // geometry helpers.
-        auto call = As<Call>(op->value_);
-        if (call && (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num"))) {
-          store_->non_negative_vars_.insert(op->var_);
-        }
-      }
-      IRVisitor::VisitStmt_(op);
-    }
-
-    void VisitStmt_(const ForStmtPtr& op) override {
-      // Symbolic bounds are recorded too: the proofs recurse into them, so a
-      // strided loop that starts at the block index is as provable as one that
-      // starts at a literal.
-      if (op->loop_var_ && op->start_ && op->step_) {
-        store_->loop_bindings_.emplace(op->loop_var_, std::make_pair(op->start_, op->step_));
-      }
-      IRVisitor::VisitStmt_(op);
-    }
-
-   private:
-    NzOffsetFactStore* store_;
-  };
-
-  std::unordered_map<VarPtr, ExprPtr> definitions_;
-  std::unordered_map<VarPtr, std::pair<ExprPtr, ExprPtr>> loop_bindings_;
-  std::unordered_set<VarPtr> non_negative_vars_;
-};
 
 /// Positions in a blocked NZ shape ``[B, C/c0, R/16, 16, c0]``.
 constexpr size_t kNzColumnBlockDim = 1;
@@ -817,7 +735,7 @@ class BlockNzMutator : public IRMutator {
 
 /// Block one function: params, return types, body. Returns the input unchanged
 /// when the function carries no NZ tensor.
-FunctionPtr TransformFunction(const FunctionPtr& func) {
+FunctionPtr TransformFunction(const FunctionPtr& func, const scalar_offset_facts::ScalarOffsetFacts& facts) {
   if (func->HasAttr(kNzBlockedAttr)) return func;
 
   bool params_changed = false;
@@ -845,9 +763,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
     new_return_types.push_back(std::move(new_rt));
   }
 
-  // The store owns the maps the facts read, so it must outlive the mutator.
-  NzOffsetFactStore fact_store(func->body_);
-  BlockNzMutator mutator(fact_store.Facts());
+  BlockNzMutator mutator(facts);
   for (const auto& [old_var, new_var] : param_substitutions) {
     mutator.AddSubstitution(old_var, new_var);
   }
@@ -879,10 +795,12 @@ namespace pass {
 
 Pass BlockNzTensorViews() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    scalar_offset_facts::ScalarOffsetFactStore fact_store(program);
+    auto facts = fact_store.Facts();
     bool modified = false;
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
     for (const auto& [gvar, func] : program->functions_) {
-      auto new_func = TransformFunction(func);
+      auto new_func = TransformFunction(func, facts);
       if (new_func.get() != func.get()) modified = true;
       new_functions[gvar] = std::move(new_func);
     }

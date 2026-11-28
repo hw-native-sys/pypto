@@ -222,11 +222,13 @@ result does not isolate the cost of NZ store itself.
 
 ### Symbolic trailing offsets
 
-A trailing offset does not have to be a constant, but its alignment must be
-**proven** — never assumed. An offset arrives here as the SSA name it was bound
-to, not as the arithmetic that produced it, so `IsProvableMultipleOf`
-(`tensor_view_semantics.h`) walks two kinds of binding the pass collects from
-the enclosing function in one read-only sweep:
+The pass proves both alignment and sign using the program-wide
+`ScalarOffsetFactStore` shared with MX scale views. It follows a scalar through
+outlined function parameters when every `Call` or `Submit` supplies the required
+fact. For example, `workers = pl.max(1, pl.min(tasks, 8))` remains provably
+non-negative when a `pl.spmd(workers)` kernel uses it as the step of
+`pl.range(0, tasks, workers)`. An unconstrained entry stride or a caller that
+can supply a negative stride prevents that proof.
 
 | Binding | Multiple of the axis factor | Non-negative |
 | ------- | --------------------------- | ------------ |
@@ -234,8 +236,8 @@ the enclosing function in one read-only sweep:
 | `ForStmt` (`for k0 in pl.pipeline(512, 4096, 512)`) | `start` and `step` are both multiples | `start` and `step` are both non-negative |
 | `ForStmt` with a symbolic start (`for ob in pl.range(core, TILES, CORES)`) | both recurse into `start` and `step` | both recurse into `start` and `step` |
 | `Min` / `Max` (`min(800 - o0, 256)`) | both operands are multiples | `Min`: both operands; `Max`: either one |
-| `tile.get_block_idx` / `tile.get_block_num` | — | a lane number is never negative |
-| `FloorMod` / `FloorDiv` by a positive constant (`(blk % 2) * 512`) | the other factor carries it | both recurse: the dividend must be non-negative too |
+| `tile.get_block_idx` / `tile.get_block_num` | — | block indices and counts are non-negative (also for the corresponding `tensor` ops) |
+| `FloorMod` / `FloorDiv` by a positive constant (`(blk % 2) * 512`) | a product can supply alignment. For `x // d` with power-of-two `d`, prove `x` is a multiple of `d` times the axis factor | both recurse: the dividend must be non-negative too |
 | `ConstInt` | the value is a multiple | the value is `>= 0` |
 
 Sums and products compose from those; a difference proves divisibility but never

@@ -198,10 +198,11 @@ batch offset 定位目标 panel。A2/A3 的 Acc store 会把更大的 batch exte
 
 ### 符号形式的末尾 offset
 
-末尾 offset 不必是常量，但它的对齐必须被**证明**，绝不允许假设。offset 到达本 pass
-时只是它被绑定到的那个 SSA 名字，产生它的算术在别处，因此
-`IsProvableMultipleOf`（`tensor_view_semantics.h`）会沿着本 pass 一次只读扫描收集到的
-两类绑定往回走：
+本 pass 使用与 MX scale 视图共享的程序级 `ScalarOffsetFactStore` 证明对齐性与非负性。
+当所有 `Call` 或 `Submit` 调用点的实参都满足所需条件时，证明可以沿提取函数的形参追溯。
+例如，`workers = pl.max(1, pl.min(tasks, 8))` 传入 `pl.spmd(workers)` 内核后，仍可
+证明 `pl.range(0, tasks, workers)` 的步长非负。无约束的入口步长或任一可能传入负步长
+的调用点都会使该证明失败。
 
 | 绑定形式 | 是轴因子的倍数 | 非负 |
 | -------- | -------------- | ---- |
@@ -209,8 +210,8 @@ batch offset 定位目标 panel。A2/A3 的 Acc store 会把更大的 batch exte
 | `ForStmt`（`for k0 in pl.pipeline(512, 4096, 512)`） | `start` 与 `step` 同时是倍数 | `start` 与 `step` 同时非负 |
 | 符号 start 的 `ForStmt`（`for ob in pl.range(core, TILES, CORES)`） | 向 `start` 与 `step` 递归 | 向 `start` 与 `step` 递归 |
 | `Min` / `Max`（`min(800 - o0, 256)`） | 两个操作数都是倍数 | `Min`：两个操作数都非负；`Max`：任一即可 |
-| `tile.get_block_idx` / `tile.get_block_num` | —— | lane 编号不可能为负 |
-| 对正常量取模 / 整除（`(blk % 2) * 512`） | 由另一个因子承担 | 两者都向下递归：被除数也必须非负 |
+| `tile.get_block_idx` / `tile.get_block_num` | —— | 块编号和块数均非负（对应的 `tensor` 算子也满足此条件） |
+| 对正常量取模 / 整除（`(blk % 2) * 512`） | 乘积可由另一个因子保证对齐。对 `x // d`，若 `d` 为 2 的幂，可证明 `x` 是 `d` 与轴因子乘积的倍数 | 两者都向下递归：被除数也必须非负 |
 | `ConstInt` | 该值本身是倍数 | 该值 `>= 0` |
 
 在此基础上，和与乘积可以组合；差能证明整除性但无法证明符号，因此被拒绝。当前证明对两种运算都

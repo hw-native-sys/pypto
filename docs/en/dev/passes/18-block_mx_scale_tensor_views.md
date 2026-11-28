@@ -56,8 +56,8 @@ types, load windows, aliases, stride materialization, verification, and generic
 codegen all see one canonical representation; codegen no longer reconstructs a
 different MX view privately.
 
-The pass is independent from `BlockNzTensorViews`. MX and NZ are different
-layouts and keep separate transformation and proof implementations.
+MX and NZ each rewrite their own layout. Both use the shared scalar offset
+proofs in [scalar_offset_facts.h](utils.md#scalar-offset-facts).
 
 ## Physical form
 
@@ -133,16 +133,12 @@ MX_A_ZZ [m0, g0] -> [0, m0/16, g0/2, 0, 0]
 MX_B_NN [g0, n0] -> [0, n0/16, g0/2, 0, 0]
 ```
 
-Constants must be non-negative and aligned. Symbolic offsets are accepted only
-when the pass's private MX proof engine proves both divisibility and
-non-negativity. It understands:
-
-- scalar SSA definitions;
-- constants, multiplication, addition, and subtraction for divisibility;
-- positive power-of-two floor division, including forms such as `k0 // 32`;
-- loop variables with constant start and step;
-- the non-negative results of `tile.get_block_idx` and `tile.get_block_num`;
-- scalar arguments propagated through every Call and Submit site.
+Both MX passes check alignment and non-negativity with `ScalarOffsetFactStore`.
+Loop starts and steps may be symbolic. For example, a step computed as
+`pl.max(1, pl.min(tasks, 8))` in the orchestration function retains its lower
+bound inside the outlined kernel. With start zero, `base * 16` is then a
+non-negative multiple of 16. The same rules cover block indices, clamped
+expressions and floor-divided group offsets such as `k0 // 32`.
 
 Every caller must prove a callee parameter fact. Missing or malformed call
 mappings, recursion, and expressions that exceed the bounded 256-step proof
