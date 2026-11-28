@@ -229,6 +229,16 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     }
   }
 
+  if (tile_type->dtype_.IsPackedFp4() && tile_type->GetMemorySpace() == MemorySpace::Left &&
+      new_shape.size() == 2) {
+    const auto source_rows = As<ConstInt>(tile_type->shape_[0]);
+    const auto result_rows = As<ConstInt>(new_shape[0]);
+    CHECK_SPAN(!result_rows || result_rows->value_ != 1 || (source_rows && source_rows->value_ == 1),
+               args[0]->span_)
+        << "tile.slice cannot reduce a packed FP4 Left matrix to one carrier row; "
+        << "this geometry is reserved for a K-packed GEMV vector";
+  }
+
   // Slice produces a window over the source tile.  PTO's pto.subview semantics
   // require the result tile_buf to share dtype, memory space, and the five
   // tile-config fields (blayout, slayout, fractal, pad, compact) with the source.
@@ -879,6 +889,14 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
 
   if (src_type->dtype_.IsPackedFp4()) {
     const auto src_view = tile_view_semantics::GetEffectiveTileView(*src_type);
+    const auto source_rows = As<ConstInt>(src_type->shape_[0]);
+    const auto result_rows = As<ConstInt>(dst_shape[0]);
+    CHECK_SPAN(
+        target != MemorySpace::Left || !result_rows || result_rows->value_ != 1 ||
+            (src_type->GetMemorySpace() == MemorySpace::Left && source_rows && source_rows->value_ == 1),
+        args[0]->span_)
+        << "tile.extract cannot produce a one-row packed FP4 Left tile from a matrix; "
+        << "use a row-major one-row Mat vector with tile.move";
     const bool source_vec =
         !src_type->memory_space_.has_value() || src_type->memory_space_ == MemorySpace::Vec;
     CHECK_SPAN(!source_vec || target != MemorySpace::Vec, args[0]->span_)

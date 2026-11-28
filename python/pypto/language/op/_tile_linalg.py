@@ -309,7 +309,14 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = Non
     return Tile(expr=call_expr)
 
 
-def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+def matmul_mx(
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
     """MX block-scale matrix multiplication.
 
     Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Each FP8 data
@@ -325,14 +332,27 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
         rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
 
+        acc_phase: Producer-side unit-flag phase. Consume ``pl.AccPhase.Final``
+            with a matching ``pl.STPhase.Final`` store in the same straight-line region.
+
     Returns:
         Tile wrapping the matmul_mx operation
     """
-    call_expr = _ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap())
+    call_expr = _ir_ops.matmul_mx(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), acc_phase=acc_phase
+    )
     return Tile(expr=call_expr)
 
 
-def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+def matmul_mx_acc(
+    acc: Tile,
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
     """MX block-scale matmul with accumulation.
 
     Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: each FP8
@@ -346,16 +366,27 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
         rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
 
+        acc_phase: Producer-side unit-flag phase. Consume ``pl.AccPhase.Final``
+            with a matching ``pl.STPhase.Final`` store in the same straight-line region.
+
     Returns:
         Tile wrapping the matmul_mx_acc operation
     """
     call_expr = _ir_ops.matmul_mx_acc(
-        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()
+        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), acc_phase=acc_phase
     )
     return Tile(expr=call_expr)
 
 
-def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias: Tile) -> Tile:
+def matmul_mx_bias(
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    bias: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
     """MX block-scale matmul with bias.
 
     Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: each FP8
@@ -369,11 +400,107 @@ def matmul_mx_bias(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, bias:
         rhs_scale: Right-hand side scale tile (FP8E8M0)
         bias: Bias tile
 
+        acc_phase: Producer-side unit-flag phase. Consume ``pl.AccPhase.Final``
+            with a matching ``pl.STPhase.Final`` store in the same straight-line region.
+
     Returns:
         Tile wrapping the matmul_mx_bias operation
     """
     call_expr = _ir_ops.matmul_mx_bias(
-        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), bias.unwrap()
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), bias.unwrap(), acc_phase=acc_phase
+    )
+    return Tile(expr=call_expr)
+
+
+def gemv_mx(
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
+    """Multiply a one-row MX tile by an MX matrix on Ascend950.
+
+    FP8E4M3FN and FP8E5M2 are supported independently on an FP8 pair.
+    Packed FP4E2M1X2 and FP4E1M2X2 pairs require full valid K and N.
+    The two FP8E8M0 scale tiles cover the valid K dimension in groups of 32.
+
+    Args:
+        lhs: Left row vector with physical and valid M equal to 1.
+            A packed FP4 L0A row vector stores two K values per byte.
+            Pad a Mat-to-Left row vector load to a multiple of 512 bytes and
+            use ``valid_shape`` for the active K extent.
+        lhs_scale: Left scale tile with shape ``[1, ceil(valid_K / 32)]``.
+        rhs: Right matrix with logical shape ``[K, N]``.
+        rhs_scale: Right scale tile with shape ``[ceil(valid_K / 32), N]``
+            and the same valid N as the right matrix.
+        acc_phase: Producer-side unit-flag phase. Consume ``pl.AccPhase.Final``
+            with a matching ``pl.STPhase.Final`` store in the same straight-line region.
+
+    Returns:
+        FP32 accumulator tile with 16 physical rows and one valid row.
+    """
+    call_expr = _ir_ops.gemv_mx(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), acc_phase=acc_phase
+    )
+    return Tile(expr=call_expr)
+
+
+def gemv_mx_acc(
+    acc: Tile,
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
+    """Accumulate an MX GEMV in a matching FP32 accumulator tile.
+
+    Args:
+        acc: FP32 accumulator updated in place.
+        lhs: Left row vector as in :func:`gemv_mx`.
+        lhs_scale: Left scale tile as in :func:`gemv_mx`.
+        rhs: Right matrix as in :func:`gemv_mx`.
+        rhs_scale: Right scale tile as in :func:`gemv_mx`.
+        acc_phase: Producer-side unit-flag phase. Consume ``pl.AccPhase.Final``
+            with a matching ``pl.STPhase.Final`` store in the same straight-line region.
+
+    Returns:
+        Tile sharing the input accumulator's storage.
+    """
+    call_expr = _ir_ops.gemv_mx_acc(
+        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), acc_phase=acc_phase
+    )
+    return Tile(expr=call_expr)
+
+
+def gemv_mx_bias(
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    bias: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
+    """Add an FP32 bias to an MX GEMV result.
+
+    Args:
+        lhs: Left row vector as in :func:`gemv_mx`.
+        lhs_scale: Left scale tile as in :func:`gemv_mx`.
+        rhs: Right matrix as in :func:`gemv_mx`.
+        rhs_scale: Right scale tile as in :func:`gemv_mx`.
+        bias: FP32 tile with one row and the same physical and valid N as the output.
+        acc_phase: Producer-side unit-flag phase. Consume ``pl.AccPhase.Final``
+            with a matching ``pl.STPhase.Final`` store in the same straight-line region.
+
+    Returns:
+        Biased FP32 accumulator tile with one valid row.
+    """
+    call_expr = _ir_ops.gemv_mx_bias(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), bias.unwrap(), acc_phase=acc_phase
     )
     return Tile(expr=call_expr)
 

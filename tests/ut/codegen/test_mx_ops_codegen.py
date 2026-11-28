@@ -1104,6 +1104,28 @@ class TestMxANDScaleCodegen:
         assert "pto.tload" in mlir
         assert "pto.tmov" not in mlir
 
+    @pytest.mark.ptoas_compile
+    def test_one_row_scale_load_preserves_parent_descriptor_and_offset(self, tmp_path):
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(self, scales: pl.Tensor[[4, 4], pl.FP8E8M0, pl.MX_A_ND]):
+                _ = pl.load(scales, [1, 0], [1, 4])
+
+        mlir = _emit_incore_mlir(Program)
+        original = next(line for line in mlir.splitlines() if "= pto.make_tensor_view" in line)
+        dense = next(line for line in mlir.splitlines() if "_scale_vector = pto.make_tensor_view" in line)
+        # Both descriptors have the same address and parent row pitch. The
+        # one-row load keeps its nonzero row offset in the dense ND partition.
+        assert (
+            original.split("pto.make_tensor_view ")[1].split(" {layout")[0]
+            == dense.split("pto.make_tensor_view ")[1].split(" {layout")[0]
+        )
+        partition = next(line for line in mlir.splitlines() if "pto.partition_view" in line)
+        assert "_scale_vector, offsets = [%c1_index, %c0_index]" in partition
+        cpp = _assemble_mx(mlir, tmp_path)
+        assert "TLOAD(" in cpp
+
 
 def _mx_scale_writeback_program(source_type="pl.Tensor", *, move_to_right=False):
     consume = (
@@ -1222,6 +1244,93 @@ def test_mx_scale_gather_two_pages_has_expected_b_nn_bytes(tmp_path):
     )
     expected = np.concatenate((source[256:384], source[:128])).T
     np.testing.assert_array_equal(np.array(actual).reshape(4, 256), expected)
+
+
+@pytest.mark.parametrize("use_gemv", [False, True], ids=["gemm", "gemv"])
+@pytest.mark.parametrize("assemble", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)])
+def test_mx_matrix_family_accumulation_phases(tmp_path, use_gemv, assemble):
+    m = 1 if use_gemv else 16
+    family = "gemv_mx" if use_gemv else "matmul_mx"
+    a_scale_layout = "MX_A_ND" if use_gemv else "MX_A_ZZ"
+    lhs_k_physical = 512 if use_gemv else 128
+    program = pl.parse_program(f"""import pypto.language as pl
+
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self,
+        a: pl.Tensor[[{m}, 128], pl.FP8E4M3FN],
+        a_s: pl.Tensor[[{m}, 4], pl.FP8E8M0, pl.{a_scale_layout}],
+        b: pl.Tensor[[128, 32], pl.FP8E5M2],
+        b_s: pl.Tensor[[4, 32], pl.FP8E8M0, pl.MX_B_NN],
+        bias: pl.Tensor[[1, 32], pl.FP32],
+        out: pl.Out[pl.Tensor[[{m}, 32], pl.FP32]],
+        out_bias: pl.Out[pl.Tensor[[{m}, 32], pl.FP32]],
+    ):
+        lhs = pl.load(a, [0, 0], [{m}, {lhs_k_physical}], valid_shape=[{m}, 128])
+        lhs_scale = pl.load(a_s, [0, 0], [{m}, 4])
+        rhs = pl.load(b, [0, 0], [128, 32])
+        rhs_scale = pl.load(b_s, [0, 0], [4, 32])
+        bias_tile = pl.load(bias, [0, 0], [1, 32])
+        c = pl.{family}(lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Partial)
+        c = pl.{family}_acc(c, lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Final)
+        pl.store(c, [0, 0], out, st_phase=pl.STPhase.Final)
+        c_bias = pl.{family}_bias(lhs, lhs_scale, rhs, rhs_scale, bias_tile, acc_phase=pl.AccPhase.Final)
+        pl.store(c_bias, [0, 0], out_bias, st_phase=pl.STPhase.Final)
+""")
+
+    mlir = _emit_incore_mlir(program)
+    prefix = "pto.tgemv.mx" if use_gemv else "pto.tmatmul.mx"
+    for suffix, phase in (("", "partial"), (".acc", "final"), (".bias", "final")):
+        line = next(line for line in mlir.splitlines() if f"{prefix}{suffix} ins(" in line)
+        assert f"accPhase = #pto<acc_phase {phase}>" in line
+        if suffix == ".acc":
+            assert line.split("ins(")[1].split(",")[0] == line.split("outs(")[1].split(" :")[0]
+    assert mlir.count("stPhase = #pto<st_phase final>") == 2
+    assert mlir.count("pto.tget_scale_addr") == 2
+    if use_gemv:
+        scale_view = next(
+            line for line in mlir.splitlines() if "_scale_vector = pto.make_tensor_view" in line
+        )
+        assert "{layout = #pto.layout<nd>}" in scale_view
+
+    if assemble:
+        cpp = _assemble_mx(mlir, tmp_path)
+        intrinsic = "TGEMV_MX" if use_gemv else "TMATMUL_MX"
+        assert cpp.count(f"{intrinsic}<pto::AccPhase::Partial>(") == 1
+        assert cpp.count(f"{intrinsic}<pto::AccPhase::Final>(") == 2
+
+
+@pytest.mark.ptoas_compile
+def test_gemv_mx_packed_fp4_l0a_keeps_one_logical_row(tmp_path):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self,
+            a: pl.Tensor[[1, 512], pl.FP4E2M1X2],
+            a_s: pl.Tensor[[1, 32], pl.FP8E8M0, pl.MX_A_ND],
+            b: pl.Tensor[[64, 512], pl.FP4E1M2X2],
+            b_s: pl.Tensor[[32, 64], pl.FP8E8M0, pl.MX_B_NN],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+        ):
+            lhs_mat = pl.load(a, [0, 0], [1, 512], target_memory=pl.Mem.Mat)
+            lhs = pl.move(lhs_mat, pl.Mem.Left)
+            rhs_nk = pl.load(b, [0, 0], [64, 512], target_memory=pl.Mem.Mat)
+            rhs = pl.move(pl.tile.transpose_view(rhs_nk), pl.Mem.Right)
+            lhs_scale = pl.load(a_s, [0, 0], [1, 32])
+            rhs_scale = pl.load(b_s, [0, 0], [32, 64])
+            c = pl.gemv_mx(lhs, lhs_scale, rhs, rhs_scale)
+            pl.store(c, [0, 0], out)
+
+    assert uses_native_fp4_mx(_run_default_pipeline(Program))
+    mlir = _emit_incore_mlir(Program)
+    line = next(line for line in mlir.splitlines() if "pto.tgemv.mx ins(" in line)
+    assert "loc=left, dtype=!pto.f4E2M1x2, rows=1, cols=1024" in line
+    assert "loc=right, dtype=!pto.f4E1M2x2, rows=1024, cols=64" in line
+    cpp = _assemble_mx(mlir, tmp_path)
+    assert "TGEMV_MX(" in cpp
 
 
 if __name__ == "__main__":

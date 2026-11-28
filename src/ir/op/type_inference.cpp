@@ -2459,7 +2459,11 @@ std::vector<ExprPtr> GetMatmulLogicalShape(const TileTypePtr& tile, bool valid) 
   if (!tile->dtype_.IsPackedFp4()) return dims;
   INTERNAL_CHECK(dims.size() == 2) << "Internal error: matmul logical shape requires rank two";
   const auto view = tile_view_semantics::GetEffectiveTileView(*tile);
-  const size_t axis = view.blayout == TileLayout::col_major ? 0 : 1;
+  // L0A's special one-row vector transfer packs K, even though the
+  // descriptor keeps the Cube-mandated column-major block layout.
+  const auto rows = As<ConstInt>(tile->shape_[0]);
+  const bool is_left_vector = tile->GetMemorySpace() == MemorySpace::Left && rows && rows->value_ == 1;
+  const size_t axis = view.blayout == TileLayout::col_major && !is_left_vector ? 0 : 1;
   dims[axis] = AdjustPackedFp4CastLastDim({dims[axis]}, tile->dtype_, DataType::FP32, Span::unknown())[0];
   return dims;
 }

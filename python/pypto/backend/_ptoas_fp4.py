@@ -23,7 +23,15 @@ from ._ptoas_config import get_ptoas_timeout
 from ._ptoas_locate import PTOAS_MIN_VERSION, check_ptoas_version, find_ptoas_binary
 
 _MX_OPS = frozenset(
-    ir.get_op(name).name for name in ("tile.matmul_mx", "tile.matmul_mx_acc", "tile.matmul_mx_bias")
+    ir.get_op(name).name
+    for name in (
+        "tile.matmul_mx",
+        "tile.matmul_mx_acc",
+        "tile.matmul_mx_bias",
+        "tile.gemv_mx",
+        "tile.gemv_mx_acc",
+        "tile.gemv_mx_bias",
+    )
 )
 _PACKED_DTYPES = (DataType.FP4E2M1X2, DataType.FP4E1M2X2)
 _probe_lock = threading.Lock()
@@ -61,7 +69,7 @@ _PROBE = (
 
 
 def uses_native_fp4_mx(program: ir.Program) -> bool:
-    """Inspect operand types, so unrelated FP4 casts never gate FP8 matmul."""
+    """Find MX Cube operators whose inputs use native packed FP4."""
 
     class Finder(ir.IRVisitor):
         found = False
@@ -89,7 +97,7 @@ def check_native_fp4_mx_support() -> None:
     """
     binary = find_ptoas_binary()
     hint = (
-        f"Native FP4 MX matmul requires PTOAS {PTOAS_MIN_VERSION} or newer with the logical Cube "
+        f"Native FP4 MX Cube operations require PTOAS {PTOAS_MIN_VERSION} or newer with the logical Cube "
         "geometry contract (PTOAS #1700). "
         f"Set PTOAS_ROOT to the released {PTOAS_MIN_VERSION} assembler or a compatible newer/patched build."
     )

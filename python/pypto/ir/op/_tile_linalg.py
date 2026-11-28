@@ -217,16 +217,25 @@ def matmul_bias(
     return _ir_core.create_op_call("tile.matmul_bias", [lhs, rhs, bias], kwargs, actual_span)
 
 
+def _mx_phase_kwargs(acc_phase: AccPhase) -> dict[str, int]:
+    phase = int(acc_phase)
+    return {} if phase == int(AccPhase.Unspecified) else {"acc_phase": phase}
+
+
 def matmul_mx(
     lhs: Expr,
     lhs_scale: Expr,
     rhs: Expr,
     rhs_scale: Expr,
     span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
 ) -> Call:
     """MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)."""
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
+    return _ir_core.create_op_call(
+        "tile.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], _mx_phase_kwargs(acc_phase), actual_span
+    )
 
 
 def matmul_mx_acc(
@@ -236,11 +245,13 @@ def matmul_mx_acc(
     rhs: Expr,
     rhs_scale: Expr,
     span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
 ) -> Call:
     """MX block-scale matmul with accumulation: acc += matmul_mx(...)."""
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
-        "tile.matmul_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], {}, actual_span
+        "tile.matmul_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], _mx_phase_kwargs(acc_phase), actual_span
     )
 
 
@@ -251,11 +262,66 @@ def matmul_mx_bias(
     rhs_scale: Expr,
     bias: Expr,
     span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
 ) -> Call:
     """MX block-scale matmul with bias: C = matmul_mx(...) + bias."""
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
-        "tile.matmul_mx_bias", [lhs, lhs_scale, rhs, rhs_scale, bias], {}, actual_span
+        "tile.matmul_mx_bias",
+        [lhs, lhs_scale, rhs, rhs_scale, bias],
+        _mx_phase_kwargs(acc_phase),
+        actual_span,
+    )
+
+
+def gemv_mx(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Call:
+    """MX block-scale matrix-vector multiplication: C = gemv_mx(A, A_scale, B, B_scale)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.gemv_mx", [lhs, lhs_scale, rhs, rhs_scale], _mx_phase_kwargs(acc_phase), actual_span
+    )
+
+
+def gemv_mx_acc(
+    acc: Expr,
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Call:
+    """MX block-scale GEMV with accumulation: acc += gemv_mx(...)."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.gemv_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], _mx_phase_kwargs(acc_phase), actual_span
+    )
+
+
+def gemv_mx_bias(
+    lhs: Expr,
+    lhs_scale: Expr,
+    rhs: Expr,
+    rhs_scale: Expr,
+    bias: Expr,
+    span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Call:
+    """MX block-scale GEMV with bias: C = gemv_mx(...) + bias."""
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.gemv_mx_bias", [lhs, lhs_scale, rhs, rhs_scale, bias], _mx_phase_kwargs(acc_phase), actual_span
     )
 
 

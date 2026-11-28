@@ -204,6 +204,26 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::vector<std::string> size_codes = GetSizeCodes(valid_shape_tuple->elements_, codegen);
   std::string tensor_view = codegen.GetOrCreateTensorView(tensor);
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
+  const auto rows =
+      shapes_tuple->elements_.size() == 2 ? As<ir::ConstInt>(shapes_tuple->elements_[0]) : nullptr;
+  if (pto_layout == "mx_a_nd" && tensor_type->tensor_view_.has_value() && rows && rows->value_ == 1) {
+    // A5's one-row Mat scale load expects a dense ND vector descriptor.
+    // The ordinary MX_A_ND descriptor groups its last axis into pairs, which
+    // the ISA uses only for the multi-row GM-to-ZZ path. The GM bytes are
+    // already row-major, so keep the source origin, extents and row stride.
+    const auto& source_view = *tensor_type->tensor_view_;
+    auto shape = GetSizeCodes(tensor_type->shape_, codegen);
+    auto strides =
+        GetSizeCodes(source_view.stride.empty() ? ir::tensor_view_semantics::BuildLogicalStridesFromLayout(
+                                                      tensor_type->shape_, source_view.layout)
+                                                : source_view.stride,
+                     codegen);
+    tensor_view = codegen.NewNamedTemp(tensor->name_hint_ + "_scale_vector");
+    codegen.Emit(tensor_view + " = pto.make_tensor_view " + codegen.GetTensorBasePtr(tensor) + ", shape = [" +
+                 shape[0] + ", " + shape[1] + "], strides = [" + strides[0] + ", " + strides[1] +
+                 "] {layout = #pto.layout<nd>} : " + tensor_view_type);
+    pto_layout = "nd";
+  }
 
   if (ir::tile_view_semantics::HasZeroValidExtent(valid_shape_tuple->elements_)) return "";
   const bool guarded = BeginNonEmptyRegion(valid_shape_tuple->elements_, codegen, size_codes);

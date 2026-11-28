@@ -165,15 +165,15 @@ output elements outside the valid rectangle.
 | pto.tmatmul | TMATMUL | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | A5 also accepts mixed FP8 operand pairs (E4M3FN x E5M2 in either order), E5M2 x E5M2 and HF8 x HF8; see [Cube operand dtype pairs](ir/05-operators.md#cube-operand-dtype-pairs) |
 | pto.tmatmul.acc | TMATMUL_ACC | tile+tensor | ✅ | ✅ | ✅ | ✅ | — | Same A5 operand pairs as `pto.tmatmul`; acc_in stays FP32 |
 | pto.tmatmul.bias | TMATMUL_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | Same A5 operand pairs as `pto.tmatmul`; bias stays FP32 |
-| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 host-prequant frontend+codegen+ST for all four E4M3FN/E5M2 pairs; native FP4×FP4 tiles use PTOAS v0.72 logical Cube dimensions; mixed FP4/FP8 requires an explicit cast; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) |
-| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_acc`) |
-| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_bias`) |
+| pto.tmatmul.mx | TMATMUL_MX | tile | ✅ | ✅ | ✅ | ✅ | — | A5 host-prequant frontend+codegen+ST for all four E4M3FN/E5M2 pairs; native FP4×FP4 tiles use PTOAS v0.72 logical Cube dimensions; mixed FP4/FP8 requires an explicit cast; see [operators MX constraints](ir/05-operators.md#mx--ascend950-pto-isa-constraints) A5 task-submit ST covers `AccPhase.Partial` for E4M3FN × E5M2. |
+| pto.tmatmul.mx.acc | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_acc`) A5 task-submit ST covers `AccPhase.Final` for E4M3FN × E5M2. |
+| pto.tmatmul.mx.bias | TMATMUL_MX (overload) | tile | ✅ | ✅ | ✅ | ✅ | — | A5 frontend+codegen+ST for all four E4M3FN/E5M2 pairs (`tile.matmul_mx_bias`) A5 task-submit ST covers `AccPhase.Final` for E4M3FN × E5M2. |
 | pto.tgemv | TGEMV | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Shares `pto.tmatmul`'s operand-pair table, so A5 also accepts the four FP8 pairs (E4M3FN / E5M2, either order) and HF8 x HF8; see [Cube operand dtype pairs](ir/05-operators.md#cube-operand-dtype-pairs). A5 ST covers every dtype (the static-valid Acc bridge is what makes a5 GEMV assemble at all) |
 | pto.tgemv.acc | TGEMV_ACC | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; acc_in stays FP32. A5 ST covers every dtype, split-K and `init_cond` |
 | pto.tgemv.bias | TGEMV_BIAS | tile | ✅ | ✅ | ❌ | ✅ | — | A2/A3 task-submit ST passed. Same A5 operand pairs as `pto.tgemv`; bias stays FP32. A5 ST covers every dtype |
-| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
-| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ❌ | ❌ | ❌ | — | MISSING: lacks a complete frontend/codegen/ST path |
+| pto.tgemv.mx | TGEMV_MX | tile | ✅ | ✅ | ❌ | ✅ | — | A5 task-submit ST covers E4M3FN × E5M2 `AccPhase.Partial`. Explicit `acc_phase` and packed MXFP4 are supported. |
+| pto.tgemv.mx.acc | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 task-submit ST covers E4M3FN × E5M2 `AccPhase.Final`. Explicit `acc_phase` and packed MXFP4 are supported. |
+| pto.tgemv.mx.bias | TGEMV_MX (overload) | tile | ✅ | ✅ | ❌ | ✅ | — | A5 task-submit ST covers E4M3FN × E5M2 bias. Explicit `acc_phase` and packed MXFP4 are supported. |
 | **Vector Arithmetic and Math (42)** |  |  |  |  |  |  |  |  |
 | pto.tadd | TADD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tsub | TSUB | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |

@@ -386,6 +386,7 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tensor.matmul_mx` | 静态二维 FP8E4M3FN 或打包 FP4 数据，支持两种 FP4 格式混合。ND FP4 形状 `[M,K/2]` / `[K,N/2]`，DN 为 `[M/2,K]` / `[K/2,N]`；缩放和 FP32 `[M,N]` 输出按逻辑维度计。M/K/N 对齐为 16/64/32（FP4 为 32/64/64）。先直接加载到 Mat，再搬运至 Left/Right。 |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc` | `Acc, Left, LeftScale, Right, RightScale → Acc`；通过 `set_output_reuses_input(0)` 原地执行；accumulator 的 physical/valid M、N 必须与 matmul 输出一致。 |
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
+| `tile.gemv_mx`、`tile.gemv_mx_acc`、`tile.gemv_mx_bias` | A5 MX GEMV。左侧物理行数和有效行数均为 1。支持 FP8E4M3FN / FP8E5M2 配对以及打包 FP4 配对。Mat 到 Left 的行向量以 512 字节为单位搬运。FP4 沿 K 打包，K/N 必须全有效。两侧使用不同的 FP8E8M0 scale tile，形状为 `[1, ceil(valid_K/32)]` 和 `[ceil(valid_K/32), physical_N]`。从 GM 载入行主序左侧 scale 时使用 `MX_A_ND`。FP32 Acc 有 16 个物理行和 1 个有效行。累加复用输入 Acc，bias 为 FP32 `[1,N]`。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
 | `tile.bind_scale_addr` | 从已解析的 MX payload 派生地址，创建空的 scale 句柄。 |
 | `tile.extract_into` | 将 Mat 窗口写入已绑定的 MX scale 或连续、全有效的 L0 数据目标，返回该目标的 SSA 别名。 |
@@ -482,8 +483,8 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k
 
 ### 累加器阶段（Accumulator phases，A2/A3 和 A5）
 
-`tile.matmul`、`tile.matmul_acc`、`tile.gemv`、`tile.gemv_acc` 和
-`tile.gemv_bias` 的 `acc_phase` 可设为 `pl.AccPhase.Unspecified`（默认值）、
+`tile.matmul`、`tile.matmul_acc`、GEMV 以及 MX GEMM/GEMV tile 算子的
+`acc_phase` 可设为 `pl.AccPhase.Unspecified`（默认值）、
 `pl.AccPhase.Partial` 或 `pl.AccPhase.Final`。`Unspecified` 保持现有行为；
 后续仍有 K 分块时使用 `Partial`，最后一个分块使用 `Final`。Matmul DSL
 入口的 `acc_phase` 仅接受关键字传参，因此
@@ -491,7 +492,7 @@ acc = pl.tile.set_validshape(acc_raw, 1, N)  # 随后 gemv_acc(..., init_cond=(k
 位置参数 `init_cond`；IR wrapper 同样保留位置参数 `span`。初始化与累加
 两条代码生成分支都会携带所选择的阶段。
 
-使用 `AccPhase.Final` 时，`matmul_acc` 要求能够证明乘积的有效 M/N 矩形与
+使用 `AccPhase.Final` 时，`matmul_acc` 和 `matmul_mx_acc` 要求能够证明乘积的有效 M/N 矩形与
 累加器的有效矩形相等。对较宽累加器只更新较小区域会被拒绝：它的 Final
 store 会检查未更新分块，而 MAD 并未设置这些分块的 unit flag。应使用有效
 区域相匹配的累加器窗口，或保持部分更新，直到整个有效区域完成最终累加。

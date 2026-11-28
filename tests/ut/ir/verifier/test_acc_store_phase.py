@@ -872,5 +872,32 @@ class NestedFirstProducer:
         assert diagnostics == []
 
 
+@pytest.mark.parametrize("family,m", [("gemv_mx", 1), ("matmul_mx", 16)])
+def test_mx_final_producer_requires_matching_final_store(family, m):
+    lhs_k_physical = 512 if m == 1 else 128
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.InCore)
+    def main(
+        self,
+        a: pl.Tensor[[{m}, 128], pl.FP8E4M3FN],
+        a_s: pl.Tensor[[{m}, 4], pl.FP8E8M0],
+        b: pl.Tensor[[128, 32], pl.FP8E5M2],
+        b_s: pl.Tensor[[4, 32], pl.FP8E8M0],
+        out: pl.Out[pl.Tensor[[{m}, 32], pl.FP32]],
+    ):
+        lhs = pl.load(a, [0, 0], [{m}, {lhs_k_physical}], valid_shape=[{m}, 128])
+        lhs_scale = pl.load(a_s, [0, 0], [{m}, 4])
+        rhs = pl.load(b, [0, 0], [128, 32])
+        rhs_scale = pl.load(b_s, [0, 0], [4, 32])
+        result = pl.{family}(lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Final)
+        pl.store(result, [0, 0], out)
+""")
+    diagnostics = _verify(program)
+    assert len(diagnostics) == 1
+    assert "pl.STPhase.Final" in diagnostics[0].message
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
