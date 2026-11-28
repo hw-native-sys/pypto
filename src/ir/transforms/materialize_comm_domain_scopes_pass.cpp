@@ -43,6 +43,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/collective_operand_utils.h"
 #include "pypto/ir/transforms/utils/dist_tensor_alias_utils.h"
+#include "pypto/ir/transforms/utils/external_window.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/return_lineage_utils.h"
@@ -222,6 +223,18 @@ std::array<bool, 2> EnginesFor(const BufferEngines& engines, const Var* buffer) 
   return it == engines.end() ? std::array<bool, 2>{} : it->second;
 }
 
+/// A host-orchestration function in PyPTO is declared as either
+/// ``@pl.function(type=FunctionType.Orchestration, level=Level.HOST)`` or
+/// (more common in distributed programs) ``@pl.function(level=Level.HOST,
+/// role=Role.Orchestrator)`` where ``func_type_`` may stay ``Opaque``. Accept
+/// either form so the pass works with the conventional host_orch declaration
+/// idiom used in distributed tests.
+[[nodiscard]] bool IsHostOrch(const FunctionPtr& func) {
+  if (!func || !func->level_.has_value() || *func->level_ != Level::HOST) return false;
+  return func->func_type_ == FunctionType::Orchestration ||
+         (func->role_.has_value() && *func->role_ == Role::Orchestrator);
+}
+
 // Collect effects per allocation, before compatible allocations are grouped.
 // Propagate callee requirements back to each actual argument independently;
 // caller facts never flow into shared formals and contaminate another call.
@@ -230,7 +243,7 @@ class BufferEngineCollector : public IRVisitor {
  public:
   explicit BufferEngineCollector(ProgramPtr program) : program_(std::move(program)) {}
 
-  BufferEngines Collect() {
+  BufferEngines Collect(bool contexts_materialized) {
     // Standalone invocations need not have normalized return statements yet.
     // Share the existing memoized lineage analysis across all callee queries.
     return_lineage::ScopedTraceCache lineage_cache;
@@ -238,11 +251,23 @@ class BufferEngineCollector : public IRVisitor {
       if (func->func_type_ == FunctionType::SIMT) continue;
       auto& plan = plans_[func->name_];
       plan.returned_param_indices = return_lineage::ReturnedParamIndices(func, program_);
+      const bool host_entry = IsHostOrch(func);
       for (size_t i = 0; i < func->params_.size(); ++i) {
         const auto& param = func->params_[i];
         if (!As<DistributedTensorType>(param->GetType())) continue;
         plan.dist_param_indices.push_back(i);
         plan.param_to_ctx[param.get()] = param;
+        if (host_entry) roots_[param.get()] = param;
+      }
+      if (contexts_materialized) {
+        // MaterializeDistTensorCtx appends one context per window, in parameter order.
+        const size_t first_ctx = func->params_.size() - plan.dist_param_indices.size();
+        for (size_t j = 0; j < plan.dist_param_indices.size(); ++j) {
+          const auto& ctx = func->params_[first_ctx + j];
+          if (IsA<CommCtxType>(ctx->GetType())) {
+            ctx_to_window_[ctx.get()] = func->params_[plan.dist_param_indices[j]].get();
+          }
+        }
       }
     }
     for (const auto& [gv, func] : program_->functions_) {
@@ -365,7 +390,9 @@ class BufferEngineCollector : public IRVisitor {
       if (auto query = As<Call>(ctx); IsOp(query, "pld.system.get_comm_ctx")) {
         if (const auto* window = Resolve(query->args_[0])) Record(window, 0);
       } else if (auto var = AsVarLike(ctx); var && visited.insert(var.get()).second) {
-        if (auto it = definitions.values.find(var.get()); it != definitions.values.end()) {
+        if (auto window = ctx_to_window_.find(var.get()); window != ctx_to_window_.end()) {
+          Record(window->second, 0);
+        } else if (auto it = definitions.values.find(var.get()); it != definitions.values.end()) {
           session_contexts_.insert(session_contexts_.end(), it->second.begin(), it->second.end());
         }
       }
@@ -388,6 +415,7 @@ class BufferEngineCollector : public IRVisitor {
   ProgramPtr program_;
   std::unordered_map<std::string, dist_tensor_alias::FunctionCtxPlan> plans_;
   const dist_tensor_alias::DistParamAliasCollector* aliases_ = nullptr;
+  std::unordered_map<const Var*, const Var*> ctx_to_window_;
   std::unordered_map<const Var*, VarPtr> roots_;
   std::unordered_map<const Var*, std::vector<const Var*>> callers_;
   BufferEngines engines_;
@@ -511,6 +539,9 @@ class DispatchAnalyzer : public IRVisitor {
     --repeating_scope_depth_;
   }
 
+  const std::unordered_map<const Var*, size_t>* external_params = nullptr;
+  std::map<size_t, DeviceDescriptor> external_devices;
+
   void AnalyzeDispatch(const CallPtr& op) {
     if (!IsChipOrchDispatch(op, chip_orchs_)) return;
     ExprPtr device;
@@ -526,6 +557,12 @@ class DispatchAnalyzer : public IRVisitor {
     for (const auto& arg : op->args_) {
       auto arg_var = AsVarLike(arg);
       if (!arg_var) continue;
+      if (external_params) {
+        if (IsA<CommCtxType>(arg->GetType())) arg_var = AsVarLike(UnwrapStopExpr(arg_var, var_defs_));
+        auto it = external_params->find(arg_var.get());
+        if (it != external_params->end()) external_devices[it->second].Merge(desc);
+        continue;
+      }
       auto window = ResolveWindowRecord(arg_var);
       if (window) {
         window->alloc->seen.push_back(desc);
@@ -541,8 +578,9 @@ class DispatchAnalyzer : public IRVisitor {
     INTERNAL_CHECK_SPAN(view_var, expr->span_)
         << "MaterializeCommDomainScopes: " << op_name << " " << role << " must be a window view Var";
     auto window = ResolveWindowRecord(view_var);
-    INTERNAL_CHECK_SPAN(window, expr->span_) << "MaterializeCommDomainScopes: " << op_name << " " << role
-                                             << " must be produced by pld.tensor.window";
+    CHECK_SPAN(window, expr->span_) << "HOST builtin collectives require locally allocated windows; external "
+                                       "DistributedTensor is unsupported: "
+                                    << op_name << " " << role << " must be produced by pld.tensor.window";
     return window->alloc;
   }
 
@@ -655,7 +693,7 @@ class DispatchAnalyzer : public IRVisitor {
 
   void VisitExpr_(const CallPtr& op) override {
     AnalyzeDispatch(op);
-    AnalyzeCollective(op);
+    if (!external_params) AnalyzeCollective(op);
     IRVisitor::VisitExpr_(op);
   }
 
@@ -715,18 +753,6 @@ class DispatchAnalyzer : public IRVisitor {
   std::vector<ForStmtPtr> for_stack_;
   int repeating_scope_depth_ = 0;
 };
-
-/// A host-orchestration function in PyPTO is declared as either
-/// ``@pl.function(type=FunctionType.Orchestration, level=Level.HOST)`` or
-/// (more common in distributed programs) ``@pl.function(level=Level.HOST,
-/// role=Role.Orchestrator)`` where ``func_type_`` may stay ``Opaque``. Accept
-/// either form so the pass works with the conventional host_orch declaration
-/// idiom used in distributed tests.
-[[nodiscard]] bool IsHostOrch(const FunctionPtr& func) {
-  if (!func || !func->level_.has_value() || *func->level_ != Level::HOST) return false;
-  return func->func_type_ == FunctionType::Orchestration ||
-         (func->role_.has_value() && *func->role_ == Role::Orchestrator);
-}
 
 [[nodiscard]] bool IsChipOrch(const FunctionPtr& func) {
   if (!func || !func->level_.has_value() || *func->level_ != Level::CHIP) return false;
@@ -1156,11 +1182,61 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
 
 }  // namespace
 
+ExternalWindowAnalysis AnalyzeExternalWindows(const ProgramPtr& program, const FunctionPtr& host) {
+  ExternalWindowAnalysis result;
+  std::unordered_map<std::string, dist_tensor_alias::FunctionCtxPlan> plans;
+  std::map<std::string, FunctionPtr> chips;
+  for (const auto& [gv, function] : program->functions_) {
+    if (IsChipOrch(function)) chips[function->name_] = function;
+    plans[function->name_].returned_param_indices = return_lineage::ReturnedParamIndices(function, program);
+  }
+  auto& host_plan = plans.at(host->name_);
+  for (size_t i = 0; i < host->params_.size(); ++i) {
+    const auto& param = host->params_[i];
+    if (As<DistributedTensorType>(param->GetType())) {
+      host_plan.param_to_ctx[param.get()] = param;
+      host_plan.dist_param_indices.push_back(i);
+      result.parameter_indices.emplace(param.get(), i);
+    }
+  }
+  dist_tensor_alias::DistParamAliasCollector aliases(program, &plans, &host_plan);
+  aliases.VisitStmt(host->body_);
+  for (const auto& [var, root] : aliases.alias_to_ctx) {
+    result.parameter_indices.emplace(var, result.parameter_indices.at(root.get()));
+  }
+  AllocAndWindowCollector collector;
+  collector.VisitStmt(host->body_);
+  DispatchAnalyzer analyzer(collector.view_to_window, chips, collector.var_defs);
+  const size_t first_ctx = host->params_.size() - host_plan.dist_param_indices.size();
+  for (size_t i = 0; i < first_ctx; ++i) {
+    INTERNAL_CHECK_SPAN(!IsA<CommCtxType>(host->params_[i]->GetType()), host->span_)
+        << "CommCtx must form the entry suffix";
+  }
+  for (size_t j = 0; j < host_plan.dist_param_indices.size(); ++j) {
+    const auto& ctx = host->params_[first_ctx + j];
+    INTERNAL_CHECK_SPAN(
+        IsA<CommCtxType>(ctx->GetType()) && host->param_directions_[first_ctx + j] == ParamDirection::In,
+        host->span_)
+        << "Expected one input CommCtx suffix per DistributedTensor parameter";
+    result.parameter_indices.emplace(ctx.get(), host_plan.dist_param_indices[j]);
+  }
+  analyzer.external_params = &result.parameter_indices;
+  analyzer.VisitStmt(host->body_);
+  auto engines = BufferEngineCollector(program).Collect(/*contexts_materialized=*/true);
+  for (const auto& [param, root] : host_plan.param_to_ctx) {
+    size_t i = result.parameter_indices.at(param);
+    const auto& devices = analyzer.external_devices[i];
+    auto engine = EnginesFor(engines, param);
+    result.uses.emplace(i, ExternalWindowUse{devices.is_all, devices.ToDevices(), engine[0], engine[1]});
+  }
+  return result;
+}
+
 namespace pass {
 
 Pass MaterializeCommDomainScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    const auto engines = BufferEngineCollector(program).Collect();
+    const auto engines = BufferEngineCollector(program).Collect(/*contexts_materialized=*/false);
     // Index chip-level Orchestration functions by name so the dispatch
     // analyzer can recognise host → chip Calls.
     std::map<std::string, FunctionPtr> chip_orchs;

@@ -20,6 +20,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -66,7 +67,10 @@ class DistributedTensorUseCollector : public IRVisitor {
         op_name.rfind("tensor.alloc_window_buffer", 0) == 0 ||
         op_name.rfind("tensor.window_buffer", 0) == 0 || As<DistributedTensorType>(call->GetType())) {
       uses_distributed_tensor = true;
-      has_windowing_ops = true;
+      // Only an actual local allocation/view requires an owning scope. Remote
+      // operations and returned external windows may be entirely parameter-backed.
+      has_windowing_ops |= IsOp(call, "pld.tensor.alloc_window_buffer") || IsOp(call, "pld.tensor.window") ||
+                           op_name.rfind("tensor.window", 0) == 0;
     }
     IRVisitor::VisitExpr_(call);
   }

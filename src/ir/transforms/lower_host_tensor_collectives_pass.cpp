@@ -78,8 +78,9 @@ static constexpr size_t kMaxSupportedRanks = 16;
   auto dist_type = As<DistributedTensorType>(expr->GetType());
   INTERNAL_CHECK_SPAN(dist_type, expr->span_)
       << "LowerHostTensorCollectives: " << context << " must be DistributedTensorType";
-  INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), expr->span_)
-      << "LowerHostTensorCollectives: " << context << " must have materialized WindowBuffer back-references";
+  CHECK_SPAN(dist_type->window_buffer_.has_value(), expr->span_)
+      << "LowerHostTensorCollectives: " << context
+      << " requires a locally allocated window; external windows are unsupported";
   return *dist_type->window_buffer_;
 }
 
@@ -636,12 +637,12 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
                           const std::vector<std::string>& leading_comments) {
     const auto* rule = LookupHostCollectiveRule(call->op_->name_);
     INTERNAL_CHECK(rule) << "LowerHostTensorCollectives: missing rule for " << call->op_->name_;
-    INTERNAL_CHECK_SPAN(!buffer_scopes_.empty(), call->span_)
-        << "LowerHostTensorCollectives: " << call->op_->name_ << " must appear inside a CommDomainScopeStmt";
     for (const auto& [arg_idx, role] : rule->host_bound_args) {
       CheckHostWindowBoundArg(call->args_[arg_idx], call->op_->name_.c_str(), role);
     }
     auto buffers = rule->scope_buffers(call);
+    INTERNAL_CHECK_SPAN(!buffer_scopes_.empty(), call->span_)
+        << "LowerHostTensorCollectives: " << call->op_->name_ << " must appear inside a CommDomainScopeStmt";
     CheckPairwiseDistinctWindows(buffers, call->span_, call->op_->name_.c_str());
     // Schedule on the data/target domain (signal for a pure barrier).
     // Every remote operand carries its own context; domain compatibility is

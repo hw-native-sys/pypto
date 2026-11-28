@@ -2751,6 +2751,70 @@ def test_make_session_requests_urma_workspace_without_a_transfer():
     assert _lower(program).count('workspace_engines=("urma",)') == 1
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("local_scratch", [False, True])
+@pytest.mark.parametrize("mixed_engines", [False, True])
+def test_external_window_session_without_transfer(tmp_path, local_scratch, mixed_engines):
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            src: pld.DistributedTensor[[1, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            window: pld.DistributedTensor[[1, 64], pl.FP32],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            ctx = pld.get_comm_ctx(window)
+            _session = pld.system.make_session(ctx)
+            if mixed_engines:
+                tile = pld.tile.remote_load(window, 1, [0, 0], [1, 64])
+            else:
+                tile = pl.load(src, [0, 0], [1, 64])
+            return pl.store(tile, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(
+            self,
+            src: pld.DistributedTensor[[1, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            window: pld.DistributedTensor[[1, 64], pl.FP32],
+        ) -> pl.Tensor[[1, 64], pl.FP32]:
+            return self.kernel(src, out, window)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(
+            self,
+            window: pld.DistributedTensor[[1, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[2, 1, 64], pl.FP32]],
+            other: pld.DistributedTensor[[1, 64], pl.FP32],
+        ):
+            if local_scratch:
+                buf = pld.alloc_window_buffer(256)
+                src = pld.window(buf, [1, 64], dtype=pl.FP32)
+            else:
+                src = other
+            for rank in pl.range(2):
+                self.chip(src, out[rank], window, worker=rank)
+
+    if mixed_engines:
+        # The domain pass must reject this before codegen inspects the HOST entry.
+        program = passes.simplify()(passes.convert_to_ssa()(Program))
+        conflict = "Communication buffer 'window.*cannot combine URMA.*MTE"
+        with pytest.raises(ValueError, match=conflict):
+            passes.materialize_comm_domain_scopes()(program)
+        with pytest.raises(ValueError, match=conflict):
+            ir.compile(Program, output_dir=str(tmp_path), backend_type=BackendType.Ascend950, skip_ptoas=True)
+    else:
+        result = ir.compile(
+            Program, output_dir=str(tmp_path), backend_type=BackendType.Ascend950, skip_ptoas=True
+        )
+        host = (result.output_dir / "orchestration" / "host_orch.py").read_text()
+        entry = next(line for line in host.splitlines() if line.startswith("_PYPTO_WINDOW_REQUIREMENTS = "))
+        requirements = ast.literal_eval(entry.split(" = ", 1)[1])
+        assert requirements[0] == (False, (0, 1), "urma")
+        assert requirements[2][2] is None
+
+
 @pytest.mark.parametrize("async_op", ["get", "put"])
 def test_single_rank_domain_rejects_mixed_primitives(async_op):
     program = _primitive_engine_program(

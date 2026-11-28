@@ -18,6 +18,7 @@ import types
 import warnings
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -8477,6 +8478,38 @@ def test_constexpr_branch_preserves_multiple_yield_results(mode):
     widths = [64, 128] if mode else [128, 64]
     for value, width in zip(returned.value, widths, strict=True):
         ir.assert_structural_equal(value.type, ir.TensorType([8, width], DataType.FP32))
+
+
+def test_domain_tensor_sample_uses_only_logical_metadata():
+    from pypto.runtime.comm_domain import (  # noqa: PLC0415
+        CommDomain,
+        DomainBufferSpec,
+        DomainState,
+        build_domain_layout,
+    )
+
+    @pl.jit.host
+    def entry(
+        table: pld.DistributedTensor[[4], pl.FP32, pl.MemRef("table", 0, 16)],
+        out: pl.Out[pl.Tensor[[4], pl.FP32]],
+    ):
+        return out
+
+    def domain_view(names):
+        slots, _ = build_domain_layout([DomainBufferSpec(name, (4,), pl.FP32) for name in names])
+        domain = CommDomain(MagicMock(), (0,), slots, "device", ())
+        domain._state = DomainState.LIVE
+        return domain.tensor("weights")
+
+    a = domain_view(["other", "weights"])
+    b = domain_view(["weights"])
+    out = pytest.importorskip("torch").zeros(4)
+    first = entry._bind_args((a, out), {})[2]["table"]
+    second = entry._bind_args((), {"out": out, "table": b})[2]["table"]
+    assert first == second
+    assert (first.shape, first.dtype) == ((4,), pl.FP32)
+    with pytest.raises(TypeError, match="parameter 'out'"):
+        entry._bind_args((a, a), {})
 
 
 if __name__ == "__main__":

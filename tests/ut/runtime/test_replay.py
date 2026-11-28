@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -257,6 +258,16 @@ def test_replay_routes_l3_through_distributed_compiled_program(tmp_path: Path) -
     compiled.assert_called_once()
     assert compiled.call_args.args == (a, b)
     assert compiled.call_args.kwargs["config"].platform == "a2a3sim"
+
+
+def test_replay_explains_how_to_bind_external_windows(tmp_path: Path) -> None:
+    work_dir = _make_l3_build_output(tmp_path)
+    with patch(_L3_FROM_DIR) as from_dir:
+        compiled = from_dir.return_value
+        compiled._get_metadata.return_value = ([SimpleNamespace(is_distributed=True)], [], [])
+        with pytest.raises(ValueError, match=r"cannot bind external communication windows.*domain\.tensor"):
+            replay(work_dir, config=RunConfig(platform="a2a3sim"), rebuild_from_pto=False, recompile=False)
+        compiled.assert_not_called()
 
 
 def test_replay_l3_runs_l3_aware_rebuild_and_invalidate(tmp_path: Path) -> None:

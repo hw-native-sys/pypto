@@ -83,6 +83,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core import passes as _passes
 from pypto.pypto_core.passes import runtime_kind_to_name
+from pypto.runtime.comm_domain import DomainTensor
 
 from . import _arguments, _ast_analysis, _call_binding, _tensor_meta
 from ._signature_variants import build_contexts as _build_signature_contexts
@@ -927,7 +928,28 @@ class JITFunction:
                     f"mode ({self.__name__}.compile() with no tensor arguments), where it is "
                     f"now redundant."
                 )
-            if _arguments.is_tensor(value):
+            if isinstance(value, DomainTensor):
+                from pypto.language.distributed.typing import DistributedTensor  # noqa: PLC0415
+
+                annotation = _arguments.resolve_annotation(
+                    sig.parameters[name].annotation, func_name_lookup(self._func)
+                )
+                if not isinstance(annotation, DistributedTensor) and annotation is not DistributedTensor:
+                    raise TypeError(
+                        f"parameter {name!r} requires a DistributedTensor annotation for DomainTensor"
+                    )
+                if entry_dyn_map.get(name) or (
+                    isinstance(annotation, DistributedTensor)
+                    and (tuple(annotation.shape or ()) != value.shape or annotation.dtype != value.dtype)
+                ):
+                    raise ValueError(
+                        f"external parameter {name!r} requires the declared static shape and dtype"
+                    )
+                layout = param_layouts.get(name)
+                if layout is not None and layout.name != "ND":
+                    raise ValueError(f"external parameter {name!r} requires ND layout")
+                tensor_meta[name] = TensorMeta(value.shape, value.dtype, layout, is_distributed=True)
+            elif _arguments.is_tensor(value):
                 tensor_meta[name] = _arguments.extract_tensor_meta(
                     value,
                     entry_dyn_map.get(name),
@@ -1134,7 +1156,9 @@ class JITFunction:
         # ``compile(a=x)``) must still bind through ``_bind_args``/``sig.bind``;
         # scalar/config kwargs do not block signature mode.
         signature_mode = (
-            allow_signature_mode and not args and not any(_arguments.is_tensor(v) for v in kwargs.values())
+            allow_signature_mode
+            and not args
+            and not any(_arguments.is_tensor(v) or isinstance(v, DomainTensor) for v in kwargs.values())
         )
         bind = self._bind_args_from_signature(kwargs) if signature_mode else self._bind_args(args, kwargs)
         param_names, arguments, tensor_meta, scalar_dtypes, constexpr_values, per_func_dyn = bind

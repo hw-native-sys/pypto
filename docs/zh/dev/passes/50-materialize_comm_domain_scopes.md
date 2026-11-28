@@ -18,11 +18,16 @@
 | 回填到 | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
 | Program 级注册表 | `Program.functions_`（alloc 语句） | `CommDomainScopeStmt wrappers in each host_orch body` |
 
+HOST 的外部形参通过入口 ABI 取得 buffer 槽位和域。仅在本地分配处创建拥有该 buffer 的 scope。
+
 ## 异步工作区引擎
 
 `CommDomainScopeStmt.engines` 记录通信域需要的异步工作区引擎 (async workspace engines)。
 分组合并前，本 Pass 沿 `Call`/`Submit` 实参、返回别名、视图和循环携带值，将引擎需求
 追踪到每个底层窗口 buffer 分配。未调用函数不会为无关 buffer 申请引擎。
+即使没有发起传输，创建 URMA session 也要求提供上下文的窗口支持 URMA。对于 HOST 的外部窗口，
+代码生成会将物化后的上下文形参追溯到配对的窗口形参。如果同一外部窗口还需要 MTE，
+即使 HOST 另外分配了本地窗口，编译也会报错。
 
 Tensor 层的 `put_async`/`get_async` 要求远端操作数使用 URMA。A5 Scatter `pld.tile.get_async` 还要求本地 `DistributedTensor` 目标使用 URMA，使设备覆盖范围和内存来源兼容的源窗口与目标窗口在每个 rank 上共享注册内存区。`remote_load`/`remote_store` 和
 `put`/`get` 的远端操作数需要 MTE，包括 lowering 后的 tile 形式。同一分配同时需要两者

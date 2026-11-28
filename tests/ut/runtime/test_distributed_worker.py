@@ -185,6 +185,7 @@ def patched_setup():
     simpler = ModuleType("simpler")
     simpler.__path__ = []
     task_interface = ModuleType("simpler.task_interface")
+    setattr(task_interface, "TaskArgs", MagicMock)
     setattr(task_interface, "DataType", SimpleNamespace(UINT8=object()))
     setattr(simpler, "task_interface", task_interface)
     # `simpler.buffer` is the zero-copy naming path: a test can tell a named range from a
@@ -874,7 +875,7 @@ class TestPreparedSwimlaneTwoPass:
         compiled.output_dir = tmp_path
         rt = DistributedWorker(compiled)
 
-        # Exercise _dispatch_prepared's persistent branch without starting a
+        # Exercise the persistent two-pass path without starting a
         # background thread: the two-pass fallback still fences both requests.
         rt._persistent = True
         m["make_call_config"].reset_mock()
@@ -4982,6 +4983,168 @@ def test_persistent_domain_identity_includes_source_and_workspace():
     host = DistributedWorker._persistent_domain_spec({**base, "memory_source": "host"})
     urma = DistributedWorker._persistent_domain_spec({**base, "workspace_engines": ("urma",)})
     assert len({device, host, urma}) == 3
+
+
+@pytest.fixture
+def external_window_worker(patched_setup, tmp_path):
+    from pypto.runtime.comm_domain import (  # noqa: PLC0415
+        CommDomain,
+        DomainBufferSpec,
+        DomainState,
+        build_domain_layout,
+    )
+
+    compiled = _fake_compiled(
+        [_ParamInfo("a", ParamDirection.In, (4,), DataType.FP32, "ND", is_distributed=True)], []
+    )
+    compiled.output_dir = tmp_path
+    compiled.platform = "a2a3"
+    entry, _ = patched_setup["load_entry"].return_value
+    entry._window_requirements = {0: (True, (), None)}
+    patched_setup["worker"]._accepted_run_handles = set()
+    patched_setup["worker"]._abandoned_run_handles = []
+    patched_setup["worker"]._hierarchical_start_cv = threading.Condition()
+    with DistributedWorker(compiled) as worker:
+        slots, _ = build_domain_layout([DomainBufferSpec("table", (4,), DataType.FP32)])
+        domain = CommDomain(worker, (0,), slots, "device", ())
+        domain._native = MagicMock(freed=False)
+        domain._native.release.side_effect = lambda: setattr(domain._native, "freed", True)
+        domain._ref = MagicMock(owner_instance_id=b"instance", domain_id=10, generation=1)
+        domain._state = DomainState.LIVE
+        domain._tokens[0] = MagicMock()
+        worker._external_domains[domain.ref] = domain
+        yield worker, compiled, domain
+
+
+def test_external_release_fences_interrupted_submission(patched_setup, external_window_worker):
+    """An accepted run can outlive the submit() call that raised."""
+    worker, compiled, domain = external_window_worker
+    native = _ControlledNativeHandle()
+
+    def accepted(*_args, **_kwargs):
+        patched_setup["worker"]._accepted_run_handles.add(native)
+        raise KeyboardInterrupt("accepted")
+
+    patched_setup["submit_dispatch"].side_effect = accepted
+    table = domain.tensor("table")
+    with pytest.raises(KeyboardInterrupt, match="accepted"):
+        worker.submit(compiled, table)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        release = pool.submit(domain.release)
+        try:
+            assert native.result_started.wait(timeout=2)
+            domain._native.release.assert_not_called()
+            patched_setup["worker"].release_buffer.assert_not_called()
+        finally:
+            native.complete()
+        release.result(timeout=2)
+    domain._native.release.assert_called_once()
+    patched_setup["worker"].release_buffer.assert_called_once()
+    with pytest.raises(RuntimeError, match="released"):
+        worker.submit(compiled, table)
+
+
+@pytest.mark.parametrize("interrupted_pass", [1, 2])
+def test_interrupted_swimlane_pass_retains_window(patched_setup, external_window_worker, interrupted_pass):
+    worker, compiled, domain = external_window_worker
+    native = _ControlledNativeHandle()
+    handles = [_ImmediateNativeHandle()] * (interrupted_pass - 1) + [native]
+    patched_setup["submit_dispatch"].side_effect = handles
+    table = domain.tensor("table")
+    try:
+        with patch.object(native, "result", side_effect=KeyboardInterrupt), pytest.raises(KeyboardInterrupt):
+            worker.submit(compiled, table, config=RunConfig(platform="a2a3", enable_chip_swimlane=1))
+        assert patched_setup["submit_dispatch"].call_count == interrupted_pass
+        (frame,) = [f for f in worker._dispatch_frames if f.in_use]
+        assert frame.external_domains == (domain,)
+        assert table in frame.keepalive
+        assert frame.handle in worker._active_dispatch_handles
+    finally:
+        native.complete()
+    domain.release()
+    assert native.result_started.is_set()
+    assert not frame.in_use
+    domain._native.release.assert_called_once()
+
+
+def test_abandoned_submit_retains_resources_through_close_retry(patched_setup, external_window_worker):
+    worker, compiled, domain = external_window_worker
+    native = MagicMock(done=True, _finalization_abandoned=True)
+    native.result.side_effect = RuntimeError("native cancellation unsettled")
+    native_worker = patched_setup["worker"]
+    cleanup = MagicMock()
+
+    def abandon(_state, _tensors, _config, _keepalive, callbacks):
+        callbacks.append(cleanup)
+        native_worker._abandoned_run_handles.append(native)
+        raise KeyboardInterrupt("submit interrupted")
+
+    with (
+        patch.object(worker, "_submit_prepared_native", side_effect=abandon),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        worker.submit(compiled, domain.tensor("table"))
+    with pytest.raises(RuntimeError, match="native cancellation unsettled"):
+        domain.release()
+    (frame,) = [f for f in worker._dispatch_frames if f.in_use]
+    assert frame.abandoned
+    assert domain in frame.external_domains
+    native_worker.close.side_effect = RuntimeError("teardown not complete")
+    with pytest.raises(RuntimeError, match="teardown not complete"):
+        worker.close()
+    assert frame.in_use and frame.keepalive
+    cleanup.assert_not_called()
+    domain._native.release.assert_not_called()
+    native_worker.release_buffer.assert_not_called()
+
+    native_worker.close.side_effect = lambda: setattr(domain._native, "freed", True)
+    worker.close()
+    assert not frame.in_use
+    assert not frame.keepalive
+    assert not frame.cleanup
+    cleanup.assert_not_called()  # Native whole-worker teardown reclaimed the buffers.
+
+
+def test_terminal_failure_retires_frame_before_concurrent_release(patched_setup, external_window_worker):
+    worker, compiled, domain = external_window_worker
+    native = _ControlledNativeHandle()
+    patched_setup["submit_dispatch"].return_value = native
+    handle = worker.submit(compiled, domain.tensor("table"))
+    native.complete(RuntimeError("run failed"))
+    retiring = threading.Event()
+    resume = threading.Event()
+    original_retire = worker._retire_dispatch_handle
+    release_waiting = threading.Event()
+    original_wait = handle._cv.wait
+
+    def observe_wait(*args, **kwargs):
+        release_waiting.set()
+        return original_wait(*args, **kwargs)
+
+    def pause_before_retire(*args, **kwargs):
+        retiring.set()
+        assert resume.wait(timeout=5)
+        original_retire(*args, **kwargs)
+
+    with (
+        patch.object(worker, "_retire_dispatch_handle", side_effect=pause_before_retire),
+        patch.object(handle._cv, "wait", side_effect=observe_wait),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            waiting = pool.submit(handle.result)
+            try:
+                assert retiring.wait(timeout=2)
+                assert not handle.done
+                release = pool.submit(domain.release)
+                assert release_waiting.wait(timeout=2)
+            finally:
+                resume.set()
+            with pytest.raises(RuntimeError, match="run failed"):
+                waiting.result(timeout=2)
+            with pytest.raises(RuntimeError, match="run failed"):
+                release.result(timeout=2)
+    domain._native.release.assert_called_once()
+    patched_setup["worker"].release_buffer.assert_called_once()
 
 
 if __name__ == "__main__":

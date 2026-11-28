@@ -317,3 +317,28 @@ Rank 列表也可以包含连续 CPU `torch.Tensor`，例如
 `window_sources={"engram_l1": [rank0_tensor, rank1_tensor]}`，或混合文件与 tensor。
 Tensor 在创建域时按原始字节复制，不转换 dtype；来源至少包含窗口逻辑字节数。
 初始化完成前须保持来源的存储与内容稳定。运行时能力检查在 worker 初始化阶段完成，不在每次 submit 重复执行。
+
+## 在程序之间共享外部表
+
+创建 worker 前准备普通输入与输出。两个 HOST 入口均以静态 `pld.DistributedTensor[[1, 65], pl.UINT8]` 声明表参数。初始化源按 members 顺序提供。本例每份源数据为 65 字节，每个物理槽占 128 字节。
+
+```python
+from pypto import DataType
+from pypto.runtime import DistributedWorker, DomainBufferSpec
+
+with DistributedWorker([prefill, decode]) as worker:
+    with worker.create_comm_domain(
+        members=[0, 1],
+        buffers=[DomainBufferSpec("weights", (1, 65), DataType.UINT8)],
+        memory_source="host",
+        window_sources={"weights": [rank0_file, rank1_file]},
+    ) as domain:
+        weights = domain.tensor("weights")
+        worker.submit(prefill, weights, prefill_output).result()
+        worker.submit(decode, weights, decode_output).result()
+```
+
+`members` 按域内 rank 顺序列出本地 worker 下标。窗口在建域的 worker 上使用。
+默认的 `memory_source="device"` 通过 CHIP 任务填充窗口，无需传入 `window_sources`。
+A5 Host 域的异步远端 GET 需要指定 `workspace_engines=("urma",)`，底层运行时要求
+成员从 worker 0 开始连续排列。退出域的 `with` 块时会等待已接受的调用完成并释放分配。
