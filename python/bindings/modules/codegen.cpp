@@ -14,9 +14,13 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
+#include <tuple>
+
 #include "pypto/backend/common/backend.h"
+#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/distributed/distributed_codegen.h"
 #include "pypto/codegen/orchestration/orchestration_codegen.h"
 #include "pypto/codegen/pto/pto_codegen.h"
@@ -38,6 +42,17 @@ void BindCodegen(nb::module_& m) {
 
   codegen_module.def("data_type_to_mlir", &DataTypeToMLIR, nb::arg("dtype"),
                      "Return the PTO MLIR spelling of an element data type.");
+
+  codegen_module.def(
+      "_shmem_comm_layout",
+      [] {
+        namespace layout = pypto::codegen::distributed::comm_layout;
+        return std::make_tuple(layout::kCommCtxSize, COMM_MAX_RANK_NUM, layout::kRankIdOffset,
+                               layout::kRankNumOffset, offsetof(::CommContext, winSize),
+                               layout::kWindowsInOffset, layout::kWindowsOutOffset,
+                               layout::kCommBufferAlignmentBytes);
+      },
+      "Return the pinned runtime layout for Python SHMEM context packing.");
 
   nb::class_<VFHelper>(codegen_module, "VFHelper")
       .def_ro("kind", &VFHelper::kind)

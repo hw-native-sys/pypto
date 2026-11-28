@@ -35,6 +35,12 @@ from _task_interface import (
     TensorTransfer as TensorTransfer,
 )
 
+class BufferLocation:
+    @property
+    def device_id(self) -> int: ...
+    @property
+    def address_space(self) -> AddressSpace: ...
+
 class Buffer:
     """Owner-side registry object for one shared backing."""
 
@@ -50,6 +56,10 @@ class Buffer:
     unlinked: bool
     base: int
 
+    @classmethod
+    def wrap(
+        cls, *, address: int, nbytes: int, location: BufferLocation, access: AccessMode = ...
+    ) -> Buffer: ...
     def freeze_descriptor(self) -> None: ...
     def to_descriptor(self) -> BufferDescriptor: ...
     def tensor(
@@ -96,6 +106,7 @@ __all__ = [
     "AddressSpace",
     "BackendKind",
     "Buffer",
+    "BufferLocation",
     "Tensor",
     "TensorTransfer",
     "create_host_shared_buffer",

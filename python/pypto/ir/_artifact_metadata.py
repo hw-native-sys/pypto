@@ -18,6 +18,8 @@ from typing import Any, TypeGuard
 
 from pypto._artifact_contract import ArtifactExecutionMode, ExecutionCapabilities
 from pypto.backend import BackendType
+from pypto.pypto_core import DataType
+from pypto.pypto_core.ir import ParamDirection
 
 from .param_info import (
     _is_int_list,
@@ -284,6 +286,20 @@ def _legacy_lowered_parameters(parameters: Sequence[_ParamInfo]) -> tuple[_Param
     return tuple(lowered)
 
 
+def _read_comm_context_bindings(raw: dict[str, Any]) -> tuple[tuple[int, int], ...] | None:
+    if "comm_context_bindings" not in raw:
+        return None
+    rows: object = raw["comm_context_bindings"]
+    if not _is_obj_list(rows):
+        raise ValueError("comm_context_bindings must be a list of integer pairs")
+    bindings: list[tuple[int, int]] = []
+    for row in rows:
+        if not _is_int_list(row) or len(row) != 2:
+            raise ValueError("comm_context_bindings must be a list of integer pairs")
+        bindings.append((row[0], row[1]))
+    return tuple(bindings)
+
+
 @dataclass(frozen=True)
 class ArtifactMetadata:
     """Logical caller signature and lowered assembly signature of one entry.
@@ -299,6 +315,9 @@ class ArtifactMetadata:
     backend_type: BackendType
     return_aliases: tuple[int, ...] | None = None
     execution_capabilities: ExecutionCapabilities = ExecutionCapabilities()
+    # (context scalar index, distributed tensor index). None identifies older
+    # artifacts and artifacts built outside the explicit SHMEM contract.
+    comm_context_bindings: tuple[tuple[int, int], ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", tuple(self.parameters))
@@ -322,6 +341,27 @@ class ArtifactMetadata:
 
             validate_kernel_parameters(self.parameters)
             validate_lowered_signature(self.parameters, self.lowered_parameters)
+        if self.comm_context_bindings is not None:
+            self._validate_comm_context_bindings()
+
+    def _validate_comm_context_bindings(self) -> None:
+        if ArtifactExecutionMode.KERNEL not in self.execution_capabilities.modes:
+            raise ValueError("Communication context bindings require KERNEL metadata")
+        bindings = self.comm_context_bindings
+        assert bindings is not None
+        suffix_start = len(self.parameters) - len(bindings)
+        last_tensor = -1
+        for expected_ctx, (ctx, tensor) in enumerate(bindings, start=suffix_start):
+            if type(ctx) is not int or type(tensor) is not int or not last_tensor < tensor < suffix_start:
+                raise ValueError("Invalid distributed tensor index in communication context bindings")
+            if ctx != expected_ctx or (
+                self.parameters[ctx].shape is not None
+                or self.parameters[ctx].dtype != DataType.UINT64
+                or self.parameters[ctx].direction != ParamDirection.In
+                or self.parameters[tensor].shape is None
+            ):
+                raise ValueError("Communication context bindings must pair UINT64 suffix slots with tensors")
+            last_tensor = tensor
 
     def record(self) -> dict[str, Any]:
         return {
@@ -333,6 +373,11 @@ class ArtifactMetadata:
             "return_aliases": None if self.return_aliases is None else list(self.return_aliases),
             "platform": self.platform,
             "backend_type": self.backend_type.name,
+            **(
+                {"comm_context_bindings": [list(pair) for pair in self.comm_context_bindings]}
+                if self.comm_context_bindings is not None
+                else {}
+            ),
         }
 
     def write(self, directory: Path) -> None:
@@ -401,6 +446,7 @@ class ArtifactMetadata:
                 meta["backend_type"],
                 aliases,
                 meta["execution_capabilities"],
+                _read_comm_context_bindings(raw),
             )
         except (KeyError, TypeError, AttributeError, ValueError) as exc:
             raise _meta_error(_COMPILED_META_FILENAME, path, str(exc)) from exc

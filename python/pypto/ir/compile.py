@@ -159,6 +159,7 @@ class _CompilationResult(NamedTuple):
     logical_parameters: "list[ParamInfo] | None"
     return_aliases: tuple[int, ...] | None
     runtime_name: str
+    comm_context_bindings: tuple[tuple[int, int], ...] | None = None
 
 
 def _is_distributed(program: _ir_core.Program) -> bool:
@@ -606,6 +607,7 @@ def _compile_to_files(  # noqa: PLR0913
     program: _ir_core.Program,
     *,
     contract: ArtifactExecutionMode = ArtifactExecutionMode.PROGRAM,
+    _explicit_comm_contexts: bool = False,
     output_dir: str | None = None,
     strategy: OptimizationStrategy = OptimizationStrategy.Default,
     dump_passes: bool | PassDumpLevel = True,
@@ -628,6 +630,7 @@ def _compile_to_files(  # noqa: PLR0913
     """Run shared contract analysis, passes and codegen without execution wrappers."""
     from ._compile_contract import (  # noqa: PLC0415
         analyze_contract,
+        distributed_parameter_indices,
         entry_function,
         external_parameter_names,
         validate_kernel_host_access,
@@ -635,7 +638,10 @@ def _compile_to_files(  # noqa: PLR0913
     )
     from .param_info import _extract_func_param_infos  # noqa: PLC0415
 
-    logical, aliases = analyze_contract(program, contract)
+    if _explicit_comm_contexts and contract is not ArtifactExecutionMode.KERNEL:
+        raise ValueError("Explicit communication contexts require the kernel contract")
+    logical, aliases = analyze_contract(program, contract, explicit_comm_contexts=_explicit_comm_contexts)
+    comm_context_bindings = None
     backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
     platform = _platform_string(backend_type, mode)
     _select_backend(backend_type=backend_type, platform=platform)
@@ -701,6 +707,24 @@ def _compile_to_files(  # noqa: PLR0913
             kernel_scalar_count = sum(param.shape is None for param in lowered)
             assert logical is not None
             lowered = external_parameter_names(logical, lowered)
+            if _explicit_comm_contexts:
+                # The in-process SHMEM adapter supplies these contexts explicitly.
+                # Admit only the suffix generated for the original distributed
+                # tensor parameters, never arbitrary compiler-added arguments.
+                tensor_indices = distributed_parameter_indices(entry_function(program))
+                lowered_entry = entry_function(transformed_program)
+                suffix = lowered_entry.params[len(logical) :]
+                if len(suffix) != len(tensor_indices) or any(
+                    not isinstance(param.type, _ir_core.CommCtxType) for param in suffix
+                ):
+                    raise ValueError("Lowering changed the explicit communication-context signature")
+                # MaterializeDistTensorCtx appends contexts in the order of
+                # the original distributed tensor parameters.
+                comm_context_bindings = tuple(
+                    (ctx_index, tensor_index)
+                    for ctx_index, tensor_index in enumerate(tensor_indices, start=len(logical))
+                )
+                logical = [*logical, *lowered[len(logical) :]]
             validate_lowered_signature(logical, lowered)
             if _passes.is_host_build_graph(effective_runtime):
                 validate_kernel_host_access(transformed_program)
@@ -747,6 +771,7 @@ def _compile_to_files(  # noqa: PLR0913
         logical,
         aliases,
         runtime_implementation_name(effective_runtime, platform),
+        comm_context_bindings,
     )
 
 
@@ -775,6 +800,7 @@ def _make_single_chip_artifact(
         result.backend_type,
         result.return_aliases,
         ExecutionCapabilities((contract,)),
+        result.comm_context_bindings,
     )
     directory = Path(result.output_dir)
     _drop_foreign_build_markers(directory, keep=(_COMPILED_META_FILENAME, "kernel_config.py"))

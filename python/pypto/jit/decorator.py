@@ -1714,7 +1714,11 @@ class JITFunction:
                 from pypto.ir.compile import _compile_artifact  # noqa: PLC0415
 
                 return _compile_artifact(
-                    parsed, contract=contract, skip_ptoas=skip_ptoas, **ir_compile_kwargs
+                    parsed,
+                    contract=contract,
+                    skip_ptoas=skip_ptoas,
+                    _explicit_comm_contexts=contract is ArtifactExecutionMode.KERNEL,
+                    **ir_compile_kwargs,
                 )
             return ir_compile(parsed, skip_ptoas=skip_ptoas, **ir_compile_kwargs)
         except Exception as exc:

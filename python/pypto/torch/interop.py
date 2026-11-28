@@ -18,7 +18,7 @@ import ctypes
 import importlib
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 import torch
@@ -92,6 +92,9 @@ class CallFrame:
     stream: Any = field(repr=False, compare=False)
     return_tensors: tuple[torch.Tensor, ...] = field(repr=False, compare=False)
 
+    # External mapping handles can outlive their Tensor storage owners.
+    owners: tuple[Any, ...] = field(default=(), repr=False, compare=False)
+
     def alias_result(self) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
         """Return the exact externally supplied objects named by return aliases."""
         if not self.return_tensors:
@@ -113,11 +116,15 @@ def _native_storage_shape(tensor: torch.Tensor) -> tuple[int, ...]:
     return tuple(native.storage_shape(tensor))
 
 
-def _scalar_value(value: Any, info: ParamInfo) -> int | float | bool:
-    """Copy a scalar using the same ctypes representation as program parameters."""
-    ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
+def _scalar_value(
+    value: Any, info: ParamInfo, ctype: "type[ctypes._SimpleCData[Any]] | None" = None
+) -> int | float | bool:
+    """Validate and copy a scalar, reusing the real-call signature's resolved type."""
+    # Fake/Meta registration also uses this validator without a CallSignature.
     if ctype is None:
-        raise TypeError(f"Parameter {info.name!r} has unsupported scalar dtype {info.dtype}")
+        ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
+        if ctype is None:
+            raise TypeError(f"Parameter {info.name!r} has unsupported scalar dtype {info.dtype}")
     if isinstance(value, ctypes._SimpleCData):
         cdata = cast("ctypes._SimpleCData[Any]", value)
         if type(cdata) is not ctype:
@@ -174,10 +181,18 @@ def _validate_tensor(tensor: Any, info: ParamInfo, dtype: torch.dtype) -> None:
 
 
 def _describe_tensor(
-    tensor: torch.Tensor, info: ParamInfo, index: int, npu: Any, platform: str | None
+    tensor: torch.Tensor,
+    info: ParamInfo,
+    index: int,
+    npu: Any,
+    platform: str | None,
+    *,
+    raw_nd: bool = False,
 ) -> TensorArgument:
     """Borrow a base-format view or explicitly declared native NZ input without conversion."""
-    tensor_format = int(npu.get_npu_format(tensor))
+    # SHMEM's byte allocation has generic StorageImpl, without NPUStorageDesc.
+    # Its validated contiguous views are ND; querying an NPU descriptor is invalid.
+    tensor_format = 2 if raw_nd else int(npu.get_npu_format(tensor))
     native_nz = tensor_format == 29 and info.layout == "NZ" and platform == "a2a3"
     if tensor_format not in (0, 2) and not native_nz:
         raise ValueError(
@@ -283,13 +298,18 @@ class CallSignature:
         validate_parameter_names(self._params)
         validate_return_aliases(self._params, self._return_aliases)
         self._torch_dtypes = tuple(_to_torch_dtype(p.dtype) for p in self._params)
-        for p, dtype in zip(self._params, self._torch_dtypes, strict=True):
+        self._scalar_ctypes = tuple(
+            _DATATYPE_TO_CTYPE.get(str(p.dtype)) if p.shape is None else None for p in self._params
+        )
+        for p, dtype, ctype in zip(self._params, self._torch_dtypes, self._scalar_ctypes, strict=True):
             if p.shape is not None and dtype is None:
                 raise TypeError(f"Parameter {p.name!r} has unsupported tensor dtype {p.dtype}")
-            if p.shape is None and str(p.dtype) not in _DATATYPE_TO_CTYPE:
+            if p.shape is None and ctype is None:
                 raise TypeError(f"Parameter {p.name!r} has unsupported scalar dtype {p.dtype}")
 
-    def describe_call(self, args: Sequence[Any]) -> CallFrame:
+    def describe_call(
+        self, args: Sequence[Any], *, _raw_nd_tensors: Sequence[torch.Tensor] = ()
+    ) -> CallFrame:
         """Validate all arguments, then capture this call's device, stream and owners.
 
         Does not allocate output tensors, convert layouts, initialize a Worker,
@@ -298,9 +318,12 @@ class CallSignature:
         bound = bind_complete_args(args, self._params, caller_name=self._caller_name)
         scalars: list[ScalarArgument] = []
         device_indices: set[int | None] = set()
-        for index, (arg, info, dtype) in enumerate(zip(bound, self._params, self._torch_dtypes, strict=True)):
+        for index, (arg, info, dtype, ctype) in enumerate(
+            zip(bound, self._params, self._torch_dtypes, self._scalar_ctypes, strict=True)
+        ):
             if info.shape is None:
-                scalars.append(ScalarArgument(info.name, index, info.dtype, _scalar_value(arg, info)))
+                assert ctype is not None
+                scalars.append(ScalarArgument(info.name, index, info.dtype, _scalar_value(arg, info, ctype)))
             else:
                 assert dtype is not None
                 _validate_tensor(arg, info, dtype)
@@ -308,8 +331,16 @@ class CallSignature:
         if len(device_indices) > 1:
             raise ValueError(f"{self._caller_name} requires one NPU device, got {device_indices}")
         npu = _load_torch_npu()
+        raw_ids = {id(tensor) for tensor in _raw_nd_tensors}
         tensors = tuple(
-            _describe_tensor(arg, info, index, npu, self._platform)
+            _describe_tensor(
+                arg,
+                info,
+                index,
+                npu,
+                self._platform,
+                raw_nd=id(arg) in raw_ids,
+            )
             for index, (arg, info) in enumerate(zip(bound, self._params, strict=True))
             if info.shape is not None
         )
@@ -329,3 +360,43 @@ class CallSignature:
         return CallFrame(
             tensors, tuple(scalars), device, stream, tuple(bound[i] for i in self._return_aliases)
         )
+
+
+def _describe_kernel_call(
+    params: Sequence[ParamInfo],
+    return_aliases: tuple[int, ...],
+    args: Sequence[Any],
+    *,
+    platform: str,
+    device_index: int,
+    distributed_indices: Sequence[int] = (),
+    append_contexts: bool = False,
+) -> CallFrame:
+    """Bind window views to logical parameters, with the generated ABI suffix after lowering."""
+    signature = CallSignature(params, return_aliases=return_aliases, platform=platform)
+    # A window view can also be an argument of an ordinary local kernel. Its
+    # storage still needs the same raw ND handling and mapping lifetime.
+    indices = dict.fromkeys(distributed_indices)
+    indices.update(
+        (index, None)
+        for index, value in enumerate(args[: len(params)])
+        if isinstance(value, torch.Tensor) and "_pypto_shmem_window" in value.__dict__
+    )
+    if not indices:
+        return signature.describe_call(args)
+
+    from pypto.runtime.shmem_gloo import _require_shmem_window  # noqa: PLC0415
+
+    logical_count = len(params) - (len(distributed_indices) if append_contexts else 0)
+    if len(args) != logical_count:
+        raise TypeError(f"Expected {logical_count} kernel arguments, got {len(args)}")
+    windows = {
+        index: _require_shmem_window(args[index], params[index].name, device_index) for index in indices
+    }
+    lowered_args = (
+        (*args, *(windows[index].device_ctx_ptr for index in distributed_indices))
+        if append_contexts
+        else args
+    )
+    frame = signature.describe_call(lowered_args, _raw_nd_tensors=tuple(args[index] for index in windows))
+    return replace(frame, owners=tuple({id(window): window for window in windows.values()}.values()))
