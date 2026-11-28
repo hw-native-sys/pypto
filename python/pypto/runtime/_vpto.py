@@ -84,8 +84,13 @@ def ptoas_flags_for_source(source_text: str, *, emit_llvm: bool = False) -> tupl
     manual helper with a different synchronization policy.
     """
     markers: list[str] = []
+    physical_order = False
     in_header = True
     for line in source_text.splitlines():
+        if "pypto.reg_physical_order" in line:
+            if not in_header or physical_order or line != "// pypto.reg_physical_order: preserve":
+                raise ValueError("Invalid pypto.reg_physical_order header marker")
+            physical_order = True
         if "pypto.reg_auto_sync" in line:
             if not in_header or line not in (REG_AUTO_SYNC_PREFIX + " true", REG_AUTO_SYNC_PREFIX + " false"):
                 raise ValueError("Invalid pypto.reg_auto_sync header marker")
@@ -103,11 +108,14 @@ def ptoas_flags_for_source(source_text: str, *, emit_llvm: bool = False) -> tupl
         flags=re.DOTALL,
     )
     simt = re.search(r"[{,]\s*pto\.simt_entry\s*(?=[},=])", code_tokens)
+    if physical_order and simt:
+        raise ValueError("pypto.reg_physical_order is not valid for SIMT helpers")
     if markers and simt:
         raise ValueError("pypto.reg_auto_sync is not valid for SIMT helpers")
     enabled = not markers or markers[0].endswith(" true")
     mode = LLVM_IR_FLAG if simt or emit_llvm else DEVICE_OBJECT_FLAG
-    return (*PTOAS_FLAGS, mode, f"--enable-vecscope-mem-bar={str(enabled).lower()}")
+    order_flags = ("--vpto-scheduler=off",) if physical_order else ()
+    return (*PTOAS_FLAGS, mode, *order_flags, f"--enable-vecscope-mem-bar={str(enabled).lower()}")
 
 
 def prepare_llvm_for_bisheng(text: str) -> str:

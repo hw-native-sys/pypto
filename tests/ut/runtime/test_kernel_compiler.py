@@ -25,6 +25,7 @@ import pytest
 from pypto.backend._ptoas_locate import PTOAS_MIN_VERSION
 from pypto.runtime._device_image import validate_device_image
 from pypto.runtime._stack_usage import validate_stack_usage
+from pypto.runtime._vpto import ptoas_flags_for_source
 from pypto.runtime.elf_parser import extract_text_section
 
 
@@ -1315,3 +1316,13 @@ def test_reg_auto_sync_accepts_vf_name_containing_simt_entry(compiler_module):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_physical_register_order_is_opt_in_and_does_not_enable_external_sources():
+    key = "// pypto.reg_physical_order: preserve"
+    flag = "--vpto-scheduler=off"
+    assert flag in ptoas_flags_for_source(key + "\nmodule {}")
+    assert flag not in ptoas_flags_for_source("// pypto.reg_auto_sync: false\nmodule {}")
+    for text in ["module {}\n" + key, key + "\n" + key, key.replace("preserve", "other")]:
+        with pytest.raises(ValueError, match="reg_physical_order"):
+            ptoas_flags_for_source(text)

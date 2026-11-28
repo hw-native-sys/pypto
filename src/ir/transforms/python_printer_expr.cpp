@@ -761,6 +761,15 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
     return;
   }
 
+  if (IsOp(op, "system.get_buf") || IsOp(op, "system.rls_buf")) {
+    const auto pipe = static_cast<PipeType>(op->GetKwarg<int>("pipe"));
+    stream_ << "pipe=" << prefix_ << ".PipeType." << PipeTypeToString(pipe) << ", buf_id=";
+    VisitExpr(op->args_.at(0));
+    print_serialized_attrs(true);
+    stream_ << ")";
+    return;
+  }
+
   // Flag IR keeps the event as either an attribute or the sole dynamic
   // operand. Print the public src/dst/event order explicitly; generic Call
   // printing would put the dynamic operand before src_pipe and dst_pipe.

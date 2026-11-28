@@ -1057,11 +1057,28 @@ def test_distinct_captured_views_preserve_shared_base(offset, reverse, tmp_path)
     assert helper.parameter_effects == ["readwrite", "read"]
 
 
-def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("attrs", "caller_sync"),
+    [
+        ({}, "ptoas-insert-sync"),
+        ({"ptoas_manual_sync": True}, "manual"),
+        ({"ptoas_buffer_id_sync": True}, "ptoas-insert-sync"),
+    ],
+)
+def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeypatch, attrs, caller_sync):
     program = build_kernel(masked=True)
     bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
     function = program.get_function("register_kernel")
     assert function is not None
+    function = ir.Function(
+        function.name,
+        function.params,
+        function.return_types,
+        function.body,
+        function.span,
+        type=function.func_type,
+        attrs=attrs,
+    )
     unit = pto_backend._CodegenUnit(
         name="register_kernel",
         pto_code=bundle.caller_source,
@@ -1078,7 +1095,7 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
     assert manifest["schema_version"] == 5
     assert manifest["entry_helpers"] == bundle.entry_helpers
     assert manifest["effect_scope"] == "whole-tile"
-    assert manifest["synchronization"] == "ptoas-insert-sync"
+    assert manifest["synchronization"] == caller_sync
     entry = manifest["helpers"][0]
     helper = bundle.helpers[0]
     assert entry["adapter_symbol"] == helper.adapter_symbol
@@ -1495,3 +1512,37 @@ def test_manual_store_load_barrier_survives_ptoas(tmp_path):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.ptoas_compile
+def test_physical_byte_unpack_compiles_from_register_dsl(tmp_path):
+    @pl.program
+    class Unpack:
+        @pl.function(type=pl.FunctionType.AIV)
+        def unpack(self):
+            src = pl.tile.full([512], pl.UINT8, 1)
+            dst = pl.tile.full([1024], pl.INT8, 0)
+            with pl.reg_scope(auto_sync=False):
+                all8 = pl.reg.full_mask(lanes=256)
+                all16 = pl.reg.full_mask(lanes=128)
+                even = pl.reg.mask_bitcast(all16, lanes=256)
+                right = pl.reg.broadcast(2, lanes=256, dtype=pl.INT8)
+                left = pl.reg.broadcast(4, lanes=256, dtype=pl.INT8)
+                keep = pl.reg.broadcast(-100, lanes=256, dtype=pl.INT8)
+                for i in pl.hardware_loop(4):
+                    raw = pl.reg.load(src, offset=i * 128, lanes=256, dist="US_B8")
+                    packed = pl.reg.interpret_cast(raw, dtype=pl.INT8)
+                    hi = pl.reg.shift_right(packed, right, all8)
+                    shifted = pl.reg.shift_left(packed, left, all8)
+                    lo = pl.reg.shift_right(shifted, right, all8)
+                    selected = pl.reg.select(even, lo, hi)
+                    result = pl.reg.bitwise_and(selected, keep, all8)
+                    _written = pl.reg.store(dst, offset=i * 256, value=result)
+
+    with passes.PassContext([]):
+        program = passes.init_mem_ref()(Unpack)
+    bundle = codegen.PTOCodegen().generate_bundle(program, emit_source_loc=False)
+    (helper,) = bundle.helpers
+    assert helper.source.count("pto.vlds ") == helper.source.count("pto.vsts ") == 1
+    assert "pto.pbitcast" in helper.source and 'dist = "US_B8"' in helper.source
+    compile_vf_bundle(bundle, tmp_path)

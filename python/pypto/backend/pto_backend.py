@@ -55,7 +55,7 @@ from pypto._function_attrs import (
 )
 from pypto._target import runtime_implementation_name
 from pypto.backend._host_tensor_args import host_tensor_indices as _host_tensor_indices
-from pypto.backend._ptoas_config import PTOAS_BUFFER_ID_SYNC_MARKER
+from pypto.backend._ptoas_config import PTOAS_BUFFER_ID_SYNC_MARKER, PTOAS_MANUAL_SYNC_MARKER, sync_flags
 from pypto.backend._ptoas_config import PTOAS_TIMEOUT_ENV as _PTOAS_TIMEOUT_ENV
 from pypto.backend._ptoas_config import get_ptoas_timeout as _get_ptoas_timeout
 from pypto.backend._ptoas_fp4 import check_native_fp4_mx_support, uses_native_fp4_mx
@@ -1858,6 +1858,7 @@ def _get_ptoas_flags(
     passes_dump_dir: str | None = None,
     *,
     buffer_id_sync: bool = False,
+    manual_sync: bool = False,
 ) -> list[str]:
     """Build the common ptoas flag list for kernel compilation.
 
@@ -1869,7 +1870,7 @@ def _get_ptoas_flags(
     """
     level = "level2" if memory_planner == _passes.MemoryPlanner.PTOAS else "level3"
     flags = [
-        "--enable-bufid_sync" if buffer_id_sync else "--enable-insert-sync",
+        *sync_flags(buffer_id_sync=buffer_id_sync, manual_sync=manual_sync),
         f"--pto-level={level}",
     ]
     if passes_dump_dir is not None:
@@ -1995,7 +1996,12 @@ def _compile_pto_module(
     _run_ptoas(
         pto_path,
         compiled_path,
-        ptoas_flags=_get_ptoas_flags(memory_planner, passes_dump_dir, buffer_id_sync=buffer_id_sync),
+        ptoas_flags=_get_ptoas_flags(
+            memory_planner,
+            passes_dump_dir,
+            buffer_id_sync=buffer_id_sync,
+            manual_sync=PTOAS_MANUAL_SYNC_MARKER in pto_code.splitlines(),
+        ),
     )
 
     if is_vpto:
@@ -2022,6 +2028,26 @@ def _emit_vpto_object(result_files: dict[str, str], object_rel: str, content: by
     )
 
 
+def _apply_manual_sync(members: list[_ir_core.Function], pto_code: str) -> str:
+    enabled = [func.attrs.get("ptoas_manual_sync", False) for func in members]
+    if any(type(flag) is not bool for flag in enabled):
+        raise ValueError("ptoas_manual_sync must be a Boolean function attribute")
+    if any(enabled):
+        if not all(enabled):
+            raise ValueError("Grouped kernels must agree on ptoas_manual_sync")
+        if any(_requests_buffer_id_sync(f) for f in members):
+            raise ValueError("ptoas_manual_sync cannot be combined with ptoas_buffer_id_sync")
+        header, newline, body = pto_code.partition("\n")
+        if 'pto.target_arch = "a5"' not in header or 'pto.backend = "vpto"' in header:
+            raise ValueError("ptoas_manual_sync requires A5 PTO code generation")
+        return f"{header}{newline}{PTOAS_MANUAL_SYNC_MARKER}\n{body}"
+    # The generated instructions start a statement: comments and source-location
+    # strings must not opt a kernel out of the normal scheduling protections.
+    if re.search(r"^\s*pto\.(?:get_buf|rls_buf)(?:_dyn)?\b", pto_code, re.MULTILINE):
+        raise ValueError("Explicit Cube buffer locks require ptoas_manual_sync=True")
+    return pto_code
+
+
 def _emit_single_function_output(
     result_files: dict[str, str],
     func: _ir_core.Function,
@@ -2032,6 +2058,7 @@ def _emit_single_function_output(
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Emit output files for one InCore function."""
+    pto_code = _apply_manual_sync([func], pto_code)
     suffix = "pto" if skip_ptoas else "cpp"
     kernel_rel = _get_kernel_output_path(func, suffix)
     if skip_ptoas:
@@ -2086,6 +2113,7 @@ def _emit_group_output(
     dump_ptoas_passes: bool = False,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
+    pto_code = _apply_manual_sync(members, pto_code)
     memory_planner = _group_memory_planner(members, memory_planner)
     member_buffer_id_sync = [_requests_buffer_id_sync(func) for func in members]
     buffer_id_sync = any(member_buffer_id_sync)
@@ -2201,6 +2229,13 @@ def _emit_unit(
     for helper in unit.helpers:
         local_files[f"vpto/{unit.name}/{helper.symbol}.pto"] = helper.source
     if unit.helpers:
+        # The manifest describes the caller's schedule; each VF has its own barrier policy.
+        attrs = unit.funcs[0].attrs
+        caller_sync = "ptoas-insert-sync"
+        if attrs.get("ptoas_manual_sync"):
+            caller_sync = "manual"
+        elif unit.is_group and attrs.get("ptoas_buffer_id_sync"):
+            caller_sync = "ptoas-buffer-id-sync"
         local_files[f"vpto/{unit.name}/manifest.json"] = (
             json.dumps(
                 {
@@ -2209,7 +2244,7 @@ def _emit_unit(
                     "target": "a5",
                     "core_type": "aiv",
                     "bridge": False,
-                    "synchronization": "ptoas-insert-sync",
+                    "synchronization": caller_sync,
                     "effect_scope": "whole-storage"
                     if any(h.kind == "simt" for h in unit.helpers)
                     else "whole-tile",

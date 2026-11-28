@@ -309,7 +309,9 @@ def matmul_bias(lhs: Tile, rhs: Tile, bias: Tile, *, tf32_mode: str | None = Non
     return Tile(expr=call_expr)
 
 
-def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+def matmul_mx(
+    lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, *, acc_phase: AccPhase = AccPhase.Unspecified
+) -> Tile:
     """MX block-scale matrix multiplication.
 
     Scales use logical ``[M, K/32]`` / ``[K/32, N]`` shapes. Each FP8 data
@@ -324,15 +326,26 @@ def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
         lhs_scale: Left-hand side scale tile (FP8E8M0)
         rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
+        acc_phase: Optional producer-side partial/final accumulator phase.
 
     Returns:
         Tile wrapping the matmul_mx operation
     """
-    call_expr = _ir_ops.matmul_mx(lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap())
+    call_expr = _ir_ops.matmul_mx(
+        lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), acc_phase=acc_phase
+    )
     return Tile(expr=call_expr)
 
 
-def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile:
+def matmul_mx_acc(
+    acc: Tile,
+    lhs: Tile,
+    lhs_scale: Tile,
+    rhs: Tile,
+    rhs_scale: Tile,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tile:
     """MX block-scale matmul with accumulation.
 
     Data operands follow [`matmul_mx`][pypto.language.tile.matmul_mx]: each FP8
@@ -345,12 +358,13 @@ def matmul_mx_acc(acc: Tile, lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: T
         lhs_scale: Left-hand side scale tile (FP8E8M0)
         rhs: Right-hand side data tile (FP8E4M3FN, FP8E5M2, or packed FP4)
         rhs_scale: Right-hand side scale tile (FP8E8M0)
+        acc_phase: Optional producer-side partial/final accumulator phase.
 
     Returns:
         Tile wrapping the matmul_mx_acc operation
     """
     call_expr = _ir_ops.matmul_mx_acc(
-        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap()
+        acc.unwrap(), lhs.unwrap(), lhs_scale.unwrap(), rhs.unwrap(), rhs_scale.unwrap(), acc_phase=acc_phase
     )
     return Tile(expr=call_expr)
 

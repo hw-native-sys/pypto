@@ -854,6 +854,7 @@ class TestMxMatmulCodegen:
                 b_s: pl.Tensor[[2, 32], pl.FP8E8M0, pl.MX_B_NN],
                 out: pl.Tensor[[16, 32], pl.FP32],
             ):
+                pl.func_attr({"ptoas_manual_sync": True})
                 lhs = pl.move(
                     pl.load(a, [0, 0], [16, 64], target_memory=pl.Mem.Mat), target_memory=pl.Mem.Left
                 )
@@ -868,9 +869,11 @@ class TestMxMatmulCodegen:
                     pl.load(b_s, [0, 0], [2, 32], target_memory=pl.Mem.Mat),
                     target_memory=pl.Mem.RightScale,
                 )
-                acc = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
-                result = pl.matmul_mx_acc(acc, lhs, lhs_scale, rhs, rhs_scale)
-                pl.store(result, [0, 0], out)
+                pl.system.get_buf(pl.PipeType.M, 13)
+                acc = pl.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Partial)
+                result = pl.matmul_mx_acc(acc, lhs, lhs_scale, rhs, rhs_scale, acc_phase=pl.AccPhase.Final)
+                pl.system.rls_buf(pl.PipeType.M, 13)
+                pl.store(result, [0, 0], out, st_phase=pl.STPhase.Final)
 
         mlir = _emit_incore_mlir(Program)
         # Reuse unchanged bindings: a second bind would hoist across the first
@@ -880,6 +883,10 @@ class TestMxMatmulCodegen:
         ins_acc = acc_line.split("ins(", 1)[1].split(",", 1)[0].strip()
         outs_acc = acc_line.split("outs(", 1)[1].split(":", 1)[0].strip()
         assert ins_acc == outs_acc
+        assert 'pto.get_buf "TMATMUL", 13, 0' in mlir
+        assert 'pto.rls_buf "TMATMUL", 13, 0' in mlir
+        assert "acc_phase partial" in mlir
+        assert "acc_phase final" in acc_line
 
         if compile_with_ptoas:
             # PTOAS #1691: v0.70 rejects the second binding after the first MX
@@ -887,9 +894,12 @@ class TestMxMatmulCodegen:
             # cannot pass solely on textual IR checks or an unreleased repair.
             if find_ptoas_binary() is None:
                 pytest.skip("PTOAS is not available")
-            cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
+            cpp = pto_backend._compile_pto_module(
+                pto_backend._apply_manual_sync(list(Program.functions.values()), mlir), "main", str(tmp_path)
+            )
             # Base and accumulating forms use two overloads of TMATMUL_MX.
-            assert cpp.count("TMATMUL_MX(") == 2
+            assert "TMATMUL_MX<pto::AccPhase::Partial>" in cpp
+            assert "TMATMUL_MX<pto::AccPhase::Final>" in cpp
 
     @pytest.mark.ptoas_compile
     def test_mx_view_preserves_aligned_logical_offsets(self, tmp_path):

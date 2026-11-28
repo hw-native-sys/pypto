@@ -570,3 +570,14 @@ squeeze-store 的对齐状态使用物理 micro 指令，含流的整个 registe
 其他操作和非完整寄存器形状会明确报错。验证器会拒绝含流的 scope 内的 `reg.add`。
 不含流的 scope 继续使用 VMI lowering，
 纯 `squeeze` 也走此路径。后续 PTOAS 提供流式 VMI 后，可以保持用户接口不变。
+
+在 A5 上，`pl.reg.load(tile, offset=i, lanes=256, dist="US_B8")` 从偏移 `i`
+读取 128 个已初始化的 INT8 或 UINT8 元素。源字节 `j` 同时填入结果的第 `2*j`
+和 `2*j+1` 个位置。默认加载仍为每个位置读取一个元素。
+`pl.reg.mask_bitcast(mask, lanes=256)` 按字节粒度重新解释同一组谓词位；
+例如，按该方式解释 `pl.reg.full_mask(lanes=128)` 会使偶数位置有效。
+支持 64、128 和 256 三种谓词宽度。
+
+使用这两个操作之一会让该寄存器作用域使用物理 VPTO 指令。请使用完整宽度的
+寄存器，并为移位和按位与操作显式传入掩码。PyPTO 在生成的辅助函数中保留物理
+操作顺序；向量内存屏障仍由 `auto_sync` 独立控制。

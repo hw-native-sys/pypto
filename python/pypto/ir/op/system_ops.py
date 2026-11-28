@@ -270,6 +270,26 @@ def _pipeline_flag(
     return _ir_core.create_op_call(name, args, kwargs, _get_span_or_capture(span, frame_offset=2))
 
 
+def _cube_buf(name: str, pipe: object, buf_id: int | Expr, span: Span | None) -> Call:
+    if not isinstance(pipe, PipeType) or pipe not in (PipeType.MTE2, PipeType.MTE1, PipeType.M):
+        raise ValueError("Cube buffer locks require MTE2, MTE1 or M")
+    if type(buf_id) is int:
+        buf_id = ConstInt(buf_id, DataType.INDEX, _get_span_or_capture(span))
+    if not isinstance(buf_id, Expr):
+        raise TypeError("Cube buffer ID must be int or INDEX Expr")
+    return _ir_core.create_op_call(name, [buf_id], {"pipe": int(pipe)}, _get_span_or_capture(span))
+
+
+def get_buf(pipe: PipeType, buf_id: int | Expr, *, span: Span | None = None) -> Call:
+    """Acquire an A5 Cube buffer on pipe, in hardware mode zero."""
+    return _cube_buf("system.get_buf", pipe, buf_id, span)
+
+
+def rls_buf(pipe: PipeType, buf_id: int | Expr, *, span: Span | None = None) -> Call:
+    """Release the matching A5 Cube buffer."""
+    return _cube_buf("system.rls_buf", pipe, buf_id, span)
+
+
 def set_flag(
     src_pipe: PipeType,
     dst_pipe: PipeType,

@@ -651,3 +651,15 @@ Explicit masks retain zero-inactive-result semantics; omitted masks do not need
 result-clearing selects. Two adjacent BF16 loads followed by unmasked `dintlv`
 can therefore lower to A5 `DINTLV_B16`, with `convert` selecting the required
 EVEN/ODD parts automatically. Physical conversion parts remain a backend choice.
+
+On A5, `pl.reg.load(tile, offset=i, lanes=256, dist="US_B8")` reads 128
+initialized INT8 or UINT8 elements at offset `i`. Source byte `j` fills result
+lanes `2*j` and `2*j+1`. The default load still reads one element per lane.
+`pl.reg.mask_bitcast(mask, lanes=256)` views the same physical predicate as a
+byte mask: for example, viewing `pl.reg.full_mask(lanes=128)` this way enables
+the even byte lanes. Supported predicate widths are 64, 128 and 256 lanes.
+
+These operations select physical VPTO lowering for the register scope. Use
+full-width registers and explicit masks for shifts and bitwise AND in that
+scope. PyPTO preserves the physical operation order in its generated helper;
+`auto_sync` still controls vector memory barriers separately.

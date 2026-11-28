@@ -113,7 +113,7 @@ from pypto.ir.utils import (
 )
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import AtomicType, CompactMode, PadValue, TensorLayout
+from pypto.pypto_core.ir import AccPhase, AtomicType, CompactMode, PadValue, TensorLayout
 
 from ..typing import BoolLike, IntLike, Scalar, Tensor, Tile
 from . import tensor_ops as _tensor
@@ -1180,10 +1180,19 @@ def quant_mx(
 @overload
 def matmul_mx(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor) -> Tensor: ...
 @overload
-def matmul_mx(lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile) -> Tile: ...
+def matmul_mx(
+    lhs: Tile, lhs_scale: Tile, rhs: Tile, rhs_scale: Tile, *, acc_phase: AccPhase = ...
+) -> Tile: ...
 
 
-def matmul_mx(lhs: object, lhs_scale: object, rhs: object, rhs_scale: object) -> Tensor | Tile:
+def matmul_mx(
+    lhs: object,
+    lhs_scale: object,
+    rhs: object,
+    rhs_scale: object,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
+) -> Tensor | Tile:
     """MXFP8/MXFP4 matrix multiplication, dispatched for tensors and tiles."""
     if (
         isinstance(lhs, Tensor)
@@ -1191,6 +1200,8 @@ def matmul_mx(lhs: object, lhs_scale: object, rhs: object, rhs_scale: object) ->
         and isinstance(rhs, Tensor)
         and isinstance(rhs_scale, Tensor)
     ):
+        if acc_phase != AccPhase.Unspecified:
+            raise ValueError("acc_phase is only supported for tile.matmul_mx")
         return _tensor.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
     if (
         isinstance(lhs, Tile)
@@ -1198,7 +1209,7 @@ def matmul_mx(lhs: object, lhs_scale: object, rhs: object, rhs_scale: object) ->
         and isinstance(rhs, Tile)
         and isinstance(rhs_scale, Tile)
     ):
-        return _tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale)
+        return _tile.matmul_mx(lhs, lhs_scale, rhs, rhs_scale, acc_phase=acc_phase)
     _raise_type_dispatch_error("matmul_mx", lhs, lhs_scale, rhs, rhs_scale)
 
 

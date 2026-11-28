@@ -16,6 +16,7 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -109,6 +110,36 @@ REGISTER_OP("system.sync_dst")
     .set_attr<int>("wait_pipe")
     .set_attr<int>("event_id")
     .f_deduce_type(DeduceUnknownType);
+
+// The three A5 Cube endpoints used for L1 and L0 buffer ownership.
+static TypePtr DeduceCubeBufferLock(const std::vector<ExprPtr>& args,
+                                    const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  const int pipe = GetKwargOr<int>(kwargs, "pipe", -1);
+  CHECK(pipe == PipeType::MTE2 || pipe == PipeType::MTE1 || pipe == PipeType::M)
+      << "Cube buffer locks require MTE2, MTE1 or M";
+  CHECK(args.size() == 1) << "Cube buffer lock requires one INDEX buffer ID";
+  auto id = As<ScalarType>(args[0]->GetType());
+  CHECK(id && id->dtype_ == DataType::INDEX) << "Cube buffer ID must be INDEX";
+  if (auto c = As<ConstInt>(args[0]))
+    CHECK(c->value_ >= 0 && c->value_ < 16) << "Buffer ID must be in [0, 15]";
+  return GetUnknownType();
+}
+
+REGISTER_OP("system.get_buf")
+    .set_description("Explicit A5 Cube buffer ownership: get_buf, mode zero")
+    .set_op_category("SyncOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("buf_id", "Static or dynamic INDEX ID in [0, 15]")
+    .set_attr<int>("pipe")
+    .f_deduce_type(DeduceCubeBufferLock);
+
+REGISTER_OP("system.rls_buf")
+    .set_description("Explicit A5 Cube buffer ownership: rls_buf, mode zero")
+    .set_op_category("SyncOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .add_argument("buf_id", "Static or dynamic INDEX ID in [0, 15]")
+    .set_attr<int>("pipe")
+    .f_deduce_type(DeduceCubeBufferLock);
 
 REGISTER_OP("system.set_flag")
     .set_description("Signal an intra-core hardware pipeline event")

@@ -303,3 +303,18 @@ phase `N` 的全部 `N_BRANCHES` 个 task，而非只等最后那个。
 空路径的 `task_dummy` 合并；dummy 保留原有显式依赖。因此计算 launch 被跳过时，
 使用 `deps=[tid]` 的 consumer 仍保持顺序。参见
 [LegalizeSpmdLaunches](../passes/45-legalize_spmd_launches.md)。
+
+### A5 Cube 缓冲区同步
+
+若内核自行定义全部同步，请给同一编译组的每个成员设置
+`pl.func_attr({"ptoas_manual_sync": True})`。这会关闭整个组的 PTOAS 自动事件
+和缓冲区 ID 插入，所有流水线依赖都由内核作者负责。不能与
+`ptoas_buffer_id_sync` 同时启用，也不能在 `pl.pipeline` 内使用这些锁。
+
+`pl.system.get_buf(pipe, buf_id)` 和 `pl.system.rls_buf(pipe, buf_id)` 使用
+模式零在 MTE2、MTE1 或 M 上获取和释放缓冲区。ID 可以是 [0, 15] 内的整数，
+也可以是值始终在此范围内的 INDEX 表达式。Tile 级 `pl.matmul_mx` 和
+`pl.matmul_mx_acc` 可以传入 `acc_phase=pl.AccPhase.Partial` 或
+`pl.AccPhase.Final` 标明硬件累加阶段；省略时仍生成默认的 MX 指令。
+
+MTE2、MTE1、M 分别对应 PTO 的 `TLOAD`、`TMOV_M2L`、`TMATMUL`，硬件模式固定为零。

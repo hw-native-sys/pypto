@@ -470,6 +470,14 @@ REGISTER_OP("reg.mem_bar")
       return GetUnknownType();
     });
 
+// A distributed byte load returns a full vector, but reads only half that many elements.
+static int64_t LoadExtent(const Kwargs& kwargs, int64_t lanes) {
+  if (GetStringKwarg(kwargs, "dist", "NORM") == "NORM") return lanes;
+  CHECK(GetStringKwarg(kwargs, "dist", "") == "US_B8" && lanes == 256)
+      << "Distributed reg.load requires dist=US_B8 and 256 result lanes";
+  return lanes / 2;
+}
+
 REGISTER_OP("reg.load")
     .set_op_category("RegOp")
     .set_description("Read a continuous initialized Vec UB interval")
@@ -477,12 +485,17 @@ REGISTER_OP("reg.load")
     .add_argument("tile", "Source Vec Tile")
     .add_argument("offset", "Element offset")
     .set_attr<int>("lanes")
+    .set_attr<std::string>("dist")
     .set_input_memory(0, MemorySpace::Vec)
     .set_arg_effect(0, ArgEffect::Read)
     .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
       CHECK(a.size() == 2) << "reg.load expects tile, offset";
       auto lanes = Lanes(k);
-      auto t = Memory(a, lanes, true);
+      auto t = Memory(a, LoadExtent(k, lanes), true);
+      if (GetStringKwarg(k, "dist", "NORM") == "US_B8") {
+        CHECK(t->dtype_ == DataType::INT8 || t->dtype_ == DataType::UINT8)
+            << "US_B8 requires an INT8 or UINT8 source";
+      }
       return std::make_shared<RegType>(lanes, t->dtype_, RegKind::VecReg);
     });
 REGISTER_OP("reg.store")
@@ -540,6 +553,22 @@ REGISTER_OP("reg.convert")
     .set_attr<bool>("saturate")
     .no_arg_writes()
     .f_deduce_type(Convert);
+
+REGISTER_OP("reg.mask_bitcast")
+    .set_op_category("RegOp")
+    .set_description("Reinterpret one physical predicate register without changing its bits")
+    .set_reg_op("pto.pbitcast")
+    .add_argument("mask", "Physical MaskReg")
+    .set_attr<int>("lanes")
+    .no_arg_writes()
+    .f_deduce_type([](const Args& a, const Kwargs& k) -> TypePtr {
+      CHECK(a.size() == 1) << "reg.mask_bitcast expects one MaskReg";
+      const auto input = Register(a[0], RegKind::MaskReg)->GetShape();
+      const auto output = Lanes(k);
+      auto physical = [](int64_t n) { return n == 64 || n == 128 || n == 256; };
+      CHECK(physical(input) && physical(output)) << "mask_bitcast requires 64, 128 or 256 lanes";
+      return std::make_shared<RegType>(output, DataType::BOOL, RegKind::MaskReg);
+    });
 
 REGISTER_OP("reg.interpret_cast")
     .set_op_category("RegOp")
@@ -1056,6 +1085,7 @@ RegMemoryEffect GetRegMemoryEffect(const CallPtr& call) {
       << "Register memory effect validation produced a non-register result";
   int64_t extent =
       IsOp(call, "reg.store") ? StoreExtent(call->args_, call->kwargs_) : validated_reg->GetShape();
+  if (IsOp(call, "reg.load")) extent = LoadExtent(call->kwargs_, extent);
   // Endpoints are half-open ELEMENT coordinates relative to MemRef.base,
   // including both byte_offset / element_bytes and the TileView origin.
   // An absent root or endpoint means unknown, never an empty/zero access.

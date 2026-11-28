@@ -45,6 +45,7 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   std::map<const Var*, VarPtr> references;
   bool has_control_flow = false;
   bool micro = false;
+  bool preserve_order = false;
   std::vector<ForStmtPtr> loops;
 
   void VisitStmt(const StmtPtr& stmt) override {
@@ -73,7 +74,9 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    micro |= IsOp(call, "reg.squeeze_store_init");
+    preserve_order |= IsOp(call, "reg.mask_bitcast") ||
+                      (IsOp(call, "reg.load") && ir::GetStringKwarg(call->kwargs_, "dist", "") == "US_B8");
+    micro |= preserve_order || IsOp(call, "reg.squeeze_store_init");
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
         IsOp(call, "reg.squeeze_store_flush")) {
@@ -394,7 +397,8 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     values += arguments[i];
   }
   // Runtime reads this header to select PTOAS flags during artifact replay.
-  artifact.source = std::string("// pypto.reg_auto_sync: ") + (scope->AutoSync() ? "true\n" : "false\n") +
+  artifact.source = std::string(operands.preserve_order ? "// pypto.reg_physical_order: preserve\n" : "") +
+                    "// pypto.reg_auto_sync: " + (scope->AutoSync() ? "true\n" : "false\n") +
                     "module attributes {pto.target_arch = \"a5\", pto.backend = \"vpto\"} {\n"
                     "  func.func @" +
                     artifact.symbol + "(" + signature + ") attributes {pto.aiv} {\n" +

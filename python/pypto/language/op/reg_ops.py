@@ -59,9 +59,12 @@ def mem_bar(kind: str) -> ir.Call:
     return _call("mem_bar", [], kind=kind)
 
 
-def load(tile: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0, *, lanes: int) -> Reg:
-    """Read lanes consecutive initialized elements from a Vec Tile."""
-    return Reg(_call("load", [_expr(tile), _expr(offset)], lanes=_lanes(lanes)))
+def load(
+    tile: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0, *, lanes: int, dist: str | None = None
+) -> Reg:
+    """Load consecutive elements, or duplicate each of 128 bytes into two adjacent lanes with US_B8."""
+    kwargs = {} if dist is None else {"dist": dist}
+    return Reg(_call("load", [_expr(tile), _expr(offset)], lanes=_lanes(lanes), **kwargs))
 
 
 def store(
@@ -122,6 +125,11 @@ def interpret_cast(value: Reg | ir.Expr, *, dtype: DataType) -> Reg:
     be an integer. Both dtypes must be supported vector register dtypes.
     """
     return Reg(_call("interpret_cast", [_expr(value)], dtype=dtype))
+
+
+def mask_bitcast(mask: Reg | ir.Expr, *, lanes: int) -> Reg:
+    """View the same physical predicate bits at a different lane granularity (64, 128 or 256 lanes)."""
+    return Reg(_call("mask_bitcast", [_expr(mask)], lanes=_lanes(lanes)))
 
 
 def create_group_mask(

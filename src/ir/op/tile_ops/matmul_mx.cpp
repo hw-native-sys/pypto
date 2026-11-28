@@ -28,6 +28,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/phase.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
@@ -87,6 +88,8 @@ static ExprPtr MxScaleKCeil(const ExprPtr& k_dim) {
 TypePtr DeduceTileMatMulMxType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
+  const int phase = GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified));
+  CHECK(IsValidAccPhase(phase)) << op_name << " requires a valid acc_phase";
   CHECK(args.size() == 4) << "The operator " << op_name
                           << " requires exactly 4 arguments (lhs, lhs_scale, rhs, rhs_scale), but got "
                           << args.size();
@@ -284,6 +287,9 @@ TypePtr DeduceTileMatMulMxAccType(const std::vector<ExprPtr>& args,
 TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
                                    const std::vector<std::pair<std::string, std::any>>& kwargs,
                                    const std::string& op_name) {
+  CHECK(GetKwargOr<int>(kwargs, "acc_phase", static_cast<int>(AccPhase::kUnspecified)) ==
+        static_cast<int>(AccPhase::kUnspecified))
+      << "tile.matmul_mx_bias does not support acc_phase";
   CHECK(args.size() == 5) << "The operator " << op_name
                           << " requires exactly 5 arguments (lhs, lhs_scale, rhs, rhs_scale, bias), but got "
                           << args.size();
@@ -322,6 +328,7 @@ TypePtr DeduceTileMatMulMxBiasType(const std::vector<ExprPtr>& args,
 }
 
 REGISTER_OP("tile.matmul_mx")
+    .set_attr<int>("acc_phase")
     .set_op_category("TileOp")
     .set_description("MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)")
     .add_argument(
@@ -344,6 +351,7 @@ REGISTER_OP("tile.matmul_mx")
     });
 
 REGISTER_OP("tile.matmul_mx_acc")
+    .set_attr<int>("acc_phase")
     .set_op_category("TileOp")
     .set_description("MX block-scale matmul with accumulation: acc += matmul_mx(...)")
     .add_argument("acc", "Accumulator tile (TileType, 2D, FP32)")

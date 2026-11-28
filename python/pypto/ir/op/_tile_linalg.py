@@ -223,10 +223,13 @@ def matmul_mx(
     rhs: Expr,
     rhs_scale: Expr,
     span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
 ) -> Call:
     """MX block-scale matrix multiplication: C = matmul_mx(A, A_scale, B, B_scale)."""
+    kwargs = {} if acc_phase == AccPhase.Unspecified else {"acc_phase": int(acc_phase)}
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], {}, actual_span)
+    return _ir_core.create_op_call("tile.matmul_mx", [lhs, lhs_scale, rhs, rhs_scale], kwargs, actual_span)
 
 
 def matmul_mx_acc(
@@ -236,11 +239,14 @@ def matmul_mx_acc(
     rhs: Expr,
     rhs_scale: Expr,
     span: Span | None = None,
+    *,
+    acc_phase: AccPhase = AccPhase.Unspecified,
 ) -> Call:
     """MX block-scale matmul with accumulation: acc += matmul_mx(...)."""
+    kwargs = {} if acc_phase == AccPhase.Unspecified else {"acc_phase": int(acc_phase)}
     actual_span = _get_span_or_capture(span)
     return _ir_core.create_op_call(
-        "tile.matmul_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], {}, actual_span
+        "tile.matmul_mx_acc", [acc, lhs, lhs_scale, rhs, rhs_scale], kwargs, actual_span
     )
 
 
