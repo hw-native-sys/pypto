@@ -434,6 +434,86 @@ class Program:
         assert "pto.tmatmul.mx.acc" in _emit_incore_mlir(program, planner=planner)
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("control", ["if", "for", "while", "for-iter", "while-iter"])
+@pytest.mark.parametrize("same_side", [False, True])
+def test_mx_scale_extract_tracks_control_flow_scale_lifetimes(planner, control, same_side):
+    # An if result or loop-carried scale is not an allocation definition. Its
+    # incoming moves still occupy the paired data's scale address. Opposite
+    # sides never interfere; simultaneous scales on the same side must fail.
+    initial = (
+        "sa0 = pl.tile.extract(sam, 0, 0, [64, 4], target_memory=pl.Mem.LeftScale)"
+        if same_side
+        else "sa0 = pl.tile.extract(sbm, 0, 0, [4, 256], target_memory=pl.Mem.RightScale)"
+    )
+    if control == "if":
+        flow = """if flag > 0:
+            selected = pl.move(sam, pl.Mem.LeftScale)
+        else:
+            selected = pl.move(sam1, pl.Mem.LeftScale)"""
+    elif control in {"for", "for-iter"}:
+        flow = """seed = pl.move(sam, pl.Mem.LeftScale)
+        for i, (carried,) in pl.range(flag, init_values=(seed,)):
+            updated = pl.move(sam1, pl.Mem.LeftScale)
+            selected = pl.yield_(updated)"""
+    else:
+        flow = """seed = pl.move(sam, pl.Mem.LeftScale)
+        for i, carried in pl.while_(init_values=(0, seed)):
+            pl.cond(i < flag)
+            updated = pl.move(sam1, pl.Mem.LeftScale)
+            _, selected = pl.yield_(i + 1, updated)"""
+    if same_side:
+        mma = """sb0 = pl.move(sbm, pl.Mem.RightScale)
+        acc = pl.matmul_mx(a0, sa0, b0, sb0)
+        acc = pl.matmul_mx_acc(acc, a0, selected, b0, sb0)"""
+    else:
+        mma = "acc = pl.matmul_mx(a0, selected, b0, sa0)"
+    if control.endswith("-iter"):
+        # Consume the carry inside the loop as well as testing loop results.
+        loop_lines = flow.splitlines()
+        insert_at = 2 if control == "for-iter" else 3
+        loop_lines[insert_at:insert_at] = [
+            "            selected = carried",
+            "            " + mma.replace("\n        ", "\n            "),
+            "            pl.store(acc, [0, 0], out)",
+        ]
+        flow = "\n".join(loop_lines)
+        mma = "return out"
+    else:
+        mma += "\n        return pl.store(acc, [0, 0], out)"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def main(
+        self,
+        a: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+        b: pl.Tensor[[128, 256], pl.FP8E4M3FN],
+        sa: pl.Tensor[[64, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+        sb: pl.Tensor[[4, 256], pl.FP8E8M0, pl.MX_B_NN],
+        flag: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[64, 256], pl.FP32]],
+    ) -> pl.Tensor[[64, 256], pl.FP32]:
+        am = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        bm = pl.load(b, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+        sam = pl.load(sa, [0, 0], [64, 4], target_memory=pl.Mem.Mat)
+        sam1 = pl.load(sa, [0, 4], [64, 4], target_memory=pl.Mem.Mat)
+        sbm = pl.load(sb, [0, 0], [4, 256], target_memory=pl.Mem.Mat)
+        a0 = pl.tile.extract(am, 0, 0, [64, 128], target_memory=pl.Mem.Left)
+        b0 = pl.tile.extract(bm, 0, 0, [128, 256], target_memory=pl.Mem.Right)
+        {initial}
+        {flow}
+        {mma}
+""")
+    if same_side:
+        with pytest.raises(
+            ValueError, match="Overlapping MX scale extractions cannot share a data allocation"
+        ):
+            _emit_incore_mlir(program, planner=planner)
+    else:
+        assert "pto.tmatmul.mx" in _emit_incore_mlir(program, planner=planner)
+
+
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_mx_scale_extract_accepts_dominating_reshape(tmp_path, planner):

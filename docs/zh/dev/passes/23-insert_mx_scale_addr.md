@@ -74,6 +74,7 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 使 scale 的生命周期不会超过其 L0 data 分配的生命周期。
 提前绑定的抽取 scale 与共享同一 L0 data 分配的其他 scale 生命周期不得重叠，
 包括 `bind_scale_addr` + `extract_into` 和 Mat 到 scale 的 `tmov` 生产者。
+对于控制流选择或循环携带的 scale，检查涵盖全部输入生产者的生命周期。
 应先消费第一个 scale，再写入下一个 scale。如果 data view 的 descriptor 定义支配
 抽取操作，也允许使用该 view。
 

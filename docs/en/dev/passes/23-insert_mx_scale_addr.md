@@ -80,9 +80,10 @@ and the scale result to be used only by its paired MX matmul consumers, so
 the scale's lifetime cannot exceed the lifetime of its L0 data allocation.
 An early-bound extracted scale must not overlap the live range of any distinct
 scale sharing its L0 data allocation, including `bind_scale_addr` + `extract_into`
-and Mat-to-scale `tmov` producers. Consume the first scale before writing the
-next one. A previously
-defined data view is also valid when its descriptor dominates the extraction.
+and Mat-to-scale `tmov` producers. For control-flow-selected or loop-carried
+scales, the check includes the live ranges of all incoming producers.
+Consume the first scale before writing the next one. A previously defined data
+view is also valid when its descriptor dominates the extraction.
 
 ## Related
 

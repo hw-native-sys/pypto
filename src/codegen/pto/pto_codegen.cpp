@@ -1415,6 +1415,9 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       std::map<const ir::Var*, size_t> binding_uses;
       std::vector<std::pair<ir::VarPtr, ir::VarPtr>> all_bindings;
       std::map<const ir::Var*, ir::VarPtr> scale_aliases;
+      // The allocation analyzer tracks the concrete producers, not phi or
+      // loop-carried SSA handles. Keep their incoming value graph separately.
+      std::map<const ir::Var*, std::vector<ir::VarPtr>> incoming_values;
       std::map<const ir::Var*, size_t> definitions;
       size_t next_definition = 1;
 
@@ -1437,18 +1440,43 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         VisitExpr(stmt->value_);
         definitions[stmt->var_.get()] = next_definition++;
       }
+      void RecordIncoming(const ir::VarPtr& target, const ir::ExprPtr& value) {
+        if (!As<ir::TileType>(target->GetType())) return;
+        // Preserve an unknown incoming edge rather than silently ignoring it.
+        incoming_values[target.get()].push_back(ir::AsVarLike(value));
+      }
+      void RecordYields(const std::vector<ir::VarPtr>& targets, const ir::StmtPtr& body) {
+        auto yield = ir::transform_utils::GetLastYieldStmt(body);
+        if (!yield) return;
+        for (size_t i = 0; i < std::min(targets.size(), yield->value_.size()); ++i) {
+          RecordIncoming(targets[i], yield->value_[i]);
+        }
+      }
+      void RecordLoopSources(const std::vector<ir::IterArgPtr>& args, const std::vector<ir::VarPtr>& returns,
+                             const ir::StmtPtr& body) {
+        auto yield = ir::transform_utils::GetLastYieldStmt(body);
+        for (size_t i = 0; i < args.size(); ++i) {
+          RecordIncoming(args[i], args[i]->initValue_);
+          if (yield && i < yield->value_.size()) RecordIncoming(args[i], yield->value_[i]);
+          if (i < returns.size()) RecordIncoming(returns[i], args[i]);
+        }
+      }
       void VisitStmt_(const ir::IfStmtPtr& stmt) override {
         ir::IRVisitor::VisitStmt_(stmt);
+        RecordYields(stmt->return_vars_, stmt->then_body_);
+        if (stmt->else_body_) RecordYields(stmt->return_vars_, *stmt->else_body_);
         for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
       }
       void VisitStmt_(const ir::ForStmtPtr& stmt) override {
         for (const auto& arg : stmt->iter_args_) definitions[arg.get()] = next_definition++;
         ir::IRVisitor::VisitStmt_(stmt);
+        RecordLoopSources(stmt->iter_args_, stmt->return_vars_, stmt->body_);
         for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
       }
       void VisitStmt_(const ir::WhileStmtPtr& stmt) override {
         for (const auto& arg : stmt->iter_args_) definitions[arg.get()] = next_definition++;
         ir::IRVisitor::VisitStmt_(stmt);
+        RecordLoopSources(stmt->iter_args_, stmt->return_vars_, stmt->body_);
         for (const auto& var : stmt->return_vars_) definitions[var.get()] = next_definition++;
       }
       void VisitExpr_(const ir::VarPtr& var) override { ++uses[var.get()]; }
@@ -1511,6 +1539,36 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         auto [it, inserted] = last_uses.emplace(producer, interval.second);
         if (!inserted) it->second = std::max(it->second, interval.second);
       }
+      // Follow untracked phi/loop handles to their possible concrete producers,
+      // including the init and backedge of loop carries. Union the intervals and
+      // binding-result uses; a cycle or an unknown terminal must never make the
+      // check optimistic. If no tracked origin is available, conservatively
+      // treat the value as live for the whole function.
+      auto scale_lifetime = [&](const ir::Var* producer) {
+        const auto unknown = std::make_pair(0, std::numeric_limits<int>::max());
+        int first = std::numeric_limits<int>::max();
+        int last = 0;
+        std::vector<const ir::Var*> pending{producer};
+        std::set<const ir::Var*> visited;
+        while (!pending.empty()) {
+          const auto* var = root(pending.back());
+          pending.pop_back();
+          if (!visited.insert(var).second) continue;
+          if (auto use = last_uses.find(var); use != last_uses.end()) last = std::max(last, use->second);
+          if (auto interval = liveness.find(var); interval != liveness.end()) {
+            first = std::min(first, interval->second.first);
+            last = std::max(last, interval->second.second);
+          } else {
+            auto incoming = collector.incoming_values.find(var);
+            if (incoming == collector.incoming_values.end() || incoming->second.empty()) return unknown;
+            for (const auto& source : incoming->second) {
+              if (!source) return unknown;
+              pending.push_back(source.get());
+            }
+          }
+        }
+        return first == std::numeric_limits<int>::max() ? unknown : std::make_pair(first, last);
+      };
       struct ScaleLifetime {
         const ir::Var* scale;
         ir::VarPtr data;
@@ -1523,8 +1581,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       for (const auto& [scale, data] : collector.all_bindings) {
         const auto* producer = root(scale.get());
         if (!seen.emplace(producer, data.get()).second) continue;
-        scales.push_back({producer, data, liveness.at(producer).first, last_uses.at(producer),
-                          collector.bindings.count(producer) != 0});
+        const auto [first, last] = scale_lifetime(producer);
+        scales.push_back({producer, data, first, last, collector.bindings.count(producer) != 0});
       }
       // Sweep in definition order, comparing only simultaneously live scales.
       std::sort(scales.begin(), scales.end(),

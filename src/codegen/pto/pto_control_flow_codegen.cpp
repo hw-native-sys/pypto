@@ -359,6 +359,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // to the shared one, which no branch ever wrote.
         std::string ret_name =
             TryGetSharedTileBufHandle(tile_type, alloc_fields.type_str, then_value, else_value);
+        const bool reuses_view = !ret_name.empty() && fs_.tile_view_scope.count(ret_name) != 0;
         if (!ret_name.empty()) {
           // The shared handle must dominate both branches and the post-if read.
           // Hoist its declaration to the function head unless the body already
@@ -378,8 +379,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // producers and the synthetic tmov below share this exact target.
         ret_name = PrepareTileDestination(return_var, ret_name, "if result").name;
         BindVarToMlir(return_var, ret_name);
-        if (has_dynamic_valid_shape) {
-          // The PTOAS planner can reuse an existing descriptor for this phi.
+        // Both arms yield the same dominating view with its validity already
+        // established at creation. Resetting a subview's valid shape is illegal
+        // in PTOAS and would also mutate a descriptor shared by other users.
+        if (has_dynamic_valid_shape && !reuses_view) {
+          // The PTOAS planner can reuse an existing allocation for this phi.
           // Its validity reset must participate in NZ insertion alignment too.
           const auto valid_shape = ir::tile_view_semantics::GetEffectiveTileView(*tile_type).valid_shape;
           RecordTileValidColumnUpdate(ret_name, valid_shape.back());

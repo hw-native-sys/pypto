@@ -457,7 +457,8 @@ def test_ptoas_conditional_inplace_vec_updates_reuse_mixed_view_handle():
     assert not any("pto.tmov" in line and line.count("loc=vec") == 2 for line in lines), mlir
 
 
-def test_ptoas_conditional_dynamic_view_is_not_redeclared_as_allocation():
+@pytest.mark.parametrize("view_kind", ["reinterpret", "slice"])
+def test_ptoas_conditional_dynamic_view_is_not_redeclared_as_allocation(view_kind):
     """A dominating view is a descriptor, not a head-hoistable alloc_tile."""
 
     @pl.program
@@ -474,7 +475,24 @@ def test_ptoas_conditional_dynamic_view_is_not_redeclared_as_allocation():
             view = pl.tile.reinterpret_view(base, pl.INT32)
             return pl.store(view, [0, 0], out)
 
-    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, DynamicView, enable_buffer_ir=False)
+    @pl.program
+    class DynamicSubview:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self,
+            x: pl.Tensor[[16, 32], pl.FP32],
+            rows: pl.Scalar[pl.INDEX],
+            cols: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[16, 32], pl.INT32]],
+        ) -> pl.Tensor[[16, 32], pl.INT32]:
+            base = pl.load(x, [0, 0], [16, 32], target_memory=pl.Mem.Vec)
+            typed = pl.tile.reinterpret_view(base, pl.INT32)
+            view = pl.tile.slice(typed, [16, 32], [0, 0], valid_shape=[rows, cols])
+            return pl.store(view, [0, 0], out)
+
+    program = DynamicView if view_kind == "reinterpret" else DynamicSubview
+    view_op = ir.get_op("tile.reinterpret_view" if view_kind == "reinterpret" else "tile.slice").name
+    optimized, _ = _run_pipeline(passes.MemoryPlanner.PTOAS, program, enable_buffer_ir=False)
 
     # Add an identity phi at the codegen boundary: Simplify would otherwise
     # remove both identical yields before the mixed-type handle lookup runs.
@@ -491,7 +509,7 @@ def test_ptoas_conditional_dynamic_view_is_not_redeclared_as_allocation():
             if (
                 not isinstance(result, ir.AssignStmt)
                 or not isinstance(result.value, ir.Call)
-                or result.value.op.name != ir.get_op("tile.reinterpret_view").name
+                or result.value.op.name != view_op
             ):
                 return result
             view = result.var
@@ -510,8 +528,13 @@ def test_ptoas_conditional_dynamic_view_is_not_redeclared_as_allocation():
     optimized = insert.visit_program(optimized)
     assert len(insert.replacements) == 1
     mlir = _codegen(optimized, emit_tile_addr=False)
-    view = re.search(r"(%\S+) = pto\.treshape .*v_row=\?, v_col=\?", mlir)
+    op = "treshape" if view_kind == "reinterpret" else "subview"
+    view = re.search(rf"(%\S+) = pto\.{op} .*v_row=\?, v_col=\?", mlir)
     assert view, mlir
+    # Reshape validity is initialized once at creation; a subview has its
+    # own explicit valid extent and must never receive set_validshape.
+    resets = re.findall(rf"pto\.set_validshape {re.escape(view[1])},", mlir)
+    assert len(resets) == (1 if view_kind == "reinterpret" else 0), mlir
     assert len(re.findall(rf"^\s*{re.escape(view[1])} =", mlir, re.MULTILINE)) == 1, mlir
     # No copy or replacement descriptor is needed for two identical yields.
     assert "pto.tmov" not in mlir, mlir
