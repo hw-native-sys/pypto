@@ -36,7 +36,7 @@ from pypto._target import (
 )
 from pypto.backend import BackendType
 from pypto.pypto_core.ir import ParamDirection, Program, Role, level_to_linqu_level
-from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
+from pypto.runtime.device_tensor import DeviceTensor, RemoteDeviceTensor, StackedDeviceTensor
 
 from ._artifact_metadata import (
     _DISTRIBUTED_META_FILENAME,
@@ -69,7 +69,9 @@ _EXTERNAL_META_SCHEMA = 4
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
+    from pypto.runtime.distributed_deployment import DistributedDeployment
     from pypto.runtime.distributed_runner import DistributedWorker, ReadOnlyHostTensor
+    from pypto.runtime.domain_layout import DomainLayout
     from pypto.runtime.runner import RunConfig
 
 
@@ -234,6 +236,9 @@ class DistributedCompiledProgram:
         _output_indices: list[int] | None = None,
         _return_types: list[Any] | None = None,
         _execution_capabilities: ExecutionCapabilities = ExecutionCapabilities(),
+        _domain_layout_specs: Any = None,
+        _artifact_manifest: Any = None,
+        _comm_abi: Any = None,
     ) -> None:
         # ``program`` is the post-pass IR. The runtime needs post-pass IR for
         # orchestrator metadata (post-SSA names that match the generated
@@ -259,6 +264,9 @@ class DistributedCompiledProgram:
         self._param_infos = _param_infos
         self._output_indices = _output_indices
         self._return_types = _return_types
+        self._domain_layout_specs = _domain_layout_specs
+        self._artifact_manifest = _artifact_manifest
+        self._comm_abi = _comm_abi
 
         # Only the fresh-compile path (live IR) writes artifacts. The reload
         # path must not clobber a user's hand-edited debug/run.py or the
@@ -301,6 +309,16 @@ class DistributedCompiledProgram:
         except (ValueError, TypeError):
             _remove_meta(self._output_dir, _DISTRIBUTED_META_FILENAME)
             return
+        from pypto.runtime.domain_layout import (  # noqa: PLC0415 -- avoid importing the optional runtime during compilation
+            artifact_files,
+            read_comm_abi,
+            read_layout_specs,
+        )
+
+        source = self._output_dir / "orchestration" / "host_orch.py"
+        self._domain_layout_specs = read_layout_specs(source) if source.is_file() else None
+        self._comm_abi = read_comm_abi(source) if source.is_file() else None
+        self._artifact_manifest = artifact_files(self._output_dir)
         dc = self._distributed_config
         meta = {
             "schema": _META_SCHEMA,
@@ -309,6 +327,9 @@ class DistributedCompiledProgram:
             "num_return_types": len(return_types),
             "platform": self._platform,
             "backend_type": self._backend_type.name,
+            "domain_layout_specs": self._domain_layout_specs,
+            "artifact_files": self._artifact_manifest,
+            "comm_abi": self._comm_abi,
             "distributed_config": {
                 "device_ids": list(dc.device_ids),
                 "num_sub_workers": dc.num_sub_workers,
@@ -423,7 +444,45 @@ class DistributedCompiledProgram:
             _output_indices=output_indices,
             _return_types=return_types,
             _execution_capabilities=meta["execution_capabilities"],
+            _domain_layout_specs=meta["raw"].get("domain_layout_specs"),
+            _artifact_manifest=meta["raw"].get("artifact_files"),
+            _comm_abi=meta["raw"].get("comm_abi"),
         )
+
+    def domain_layouts(self, *, world_size: int | None = None, **scalars: int) -> tuple["DomainLayout", ...]:
+        """Resolve the generated physical domain plans without starting workers.
+
+        Supply concrete scalar dimensions for symbolic window sizes. Placement
+        is application-rank ordered and excludes controller-specific worker IDs.
+        """
+        from pypto.runtime.domain_layout import (  # noqa: PLC0415 -- optional runtime or import-cycle boundary
+            resolve_layouts,  # noqa: PLC0415 -- avoid importing the optional runtime during compilation
+        )
+
+        if self._domain_layout_specs is None:
+            raise ValueError("artifact has no domain layout metadata; recompile before querying layouts")
+        count = len(self._distributed_config.device_ids) if world_size is None else world_size
+        return resolve_layouts(self._domain_layout_specs, count, scalars)
+
+    def validate_artifacts(self, *, verify_runtime: bool = False) -> None:
+        """Require saved source/config dependencies to match their compile-time hashes."""
+        from pypto.runtime.domain_layout import (  # noqa: PLC0415 -- avoid importing the optional runtime during compilation
+            validate_artifact_files,
+            validate_comm_abi,
+        )
+
+        if self._artifact_manifest is not None:
+            validate_artifact_files(self._output_dir, self._artifact_manifest)
+        if verify_runtime and self._comm_abi is not None:
+            try:
+                from simpler.task_interface import (  # noqa: PLC0415 -- optional runtime or import-cycle boundary
+                    COMM_CONTEXT_ABI,  # noqa: PLC0415 -- avoid importing the optional runtime during compilation
+                )
+            except ImportError as error:
+                raise RuntimeError(
+                    "rebuild Simpler with the CommContext ABI query before preparing this artifact"
+                ) from error
+            validate_comm_abi(self._comm_abi, COMM_CONTEXT_ABI)
 
     @property
     def execution_capabilities(self) -> ExecutionCapabilities:
@@ -532,7 +591,7 @@ class DistributedCompiledProgram:
         has_return = len(return_types) > 0
         return_style = has_return and len(args) == n_inputs
 
-        if any(isinstance(arg, (DeviceTensor, StackedDeviceTensor)) for arg in args):
+        if any(isinstance(arg, (DeviceTensor, RemoteDeviceTensor, StackedDeviceTensor)) for arg in args):
             raise TypeError(
                 "One-shot DistributedCompiledProgram calls cannot accept DeviceTensor or "
                 "StackedDeviceTensor: their Buffer/provenance must belong to the same prepared "
@@ -580,6 +639,7 @@ class DistributedCompiledProgram:
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
         startup_timeout_s: float | None = None,
+        deployment: "DistributedDeployment | None" = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
@@ -608,6 +668,10 @@ class DistributedCompiledProgram:
                 ``RunConfig`` to both. ``None`` prewarms the program's baseline
                 sizing (env / compile-time fallback). The cache is single-slot, so
                 dispatches that alternate ring sizings rebuild on each switch.
+            deployment: Runtime-only local/remote placement. Remote ranks use
+                retained Device-source domains bound before ``worker.request()``;
+                controller HOST tensors are not remote device arguments. Host
+                endpoints are never saved in compiled artifact metadata.
             extra_compiled: Additional compatible programs to prepare on the
                 same L3 worker (multi-program serving — e.g. ``prefill`` prepares
                 the worker and passes ``[decode]`` here so both share the worker
@@ -672,6 +736,7 @@ class DistributedCompiledProgram:
             sub_worker_overrides=sub_worker_overrides,
             inherited_host_tensors=inherited_host_tensors,
             startup_timeout_s=startup_timeout_s,
+            deployment=deployment,
         )
 
     @staticmethod

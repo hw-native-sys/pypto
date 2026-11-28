@@ -61,13 +61,15 @@ to the layer it belongs to.
 from . import log_config as _log_config
 from .bench import BenchmarkStats, TraceInvocation, TraceSpan, benchmark
 from .comm_domain import CommDomain, DomainBufferSpec, DomainTensor
-from .device_tensor import DeviceTensor, StackedDeviceTensor
+from .device_tensor import DeviceTensor, RemoteDeviceTensor, StackedDeviceTensor
+from .distributed_deployment import DistributedDeployment, RemoteChipTarget
 from .distributed_runner import (
     DistributedRunHandle,
     DistributedWorker,
     ReadOnlyHostTensor,
     execute_distributed_compiled,
 )
+from .domain_layout import DomainBufferLayout, DomainLayout
 from .log_config import configure_log
 from .log_config import current_level as log_level
 from .pto_isa import ensure_pto_isa_root, pto_isa_include_dir
@@ -93,7 +95,10 @@ from .worker import ChipWorker, RegistrationHandle
 # Honour ``PYPTO_RUNTIME_LOG`` before any runtime entry point runs.
 _log_config._ensure_configured()
 
+
 __all__ = [
+    "DomainBufferLayout",
+    "DomainLayout",
     "benchmark",
     "execute_compiled",
     "execute_distributed_compiled",
@@ -111,6 +116,9 @@ __all__ = [
     "TraceSpan",
     "ChipWorker",
     "DeviceTensor",
+    "RemoteDeviceTensor",
+    "DistributedDeployment",
+    "RemoteChipTarget",
     "StackedDeviceTensor",
     "DistributedWorker",
     "CommDomain",

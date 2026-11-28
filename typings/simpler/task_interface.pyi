@@ -16,6 +16,9 @@ Mirrors the real module's re-exports: the nanobind wire types from
 from dataclasses import dataclass
 
 from _task_interface import (
+    COMM_CONTEXT_ABI as COMM_CONTEXT_ABI,
+)
+from _task_interface import (
     AddressSpace,
     ArgDirection,
     CallConfig,
@@ -34,11 +37,11 @@ from .buffer import Buffer, Tensor, TensorTransfer
 __all__ = [
     "MAX_TENSOR_DIMS",
     "AddressSpace",
-    "CommBufferSpec",
     "ArgDirection",
     "Buffer",
     "CallConfig",
     "ChipCallable",
+    "CommBufferSpec",
     "ChipStorageTaskArgs",
     "ChipTensor",
     "CoreCallable",

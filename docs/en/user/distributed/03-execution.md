@@ -104,11 +104,129 @@ synchronous and returns an already-completed handle.
 
 Resident arguments are supported only on a prepared worker. A `DeviceTensor`
 must be returned by that same `DistributedWorker`'s `alloc_tensor`, and a
-`StackedDeviceTensor` must be returned by its `alloc_stacked_tensor`. These
-allocation APIs retain the Simpler owner `Buffer` on every device tensor or
+`StackedDeviceTensor` may also be assembled from that worker's local allocations
+and remote domain views. These allocation APIs retain the Simpler owner `Buffer` on every device tensor or
 shard so the address-free wire ABI can derive a valid Tensor descriptor.
 Manually wrapping a raw pointer, or reusing a resident tensor with another
 worker, is rejected.
+
+## Remote Placement
+
+Pass a `DistributedDeployment` to `compiled.prepare(deployment=...)` to place
+logical ranks on local cards and daemon-hosted remote cards. Its ordered
+`local_device_ids` come first, followed by `RemoteChipTarget(endpoint, device_id)`
+entries. `rt.world_size` includes both. Endpoints are runtime configuration and
+are not written to compiled artifact metadata.
+
+The first remote path supports A3 Device-source Fabric domains (`a2a3`,
+`comm_profile="a3-fabric-v1"`), plus the corresponding simulator profile
+(`a2a3sim`, `comm_profile="sim"`). Each remote card has its own Simpler session;
+logical ranks are translated to the actual worker IDs returned by Simpler.
+
+### Device push/notify groups
+
+Inside a `@pl.jit.host` orchestrator, use an explicit `pl.parallel` loop for
+cards whose CHIP tasks exchange data and wait for each other's notifications:
+
+```python
+for rank in pl.parallel(pld.world_size()):
+    chip_step(window, device=rank)
+```
+
+Each iteration contributes one direct call to the same CHIP entry and names a
+distinct logical device. Scalar expressions and tensor views prepare per-card
+arguments. Allocate communication domains outside the loop. The compiler emits
+a group scope that collects every member's arguments and then calls Simpler's
+`submit_next_level_group` once. Argument construction and validation finish
+before the group is published. An empty iteration range submits no work.
+
+Within each CHIP task, `remote_store`, `notify`, and a registration-only
+`defer_wait` express device stages. Consumers depend on the waiter's deferred
+completion token. The existing communication-fence pass supplies publishing
+markers, while the A3 executor provides task-entry cache handling. The
+application defines receive slots, signal epochs, capacity and the peer set
+expected by every participant. Group admission gives all participating cards
+an execution opportunity; device notifications express payload readiness.
+
+Keep mutually waiting device stages inside one CHIP task per card. Each card
+retains its single in-flight L2 task limit; later groups using that card are
+scheduled after its current task completes. Independent receive slots and
+signals distinguish chunks within the task.
+
+The initial group form uses independent iterations and a single unconditional
+CHIP call site. Nested loops, branches, loop-carried values and per-member
+TaskId submissions receive a compiler diagnostic. Ordinary `pl.range` keeps
+its existing submission behavior. Remote artifacts use entry binding version 2;
+recompile artifacts for this group contract.
+
+| API | Contract |
+| --- | --- |
+| `rt.allocate_domain(name, window_size=..., buffers=..., members=None)` | Bootstrap a retained Device domain before the first request. Members are logical ranks; the default is all ranks. |
+| `rt.bind_domain(compiled, name, domain)` | Bind a generated scope name (for example `comm_d0`) to the allocation. The full ordered buffer layout and membership must match. |
+| `with rt.request(domain): ...` | Hold runtime exclusivity across copies, HOST decisions, multiple dispatches and readback. Accepted dispatch handles finish before scope exit. |
+| `rt.remote_tensor(domain, rank, buffer, shape, dtype, byte_offset=0)` | Borrow a view of a remote member's named Device buffer. Returns `RemoteDeviceTensor`, which has no `data_ptr`. |
+| `rt.copy_remote_to(view, host)` / `rt.copy_remote_from(view, host)` | Synchronous, bounded-chunk copies of a CPU-contiguous tensor inside the request scope. Shape and dtype must match. |
+| `rt.copy_domain_to(domain, rank, buffer, host, byte_offset=0)` / `rt.copy_domain_from(...)` | Upload or read a named local or remote member buffer inside the request scope. Rank is the logical deployment rank. |
+| `rt.release_remote_tensor(view)` | Retire the view without freeing its domain-owned storage. |
+
+The compiled object exposes `domain_layouts(world_size=..., **scalars)` before
+worker startup. Each plan describes ordered logical members, named buffers,
+logical and allocated bytes, byte offsets, memory source and workspace engines.
+`rt.prepare_domains(compiled, **scalars)` allocates and binds Device plans without
+workspace engines. Its payload window excludes the runtime-owned ordering slot.
+Concrete scalar bindings resolve dynamic sizes.
+
+`rt.share_domain(domain, [(artifact_a, scope_a), (artifact_b, scope_b)], **scalars)`
+explicitly shares an allocation across prepared artifacts. It validates all
+bindings before publication: ordered members, buffer names/sizes, and the full
+physical window must match. Explicit bindings apply to local and remote ranks.
+
+Use a separate Device domain for reusable parameters. `rt.domain_tensor(...)`
+borrows local or remote storage; `rt.stack_domain_tensor(domain, buffer, shape,
+dtype, shard_axis=..., worker_ids=...)` creates uninitialized output shards.
+`rt.alloc_stacked_tensor(host, domain=..., buffer=..., shard_axis=...)` uploads
+shards inside `request(domain)`. For `[round, rank, ...]`, use `shard_axis=1`;
+HOST indexing `x[round, rank]` selects that rank's bounded view. Positive-step
+views preserve strides; explicit copies require dense device views.
+`rt.copy_stacked_from(shards, host)` restores the declared HOST axis order.
+Hold all communication and parameter domains in the application request.
+
+With remote placement, synchronous `rt.run(compiled, *cpu_args)` stages ordinary
+contiguous CPU tensors through a separate Device domain. Upload happens once
+per underlying storage per participating rank and call. Downloads all succeed
+before modified bytes are published to the caller. Conflicting cross-rank
+read/write aliases require explicit communication buffers; span checks are
+conservative for strided views. Use resident shards for large reusable weights.
+Asynchronous `submit()` uses resident arguments. Scalar HOST parameters use
+Python scalar values.
+
+New distributed manifests retain generated-source hashes, layout plans and the
+compiler's CommContext ABI. `compiled.validate_artifacts()` checks source hashes;
+`prepare()` also compares the ABI with Simpler's native `COMM_CONTEXT_ABI` query.
+Rebuild matching Simpler and PyPTO extensions when that query is unavailable or
+the layouts differ. Cold reload restores these contracts.
+
+Supply `CommBufferSpec` values from `simpler.task_interface` with physical sizes
+aligned to 64 bytes. `window_size` covers the application buffers; PyPTO appends
+a reserved 64-byte `__pypto_order` buffer and adds it to the physical window.
+This member-local buffer provides stable DAG ordering without controller HOST
+memory. Every stage bound to one allocation must declare the same ordered
+layout, including padding. Generated communication contexts carry domain identity;
+the target L2 binds its own device pointer.
+
+Remote placement enables retained-domain execution and disables automatic
+window resets. Initialize application data and status explicitly inside
+`request()`. Conflicting requests fail through Simpler's exclusive domain scope;
+the scope is not another TCP connection. On uncertain communication teardown,
+the runtime retains resources rather than releasing a window still used by peers.
+
+Remote tensor storage comes from retained Device-domain buffers. Upload data
+through the domain copy APIs and pass a `RemoteDeviceTensor` view. The raw-pointer
+allocation and memory-query helpers cover local cards. Simpler's generic remote
+allocator supplies HOST staging; domain views carry the device-resident identity.
+Mixed
+`StackedDeviceTensor` values may contain locally allocated `DeviceTensor` shards
+and these remote views, with logical rank IDs matching the dispatch placement.
 
 ## DeviceTensor
 
@@ -355,6 +473,9 @@ stable until initialization completes. Runtime capability checks run during work
 setup rather than on each submit.
 
 ## Sharing an external table between programs
+
+Use external window arguments with an all-local deployment. For mixed local and remote
+placement, bind compiled domain layouts with `share_domain`.
 
 Prepare the ordinary inputs and outputs before constructing the worker. Both HOST entries declare a static `pld.DistributedTensor[[1, 65], pl.UINT8]` table argument. Rank sources follow the declared member order. Here each source supplies 65 bytes and each physical slot occupies 128 bytes.
 

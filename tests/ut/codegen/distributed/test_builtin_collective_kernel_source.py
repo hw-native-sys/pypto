@@ -629,8 +629,10 @@ def test_shared_dispatch_keeps_unrelated_domains_without_urma(tmp_path):
     domains = _buffer_domains(host_orch)
     for name in ("plain_buf", "input_buf", "data_buf"):
         handle = domains[name][0]
-        assert f'{handle}[0].buffers["{name}' in mixed, host_orch
-        assert f"{handle}_ord" in mixed, host_orch
+        assert f'comm_domain_member(orch, {handle}, 0).buffers["{name}' in mixed, host_orch
+        assert f"comm_order_tensor(comm_context_arg(orch, {handle}, 0))" in mixed, host_orch
+    touched = {domains[name][0] for name in ("plain_buf", "input_buf", "data_buf")}
+    assert mixed.count("comm_order_tensor(") == len(touched), host_orch
 
     assert host_orch.count('workspace_engines=("urma",)') == 1, host_orch
     domains = _buffer_domains(host_orch)
@@ -992,8 +994,9 @@ def test_host_collective_uses_each_remote_operands_context(tmp_path, kind):
     dispatch = dispatch[dispatch.rindex("= TaskArgs()") :]
     assert f".add_scalar({signal}.device_context(" in dispatch
     if kind != "barrier":
-        assert f".add_scalar({data}[" in dispatch and "].device_ctx)" in dispatch
-        assert f"{data}_ord" in dispatch and f"{signal}_ord" in dispatch
+        assert f".add_domain_context(*comm_context_arg(orch, {data}," in dispatch
+        for handle in (data, signal):
+            assert f"comm_order_tensor(comm_context_arg(orch, {handle}," in dispatch
     kernel = next((result.output_dir / "next_levels").glob(f"builtin.tensor.{kind}*/kernels/aiv/*.cpp"))
     kernel_source = kernel.read_text()
     if kind != "barrier":
@@ -1019,7 +1022,7 @@ def test_host_allgather_accepts_urma_local_input(tmp_path):
     dispatch = dispatch[dispatch.rindex("= TaskArgs()") :]
     for handle, _ in domains.values():
         if handle in {domains[name][0] for name in ("input_buf", "data_buf", "signal_buf")}:
-            assert f"{handle}_ord" in dispatch
+            assert f"comm_order_tensor(comm_context_arg(orch, {handle}," in dispatch
 
 
 @pytest.mark.parametrize("kind", ["barrier", "allreduce", "allgather", "all_to_all_v"])

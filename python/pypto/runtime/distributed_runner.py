@@ -25,9 +25,9 @@ import types
 import uuid
 import warnings
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
@@ -36,12 +36,17 @@ import numpy as np
 import torch
 
 from .comm_domain import CommDomain, DomainBufferSpec, DomainState, DomainTensor, allocate_external_domain
-from .device_tensor import DeviceTensor, StackedDeviceTensor
+from .device_tensor import DeviceTensor, RemoteDeviceTensor, StackedDeviceTensor, _validate_strides
 from .distributed_args import entry_window_requirements, pack_window_args
+from .distributed_deployment import DistributedDeployment
 from .runtime_base import Worker
+from .staging import _StagedInvocation, _StagedTensor
 from .window_sources import normalize_window_sources
 
 logger = logging.getLogger(__name__)
+
+# Matches codegen/distributed/comm_layout.h; each member needs its own identity.
+_DOMAIN_ORDER_BUFFER_BYTES = 64
 
 if TYPE_CHECKING:
     from simpler.task_interface import TaskArgs
@@ -473,11 +478,18 @@ def add_chip_tensor_arg(
     callables: dict[str, Any],
     name: str,
     index: int,
+    *,
+    rank: int | None = None,
 ) -> None:
     """Pack a chip argument using the callee's emitted host-control contract."""
     from .tensor_arg import make_tensor_arg  # noqa: PLC0415
 
     host_slots = callables.host_tensor_indices.get(name, ()) if isinstance(callables, _ChipCallables) else ()
+
+    if isinstance(tensor, _StagedTensor):
+        if index in host_slots:
+            raise ValueError("automatic remote staging does not support HOST control tensor operands")
+        tensor = tensor._pypto_chip_view(rank, tag)
     if index in host_slots:
         from simpler.buffer import TensorTransfer  # noqa: PLC0415
 
@@ -493,6 +505,40 @@ def add_chip_tensor_arg(
         args.add_tensor(make_tensor_arg(worker, tensor), tag, transfer=TensorTransfer.NONE)
     else:
         args.add_tensor(make_tensor_arg(worker, tensor), tag)
+
+
+def _chip_target(orch: Any, rank: int) -> int:
+    """Translate an application rank without assuming contiguous remote IDs."""
+    targets = getattr(getattr(orch, "_worker", None), "_pypto_rank_to_worker", None)
+    if not isinstance(targets, tuple):
+        return rank
+    if type(rank) is not int or not 0 <= rank < len(targets):
+        raise ValueError(f"chip rank {rank!r} is outside this deployment")
+    return targets[rank]
+
+
+def comm_context_arg(orch: Any, domain: Any, rank: int) -> tuple[Any, int]:
+    """Keep HOST CommCtx arguments logical until the target L2 binds its VA."""
+    target = _chip_target(orch, rank)
+    try:
+        domain_rank = tuple(domain.workers).index(target)
+    except ValueError as error:
+        raise ValueError(f"worker {target} is not a member of domain {domain.name!r}") from error
+    return domain, domain_rank
+
+
+def comm_domain_member(orch: Any, domain: Any, rank: int) -> Any:
+    """Resolve both local and remote buffers in the domain's own rank order."""
+    _, domain_rank = comm_context_arg(orch, domain, rank)
+    return domain.member(domain_rank)
+
+
+def comm_order_tensor(binding: tuple[Any, int]) -> Any:
+    """Use the member's Device buffer as a stable, address-free DAG identity."""
+    from simpler.task_interface import DataType  # noqa: PLC0415 -- optional native runtime
+
+    domain, domain_rank = binding
+    return domain.member(domain_rank).buffers["__pypto_order"].tensor(shapes=(1,), dtype=DataType.UINT8)
 
 
 def _assemble_chip_callables(
@@ -619,8 +665,8 @@ def _call_alloc_intermediates(alloc_fn: Any, tensors: dict[str, Any], world_size
     """Invoke the generated ``_alloc_intermediates``, passing ``world_size`` only if it
     accepts it.
 
-    Codegen emits ``_alloc_intermediates(tensors, world_size=1)`` so it can size the
-    per-rank comm ordering tokens, but the one-argument form must keep working: a
+    Codegen emits ``_alloc_intermediates(tensors, world_size=1)`` for scratch
+    allocation, but the one-argument form must keep working: a
     ``build_output/`` directory produced by an older pypto is replayable via
     :meth:`DistributedCompiledProgram.from_dir`, and callers may inject their own
     allocator. Probing the signature (rather than catching :class:`TypeError` around the
@@ -673,6 +719,7 @@ def _construct_worker(
     num_sub: int,
     enable_sdma: bool = False,
     startup_timeout_s: float | None = None,
+    deployment: DistributedDeployment | None = None,
 ) -> Any:
     """Construct a simpler ``Worker(level=3)`` from the distributed config."""
     if startup_timeout_s is not None and (not math.isfinite(startup_timeout_s) or startup_timeout_s <= 0):
@@ -687,7 +734,7 @@ def _construct_worker(
 
     worker_config: dict[str, Any] = {
         "level": 3,
-        "device_ids": dc.device_ids,
+        "device_ids": list(deployment.local_device_ids) if deployment is not None else dc.device_ids,
         "num_sub_workers": num_sub,
         "platform": platform,
         "runtime": runtime_name,
@@ -695,7 +742,31 @@ def _construct_worker(
     }
     if startup_timeout_s is not None:
         worker_config["startup_timeout_s"] = startup_timeout_s
-    return Worker(**worker_config)
+    if deployment is not None:
+        worker_config["comm_profile"] = deployment.comm_profile
+        worker_config["global_device_ranks"] = tuple(range(len(deployment.local_device_ids)))
+    worker = Worker(**worker_config)
+    targets = list(range(len(worker_config["device_ids"])))
+    if deployment is not None and deployment.remote_chips:
+        from simpler.worker import RemoteChipSpec  # noqa: PLC0415 -- optional native runtime
+
+        for rank, target in enumerate(deployment.remote_chips, start=len(targets)):
+            targets.append(
+                worker.add_remote_chip(
+                    RemoteChipSpec(
+                        endpoint=target.endpoint,
+                        platform=platform,
+                        runtime=runtime_name,
+                        device_id=target.device_id,
+                        comm_profile=deployment.comm_profile,
+                        global_device_ranks=(rank,),
+                    )
+                )
+            )
+    setattr(worker, "_pypto_rank_to_worker", tuple(targets))
+    local_count = len(worker_config["device_ids"])
+    setattr(worker, "_pypto_remote_targets", frozenset(targets[local_count:]))
+    return worker
 
 
 def _close_local_worker(w: Any) -> None:
@@ -1030,13 +1101,13 @@ def _resolve_chip_worker(orch: Any, worker: int | None) -> int:
     chip 0, which always exists.
     """
     if worker is not None:
-        return worker
+        return _chip_target(orch, worker)
     chip_count = max(1, int(getattr(orch, "_pypto_chip_count", 1)))
     seq = getattr(orch, "_pypto_commless_seq", None)
     if seq is None:
         seq = 0
     orch._pypto_commless_seq = seq + 1
-    return seq % chip_count
+    return _chip_target(orch, seq % chip_count)
 
 
 def _reset_dfx_dispatch_state(
@@ -1096,6 +1167,96 @@ def _record_dispatch_program(orch: Any, callable_id: Any, disp_dir: Path) -> Non
 
 
 # Called from generated host_orch.py code (pyright cannot see those references).
+def _validate_chip_args(orch: Any, task_args: Any, worker: int) -> None:
+    """Require device identities on the cross-host CHIP argument path."""
+    if worker in getattr(getattr(orch, "_worker", None), "_pypto_remote_targets", ()):
+        from simpler.buffer import AddressSpace  # noqa: PLC0415 -- optional native runtime
+
+        for index in range(task_args.tensor_count()):
+            if task_args.tensor(index).buffer.address_space == AddressSpace.HOST:
+                raise ValueError(
+                    "remote CHIP arguments require Device-domain buffers; "
+                    "stage CPU tensors with copy_remote_to() before submitting the Run"
+                )
+
+
+def _submit_chip_group(
+    orch: Any, callable_id: Any, args_list: Sequence[Any], config: Any, ranks: Sequence[int]
+) -> Any:
+    """Submit peer-dependent cards as one Simpler DAG node with exact targets."""
+    args = list(args_list)
+    logical_ranks = tuple(ranks)
+    if not args or len(args) != len(logical_ranks):
+        raise ValueError("CHIP group requires one TaskArgs per participating rank")
+    if any(type(rank) is not int or rank < 0 for rank in logical_ranks):
+        raise ValueError("CHIP group ranks must be non-negative integers")
+    targets = [_chip_target(orch, rank) for rank in logical_ranks]
+    if len(set(targets)) != len(targets):
+        raise ValueError("CHIP group requires distinct target workers")
+    # Validate the complete group before any member is published to Simpler.
+    for task_args, target in zip(args, targets, strict=True):
+        _validate_chip_args(orch, task_args, target)
+
+    base = config.output_prefix
+    idx_map = getattr(orch, "_dfx_dispatch_idx", None)
+    if base:
+        if idx_map is None:
+            idx_map = {}
+            orch._dfx_dispatch_idx = idx_map
+        for target in targets:
+            label = _dfx_rank_label(target)
+            _record_dispatch_program(orch, callable_id, Path(f"{base}/{label}/d{idx_map.get(label, 0)}"))
+    handle = orch.submit_next_level_group(callable_id, args, config, workers=targets)
+    if base:
+        assert idx_map is not None
+        for target in targets:
+            label = _dfx_rank_label(target)
+            idx_map[label] = idx_map.get(label, 0) + 1
+    return handle
+
+
+class _ChipGroup:
+    """Keep one explicit parallel loop unpublished until all arguments exist."""
+
+    def __init__(self, orch: Any) -> None:
+        self.orch = orch
+        self.callable_id: Any = None
+        self.config: Any = None
+        self.args: list[Any] = []
+        self.ranks: list[int] = []
+        self.targets: set[int] = set()
+
+    def add(self, callable_id: Any, task_args: Any, config: Any, rank: int | None) -> None:
+        if type(rank) is not int or rank < 0:
+            raise ValueError("parallel CHIP dispatch requires an explicit non-negative device rank")
+        target = _chip_target(self.orch, rank)
+        if target in self.targets:
+            raise ValueError("CHIP group requires distinct target workers")
+        if self.args and (callable_id is not self.callable_id or config is not self.config):
+            raise ValueError("parallel CHIP group requires one callable and one configuration")
+        self.callable_id = callable_id
+        self.config = config
+        self.args.append(task_args)
+        self.ranks.append(rank)
+        self.targets.add(target)
+
+
+@contextmanager
+def _chip_group(orch: Any) -> Iterator[None]:
+    """Publish a complete pl.parallel group only after successful body exit."""
+    if getattr(orch, "_pypto_chip_group", None) is not None:
+        raise ValueError("parallel CHIP groups must be unnested")
+    pending = _ChipGroup(orch)
+    orch._pypto_chip_group = pending
+    try:
+        yield
+        # The group is unpublished until all member arguments exist.
+        if pending.args:
+            _submit_chip_group(orch, pending.callable_id, pending.args, pending.config, pending.ranks)
+    finally:
+        del orch._pypto_chip_group
+
+
 def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     orch: Any, callable_id: Any, task_args: Any, config: Any, worker: int | None
 ) -> Any:
@@ -1129,7 +1290,12 @@ def _submit_chip(  # pyright: ignore[reportUnusedFunction]
     :func:`_resolve_chip_worker`. Resolution happens before the DFX namespacing
     so the artifacts land under the chip that actually ran the dispatch.
     """
+    pending = getattr(orch, "_pypto_chip_group", None)
+    if isinstance(pending, _ChipGroup):
+        pending.add(callable_id, task_args, config, worker)
+        return None
     worker = _resolve_chip_worker(orch, worker)
+    _validate_chip_args(orch, task_args, worker)
     base = config.output_prefix
     if not base:
         return orch.submit_next_level(callable_id, task_args, config, worker=worker)
@@ -2023,7 +2189,7 @@ class DistributedWorker(Worker):
 
     __test__ = False
 
-    def __init__(
+    def __init__(  # noqa: PLR0912, PLR0915 -- one setup transaction owns rollback
         self,
         compiled: DistributedCompiledProgram | Sequence[DistributedCompiledProgram],
         config: RunConfig | None = None,
@@ -2035,8 +2201,24 @@ class DistributedWorker(Worker):
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
         inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
         startup_timeout_s: float | None = None,
+        deployment: DistributedDeployment | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
+        if deployment is not None and not isinstance(deployment, DistributedDeployment):
+            raise TypeError("deployment must be a DistributedDeployment")
+        self._deployment = deployment
+        self._has_remote_chips = bool(deployment and deployment.remote_chips)
+        self._owned_domains: dict[str, Any] = {}
+        self._bound_domains: dict[tuple[Any, str], Any] = {}
+        self._remote_tensors: dict[int, RemoteDeviceTensor] = {}
+        self._request_local = threading.local()
+        if self._has_remote_chips:
+            if reset_persistent_windows:
+                raise ValueError(
+                    "remote domain initialization belongs inside request(), not persistent resets"
+                )
+            persistent = True
+            reset_persistent_windows = False
         # Simpler owns allocations as Buffer objects. PyPTO continues exposing
         # raw pointers from its public memory API and resolves them through this
         # table at every control-plane operation. The retained handle is also
@@ -2097,6 +2279,15 @@ class DistributedWorker(Worker):
 
         primary = programs[0]
         self.dc = primary._distributed_config
+        self._world_size = deployment.world_size if deployment is not None else len(self.dc.device_ids)
+        if self._has_remote_chips:
+            expected = "sim" if primary.platform == "a2a3sim" else "a3-fabric-v1"
+            if (
+                primary.platform not in ("a2a3", "a2a3sim")
+                or deployment is None
+                or deployment.comm_profile != expected
+            ):
+                raise ValueError("remote L2 deployment requires a2a3/a3-fabric-v1 or a2a3sim/sim")
         self._compiled = primary  # primary program: dispatched by ``rt(*args)``
         # In multi-program mode ``rt(*args)`` is ambiguous (which program?), so it
         # is disabled — callers must pick explicitly via ``rt.run(compiled, ...)``.
@@ -2132,6 +2323,7 @@ class DistributedWorker(Worker):
             consumed: set[str] = set()
             consumed_sources: set[str] = set()
             for program_index, prog in enumerate(programs):
+                prog.validate_artifacts(verify_runtime=True)
                 self._check_compatible(prog, primary)
                 chip_callables, prog_runtime, prog_enable_sdma = _assemble_chip_callables(prog)
                 runtime_name = self._unify_runtime(runtime_name, prog_runtime)
@@ -2142,6 +2334,11 @@ class DistributedWorker(Worker):
                 if missing_sources:
                     raise ValueError(f"Missing window_sources for Host window init keys: {missing_sources}")
                 consumed_sources |= source_keys
+                if self._has_remote_chips and getattr(entry_fn, "_pypto_domain_binding_version", None) != 2:
+                    raise ValueError(
+                        "recompile this artifact with domain/group binding version 2 "
+                        "before remote L2 execution"
+                    )
                 loaded_subs = _load_sub_worker_fns(prog.output_dir)
                 prog_callbacks = {name: fn for name, fn in callbacks.items() if name in loaded_subs}
                 consumed |= set(prog_callbacks)
@@ -2153,19 +2350,18 @@ class DistributedWorker(Worker):
                 for _frame in self._dispatch_frames:
                     base_tensors: dict[str, Any] = {}
                     if alloc_fn is not None:
-                        _call_alloc_intermediates(
-                            alloc_fn, base_tensors, len(prog._distributed_config.device_ids)
-                        )
+                        _call_alloc_intermediates(alloc_fn, base_tensors, self._world_size)
                     base_tensor_frames.append(base_tensors)
                 infos = prog._get_metadata()[0]
                 self._states[prog] = {
                     "window_requirements": entry_window_requirements(entry_fn, infos),
+                    "compiled": prog,
                     "entry_fn": entry_fn,
                     "window_sources": {key: window_sources[key] for key in source_keys},
                     "base_tensor_frames": tuple(base_tensor_frames),
                     "call_config": _make_call_config(prog._distributed_config),
                     "param_infos": tuple(infos),
-                    "device_nums": len(prog._distributed_config.device_ids),
+                    "device_nums": self._world_size,
                     "persistent_id": f"p{program_index}",
                 }
                 if self._persistent and "_domain_provider" not in inspect.signature(entry_fn).parameters:
@@ -2197,7 +2393,17 @@ class DistributedWorker(Worker):
                 num_sub,
                 enable_sdma=enable_sdma,
                 startup_timeout_s=startup_timeout_s,
+                **({"deployment": deployment} if deployment is not None else {}),
             )
+            self._rank_to_worker = (
+                tuple(self._w._pypto_rank_to_worker)
+                if deployment is not None
+                else tuple(range(self._world_size))
+            )
+            local_count = (
+                len(deployment.local_device_ids) if deployment is not None else len(self.dc.device_ids)
+            )
+            self._remote_target_ids = frozenset(self._rank_to_worker[local_count:])
             from .tensor_arg import bind_tensor_arg_owner  # noqa: PLC0415
 
             bind_tensor_arg_owner(self._w, self)
@@ -2235,6 +2441,378 @@ class DistributedWorker(Worker):
         # Live RegistrationHandles so close() can mark them closed. WeakSet
         # so handles that drop out of scope first don't pin DistributedWorker.
         self._handles: weakref.WeakSet[Any] = weakref.WeakSet()
+
+    @property
+    def world_size(self) -> int:
+        """Number of application ranks, including remote cards."""
+        return self._world_size
+
+    def allocate_domain(
+        self, name: str, *, window_size: int, buffers: Sequence[Any], members: Sequence[int] | None = None
+    ) -> Any:
+        """Bootstrap a retained Device domain before entering request().
+
+        Members are application ranks. The internal per-member ordering buffer
+        is appended automatically, matching the generated payload layout.
+        The returned handle remains owned by this worker until close().
+        """
+        self._require_open("allocate_domain")
+        from simpler.task_interface import CommBufferSpec  # noqa: PLC0415 -- optional native runtime
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("domain name must be nonempty")
+        if type(window_size) is not int or window_size <= 0:
+            raise ValueError("window_size must be a positive byte count")
+        payload_buffers = tuple(buffers)
+        if any(int(buffer.nbytes) % _DOMAIN_ORDER_BUFFER_BYTES for buffer in payload_buffers):
+            raise ValueError("domain buffer sizes must be aligned to 64 bytes, matching compiled layouts")
+        if any(buffer.name == "__pypto_order" for buffer in payload_buffers):
+            raise ValueError("__pypto_order is reserved for generated task ordering")
+        domain_buffers = (
+            *payload_buffers,
+            CommBufferSpec("__pypto_order", "opaque", 1, _DOMAIN_ORDER_BUFFER_BYTES),
+        )
+        ranks = tuple(range(self._world_size)) if members is None else tuple(members)
+        if not ranks or any(type(rank) is not int or not 0 <= rank < self._world_size for rank in ranks):
+            raise ValueError("domain members must name ranks in this deployment")
+        if len(set(ranks)) != len(ranks):
+            raise ValueError("domain members must be distinct")
+        targets = tuple(self._rank_to_worker[rank] for rank in ranks)
+        saved: list[Any] = []
+
+        def bootstrap(orch: Any, _args: Any, _config: Any) -> None:
+            saved.append(
+                orch.get_or_allocate_domain(
+                    name=name,
+                    members=targets,
+                    window_size=window_size + _DOMAIN_ORDER_BUFFER_BYTES,
+                    buffers=domain_buffers,
+                    retain_after_run=True,
+                )
+            )
+
+        with self._dispatch_submit_mu:
+            self._w.run(bootstrap)
+            self._owned_domains[name] = saved[0]
+            # Explicit domains need the provider/use-fence path on local deployments too.
+            self._persistent = True
+        return saved[0]
+
+    def bind_domain(self, compiled: DistributedCompiledProgram, name: str, domain: Any) -> None:
+        """Bind a generated domain name to an already bootstrapped handle.
+
+        Bind each stage of a multi-Run request to the same allocation. The
+        provider checks the full buffer layout on every dispatch, so layouts
+        with different offsets cannot alias merely because their sizes match.
+        """
+        self._require_open("bind_domain")
+        if compiled not in self._states:
+            raise ValueError("compiled program was not prepared on this worker")
+        self._require_owned_domain(domain)
+        if not isinstance(name, str) or not name:
+            raise ValueError("generated domain name must be nonempty")
+        with self._dispatch_submit_mu:
+            key = (compiled, name)
+            existing = self._bound_domains.get(key)
+            if existing is not None and existing is not domain:
+                raise ValueError("a prepared domain binding cannot be replaced")
+            self._bound_domains[key] = domain
+
+    def prepare_domains(self, compiled: DistributedCompiledProgram, **scalars: int) -> dict[str, Any]:
+        """Allocate and bind the exact generated Device domain layouts before request()."""
+        from simpler.task_interface import CommBufferSpec  # noqa: PLC0415 -- optional native runtime
+
+        self._require_open("prepare_domains")
+        if compiled not in self._states:
+            raise ValueError("program must be prepared on this worker")
+        layouts = compiled.domain_layouts(world_size=self._world_size, **scalars)
+        if any(layout.memory_source != "device" or layout.workspace_engines for layout in layouts):
+            raise ValueError("prepare_domains currently requires Device layouts without workspace engines")
+        result = {}
+        for layout in layouts:
+            existing = self._bound_domains.get((compiled, layout.name))
+            if existing is None:
+                domain = self.allocate_domain(
+                    f"pypto:{self._states[compiled]['persistent_id']}:{layout.name}",
+                    window_size=layout.window_size,
+                    buffers=[
+                        CommBufferSpec(b.name, "opaque", b.logical_nbytes, b.nbytes) for b in layout.buffers
+                    ],
+                    members=layout.workers,
+                )
+                self.bind_domain(compiled, layout.name, domain)
+                result[layout.name] = domain
+            else:
+                self._require_owned_domain(existing)
+                self.share_domain(existing, ((compiled, layout.name),), **scalars)
+                result[layout.name] = existing
+        return result
+
+    def share_domain(
+        self, domain: Any, bindings: Sequence[tuple[DistributedCompiledProgram, str]], **scalars: int
+    ) -> None:
+        """Explicitly bind compatible program domains; never infer sharing from shape."""
+        self._require_owned_domain(domain)
+        selected = tuple(bindings)
+        for program, name in selected:
+            if program not in self._states:
+                raise ValueError("shared-domain program is not prepared")
+            layouts = {
+                layout.name: layout
+                for layout in program.domain_layouts(world_size=self._world_size, **scalars)
+            }
+            if name not in layouts:
+                raise ValueError(f"unknown generated domain {name!r}")
+            layout = layouts[name]
+            expected = (
+                tuple(self._rank_to_worker[r] for r in layout.workers),
+                layout.window_size + 64,
+                tuple((b.name, b.nbytes) for b in layout.buffers) + (("__pypto_order", 64),),
+            )
+            actual = (
+                tuple(domain.workers),
+                domain.requested_window_size,
+                tuple((b.name, int(b.nbytes)) for b in domain.buffers),
+            )
+            if layout.memory_source != "device" or layout.workspace_engines or expected != actual:
+                raise ValueError(f"shared domain {name!r} has incompatible members or physical layout")
+            bound = self._bound_domains.get((program, name))
+            if bound is not None and bound is not domain:
+                raise ValueError("a prepared domain binding cannot be replaced")
+        with self._dispatch_submit_mu:
+            self._require_open("share_domain")
+            self._require_owned_domain(domain)
+            if any(
+                self._bound_domains.get((program, name), domain) is not domain for program, name in selected
+            ):
+                raise ValueError("a prepared domain binding cannot be replaced")
+            self._bound_domains.update({(program, name): domain for program, name in selected})
+
+    def domain_tensor(
+        self,
+        domain: Any,
+        rank: int,
+        buffer: str,
+        shape: Sequence[int],
+        dtype: torch.dtype,
+        *,
+        byte_offset: int = 0,
+    ) -> DeviceTensor | RemoteDeviceTensor:
+        """Borrow actual Device storage on either a local or remote domain member."""
+        self._require_open("domain_tensor")
+        self._require_owned_domain(domain)
+        if type(rank) is not int or not 0 <= rank < self._world_size or buffer == "__pypto_order":
+            raise ValueError("domain tensor requires a valid rank and a nonreserved buffer")
+        if self._rank_to_worker[rank] in self._remote_target_ids:
+            return self.remote_tensor(domain, rank, buffer, shape, dtype, byte_offset=byte_offset)
+        member = tuple(domain.workers).index(self._rank_to_worker[rank])
+        backing = domain.member(member).buffers[buffer]
+        from simpler.buffer import AddressSpace  # noqa: PLC0415 -- optional native runtime
+
+        if backing.address_space != AddressSpace.DEVICE:
+            raise ValueError("domain_tensor requires Device-source storage")
+        tensor = DeviceTensor(
+            int(backing.base) + byte_offset, shape, dtype, buffer=backing, byte_offset=byte_offset
+        )
+        self.__dict__.setdefault("_domain_tensors", {})[id(tensor)] = (tensor, domain, rank)
+        return tensor
+
+    def _require_owned_domain(self, domain: Any) -> None:
+        if self._owned_domains.get(domain.name) is not domain or domain.released:
+            raise ValueError("domain must be a live handle allocated by this DistributedWorker")
+
+    @contextmanager
+    def request(self, *domains: Any) -> Iterator[DistributedWorker]:
+        """Own domains across staging, HOST decisions, multiple Runs and readback.
+
+        Enter and exit on the driving thread, outside generated callbacks.
+        Simpler enforces fail-fast exclusivity; this wrapper also waits for
+        accepted PyPTO handles so their result publication finishes in scope.
+        """
+        self._require_open("request")
+        chosen = domains or tuple(self._owned_domains.values())
+        unique = {id(domain): domain for domain in chosen}
+        if not unique:
+            raise ValueError("allocate and bind domains before entering request()")
+        for domain in unique.values():
+            self._require_owned_domain(domain)
+        frames = getattr(self._request_local, "frames", None)
+        if frames is None:
+            frames = []
+            self._request_local.frames = frames
+        handles: list[DistributedRunHandle] = []
+        with ExitStack() as stack:
+            for domain in sorted(unique.values(), key=lambda handle: handle.name):
+                stack.enter_context(domain.request())
+            frames.append(handles)
+            body_error: BaseException | None = None
+            try:
+                yield self
+            except BaseException as error:
+                body_error = error
+                raise
+            finally:
+                try:
+                    first_error = None
+                    for handle in handles:
+                        try:
+                            handle.result()
+                        except BaseException as error:
+                            if first_error is None:
+                                first_error = error
+                    if first_error is not None:
+                        if body_error is None:
+                            raise first_error
+                        logger.error(
+                            "request cleanup also failed",
+                            exc_info=(
+                                type(first_error),
+                                first_error,
+                                first_error.__traceback__,
+                            ),
+                        )
+                finally:
+                    frames.pop()
+
+    def remote_tensor(
+        self,
+        domain: Any,
+        rank: int,
+        buffer: str,
+        shape: Sequence[int],
+        dtype: torch.dtype,
+        *,
+        byte_offset: int = 0,
+    ) -> RemoteDeviceTensor:
+        """Create a non-owning remote Device-buffer view without an owner VA."""
+        self._require_open("remote_tensor")
+        self._require_owned_domain(domain)
+        if buffer == "__pypto_order":
+            raise ValueError("__pypto_order is reserved for generated task ordering")
+        if type(rank) is not int or not 0 <= rank < self._world_size:
+            raise ValueError("rank is outside this deployment")
+        target = self._rank_to_worker[rank]
+        if target not in self._remote_target_ids:
+            raise ValueError("remote_tensor requires a remote rank")
+        domain_rank = tuple(domain.workers).index(target)
+        backing = domain.member(domain_rank).buffers[buffer]
+        tensor = RemoteDeviceTensor(domain, domain_rank, buffer, tuple(shape), dtype, backing, byte_offset)
+        self._remote_tensors[id(tensor)] = tensor
+        return tensor
+
+    def release_remote_tensor(self, tensor: RemoteDeviceTensor) -> None:
+        """Retire a view; its storage remains owned by the retained domain."""
+        self._require_open("release_remote_tensor")
+        if self._remote_tensors.get(id(tensor)) is tensor:
+            del self._remote_tensors[id(tensor)]
+
+    def _require_remote_tensor(self, tensor: RemoteDeviceTensor, *, rank: int | None = None) -> None:
+        source = tensor._source if tensor._source is not None else tensor
+        if self._remote_tensors.get(id(source)) is not source:
+            raise ValueError("RemoteDeviceTensor must be created by this DistributedWorker")
+        if (
+            tensor.domain is not source.domain
+            or tensor.buffer is not source.buffer
+            or tensor.domain_rank != source.domain_rank
+        ):
+            raise ValueError("RemoteDeviceTensor view changed its owning storage")
+        self._require_owned_domain(tensor.domain)
+        if rank is not None and tensor.domain.workers[tensor.domain_rank] != self._rank_to_worker[rank]:
+            raise ValueError("RemoteDeviceTensor belongs to a different rank")
+
+    def copy_remote_to(self, tensor: RemoteDeviceTensor, host: torch.Tensor) -> None:
+        """Synchronously upload to a remote domain view within its request scope."""
+        self._require_open("copy_remote_to")
+        self._require_remote_tensor(tensor)
+
+        if tensor.strides != _validate_strides(tensor.shape, None):
+            raise ValueError("copy_remote_to requires a contiguous device view")
+        self._require_copy_host_tensor(host, "copy_remote_to")
+        if tuple(host.shape) != tensor.shape or host.dtype != tensor.dtype:
+            raise ValueError("host shape and dtype must match RemoteDeviceTensor")
+        self._copy_domain_buffer(
+            tensor.domain, tensor.domain_rank, tensor.buffer_name, host, tensor.byte_offset, upload=True
+        )
+
+    def copy_remote_from(self, tensor: RemoteDeviceTensor, host: torch.Tensor) -> None:
+        """Synchronously read a remote domain view within its request scope."""
+        self._require_open("copy_remote_from")
+        self._require_remote_tensor(tensor)
+
+        if tensor.strides != _validate_strides(tensor.shape, None):
+            raise ValueError("copy_remote_from requires a contiguous device view")
+        self._require_copy_host_tensor(host, "copy_remote_from")
+        if tuple(host.shape) != tensor.shape or host.dtype != tensor.dtype:
+            raise ValueError("host shape and dtype must match RemoteDeviceTensor")
+        self._copy_domain_buffer(
+            tensor.domain, tensor.domain_rank, tensor.buffer_name, host, tensor.byte_offset, upload=False
+        )
+
+    def copy_domain_to(
+        self, domain: Any, rank: int, buffer: str, host: torch.Tensor, *, byte_offset: int = 0
+    ) -> None:
+        """Upload CPU-contiguous data to a local or remote domain member."""
+        self._copy_domain_by_rank(domain, rank, buffer, host, byte_offset, upload=True)
+
+    def copy_domain_from(
+        self, domain: Any, rank: int, buffer: str, host: torch.Tensor, *, byte_offset: int = 0
+    ) -> None:
+        """Read local or remote domain data into a CPU-contiguous tensor."""
+        self._copy_domain_by_rank(domain, rank, buffer, host, byte_offset, upload=False)
+
+    def _copy_domain_by_rank(
+        self, domain: Any, rank: int, buffer: str, host: torch.Tensor, byte_offset: int, *, upload: bool
+    ) -> None:
+        self._require_open("copy_domain_to" if upload else "copy_domain_from")
+        self._require_owned_domain(domain)
+        if type(rank) is not int or not 0 <= rank < self._world_size:
+            raise ValueError(f"rank {rank!r} is outside this deployment")
+        domain_rank = tuple(domain.workers).index(self._rank_to_worker[rank])
+        self._copy_domain_buffer(domain, domain_rank, buffer, host, byte_offset, upload=upload)
+
+    def _copy_domain_buffer(
+        self,
+        domain: Any,
+        domain_rank: int,
+        buffer: str,
+        host: torch.Tensor,
+        byte_offset: int,
+        *,
+        upload: bool,
+    ) -> None:
+        from simpler.global_comm_domain import (  # noqa: PLC0415 -- optional runtime or import-cycle boundary
+            GLOBAL_DOMAIN_MAX_COPY_BYTES,  # noqa: PLC0415 -- optional native runtime
+        )
+
+        self._require_copy_host_tensor(host, "copy_domain_to" if upload else "copy_domain_from")
+        nbytes = host.numel() * host.element_size()
+        backing = domain.member(domain_rank).buffers[buffer]
+        if buffer == "__pypto_order":
+            raise ValueError("__pypto_order is reserved for generated task ordering")
+        if type(byte_offset) is not int or byte_offset < 0 or byte_offset + nbytes > backing.nbytes:
+            raise ValueError("domain copy range exceeds its named buffer")
+
+        # A copy is a synchronous Run under the same native request lease as
+        # compute. Split large weights to respect the control-frame limit;
+        # never replay a partially completed transfer after an error.
+        def copy(orch: Any, _args: Any, _config: Any) -> None:
+            for offset in range(0, nbytes, GLOBAL_DOMAIN_MAX_COPY_BYTES):
+                count = min(GLOBAL_DOMAIN_MAX_COPY_BYTES, nbytes - offset)
+                if upload:
+                    orch.copy_to_domain(
+                        domain,
+                        domain_rank,
+                        ctypes.string_at(host.data_ptr() + offset, count),
+                        buffer=buffer,
+                        offset=byte_offset + offset,
+                    )
+                else:
+                    data = orch.copy_from_domain(
+                        domain, domain_rank, count, buffer=buffer, offset=byte_offset + offset
+                    )
+                    ctypes.memmove(host.data_ptr() + offset, data, count)
+
+        self._w.run(copy)
 
     @staticmethod
     def _check_compatible(prog: DistributedCompiledProgram, primary: DistributedCompiledProgram) -> None:
@@ -2534,8 +3112,51 @@ class DistributedWorker(Worker):
             _args: Any,
             _config: Any,
         ) -> None:
+            staged_domains = {
+                id(value.invocation.domain): value.invocation.domain
+                for value in tensors.values()
+                if isinstance(value, _StagedTensor)
+            }
+            for value in tensors.values():
+                shards = value.shards if isinstance(value, StackedDeviceTensor) else (value,)
+                for shard in shards:
+                    if isinstance(shard, RemoteDeviceTensor):
+                        staged_domains[id(shard.domain)] = shard.domain
+                    elif isinstance(shard, DeviceTensor):
+                        for root, domain, _rank in self.__dict__.get("_domain_tensors", {}).values():
+                            if root.buffer is shard.buffer:
+                                staged_domains[id(domain)] = domain
+            for domain in staged_domains.values():
+                orch.get_domain(domain.name)
+
             def domain_provider(**kwargs: Any) -> _RetainedDomainLease:
                 generated_name = str(kwargs["name"])
+                handle = self._bound_domains.get((state["compiled"], generated_name))
+                if self._has_remote_chips or handle is not None:
+                    memory_source = kwargs.get("memory_source", "device")
+                    source_name = str(getattr(memory_source, "name", memory_source)).lower()
+                    if source_name != "device" or kwargs.get("initializer") is not None:
+                        raise ValueError(
+                            "explicitly bound domains require Device buffers initialized inside request()"
+                        )
+                    if handle is None:
+                        raise ValueError(
+                            f"remote domain {generated_name!r} must be allocated and bound before request()"
+                        )
+                    expected = dict(kwargs)
+                    expected["workers"] = tuple(self._rank_to_worker[rank] for rank in kwargs["workers"])
+                    actual = {
+                        "workers": handle.workers,
+                        "window_size": handle.requested_window_size,
+                        "buffers": handle.buffers,
+                    }
+                    if kwargs.get("workspace_engines") or self._domain_byte_layout(
+                        expected
+                    ) != self._domain_byte_layout(actual):
+                        raise ValueError(f"bound domain {generated_name!r} differs from the compiled layout")
+                    # Lookup enrolls this retained allocation in this Run's use
+                    # fence; merely caching a Python handle would not do that.
+                    return _RetainedDomainLease(orch.get_domain(handle.name))
                 program_domains = domains_by_program.setdefault(program_id, {})
                 spec = self._persistent_domain_spec(kwargs)
                 existing = program_domains.get(generated_name)
@@ -2559,6 +3180,8 @@ class DistributedWorker(Worker):
             if program_domains and self._reset_persistent_windows:
                 self._reset_persistent_domains(orch, program_domains, reset_buffers)
             _reset_dfx_dispatch_state(orch, state["chip_cids"], dispatch_idx=self._dfx_dispatch_idx)
+            orch._pypto_chip_count = state["device_nums"]
+            orch._pypto_commless_seq = 0
             state["entry_fn"](
                 orch,
                 _args,
@@ -2586,6 +3209,16 @@ class DistributedWorker(Worker):
         if self._persistent_error is not None:
             self._persistent_error_reported = True
             raise self._persistent_error
+
+    @staticmethod
+    def _domain_byte_layout(kwargs: dict[str, Any]) -> tuple[Any, ...]:
+        # Generated specs use dtype=opaque/count=bytes. Physical offsets, not
+        # that placeholder spelling, must match a user-supplied typed layout.
+        return (
+            tuple(kwargs["workers"]),
+            int(kwargs["window_size"]),
+            tuple((buffer.name, int(buffer.nbytes)) for buffer in kwargs["buffers"]),
+        )
 
     def _submit_prepared_native(
         self,
@@ -2655,14 +3288,22 @@ class DistributedWorker(Worker):
         The returned pointer belongs to the chip owner; consumers import their own VA.
         """
         self._require_open("malloc")
+        if type(worker_id) is not int or not 0 <= worker_id < self._world_size:
+            raise ValueError("worker_id must be a rank in this deployment")
+        if self._rank_to_worker[worker_id] in self._remote_target_ids:
+            raise NotImplementedError(
+                "remote device malloc is unavailable; use remote_tensor() on a Device domain"
+            )
         if type(nbytes) is not int or nbytes <= 0:
             raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
         from simpler.task_interface import DataType  # noqa: PLC0415
 
         if exportable:
-            handle = self._w.alloc_child_tensor(worker_id, (nbytes,), DataType.UINT8, exportable=True)
+            handle = self._w.alloc_child_tensor(
+                self._rank_to_worker[worker_id], (nbytes,), DataType.UINT8, exportable=True
+            )
         else:
-            handle = self._w.alloc_child_tensor(worker_id, (nbytes,), DataType.UINT8)
+            handle = self._w.alloc_child_tensor(self._rank_to_worker[worker_id], (nbytes,), DataType.UINT8)
         try:
             ptr = int(handle.base)
         except (AttributeError, TypeError, ValueError) as e:
@@ -2705,7 +3346,7 @@ class DistributedWorker(Worker):
         self._require_open("committed_device_memory")
         if self._w is None:
             return 0
-        return int(self._w.committed_device_memory(worker_id))
+        return int(self._w.committed_device_memory(self._memory_query_target(worker_id)))
 
     def device_memory_info(self, worker_id: int = 0) -> tuple[int, int]:
         """Free and total device HBM (bytes) as the driver sees it, for the device
@@ -2728,8 +3369,18 @@ class DistributedWorker(Worker):
             ``(free_bytes, total_bytes)``, both as Python ints.
         """
         self._require_open("device_memory_info")
-        info = self._w.device_memory_info(worker_id)
+        info = self._w.device_memory_info(self._memory_query_target(worker_id))
         return int(info.free_bytes), int(info.total_bytes)
+
+    def _memory_query_target(self, rank: int) -> int:
+        if type(rank) is not int or not 0 <= rank < self._world_size:
+            raise ValueError(f"worker_id {rank!r} is outside this deployment")
+        target = self._rank_to_worker[rank]
+        if target in self._remote_target_ids:
+            # Simpler's current memory-query controls address forked local
+            # children. Do not accidentally query a local card with this ID.
+            raise NotImplementedError("remote device memory queries are not supported")
+        return target
 
     @staticmethod
     def _storage_span(tensor: torch.Tensor) -> tuple[int, int]:
@@ -3001,42 +3652,27 @@ class DistributedWorker(Worker):
         self._require_copy_host_tensor(init, "DistributedWorker.alloc_tensor(init=...)")
         return init
 
-    def alloc_stacked_tensor(
+    def alloc_stacked_tensor(  # noqa: PLR0912 -- validate all shards before allocation and rollback
         self,
         host: torch.Tensor,
         *,
         worker_ids: Sequence[int] | None = None,
+        shard_axis: int = 0,
+        domain: Any = None,
+        buffer: str | None = None,
     ) -> StackedDeviceTensor:
-        """Upload each leading-dim shard of *host* to a worker once; reuse it.
+        """Upload shards along ``shard_axis`` and retain them across dispatches.
 
-        The leading dimension of *host* is the stack/shard dimension: shard ``i``
-        (``host[i]``, shape ``host.shape[1:]``) is uploaded to worker
-        ``worker_ids[i]`` and stays resident for the worker's lifetime. Pass the
-        returned :class:`~pypto.runtime.StackedDeviceTensor` in place of *host*
-        for a leading-dim-sharded program parameter (a ``[B, *tail]`` tensor the
-        orchestrator slices per rank: ``for r in range(world_size):
-        child(x[r], device=...)``). The generated ``host_orch`` indexes ``x[i]``
-        to shard ``i``'s :class:`~pypto.runtime.DeviceTensor`, so the runtime
-        skips the per-dispatch H2D upload through its retained Buffer — the stack is
-        uploaded once here and reused across every ``rt(...)`` dispatch.
+        Shard ``i`` is ``host.select(shard_axis, i)`` and belongs to logical
+        rank ``worker_ids[i]`` (default: consecutive ranks). For example,
+        ``[round, rank, ...]`` uses ``shard_axis=1`` and HOST accesses
+        ``x[round, rank]``. Each shard must be consumed by its owning rank.
 
-        Args:
-            host: A CPU, contiguous ``[B, *tail]`` tensor. Explicit upload
-                stages through a runtime-owned shared Buffer, so it may be an
-                ordinary tensor created after :meth:`prepare`.
-            worker_ids: ``worker_ids[i]`` is the worker that holds shard ``i``
-                and whose task consumes ``x[i]``; it MUST equal the worker the
-                program submits ``x[i]``'s dispatch to (its ``device=``
-                expression). Entries must be distinct and within
-                ``[0, world_size)``. Defaults to ``range(B)`` — the canonical
-                ``for r in range(world_size): child(x[r], device=r)`` program. A
-                permuted/subset placement (``device=perm[r]`` / ``device=2*r``)
-                needs the matching ``worker_ids``.
-
-        Returns:
-            A :class:`~pypto.runtime.StackedDeviceTensor`; its shards are tracked
-            by this worker and auto-freed on :meth:`close` if not released earlier
-            via :meth:`free_stacked_tensor`.
+        A supplied ``domain`` and named ``buffer`` borrow Device storage on
+        local or remote members. Hold ``request(domain)`` during upload and
+        use. With local workers, omitted domain storage uses owned allocations.
+        Free tensor handles with ``free_stacked_tensor``; borrowed domain
+        storage follows the domain lifetime.
         """
         self._require_open("alloc_stacked_tensor")
         if not isinstance(host, torch.Tensor):  # pyright: ignore[reportUnnecessaryIsInstance] -- mistyped-input guard
@@ -3051,22 +3687,34 @@ class DistributedWorker(Worker):
             raise ValueError(
                 f"alloc_stacked_tensor needs a [B, *tail] tensor (rank >= 2), got shape {tuple(host.shape)}"
             )
-        b = int(host.shape[0])
+        if type(shard_axis) is not int or not 0 <= shard_axis < host.ndim:
+            raise ValueError("shard_axis must name a host tensor dimension")
+        b = int(host.shape[shard_axis])
         if b < 1:
             raise ValueError(
-                f"alloc_stacked_tensor needs at least one shard in the leading dim, "
+                f"alloc_stacked_tensor needs at least one shard on the shard axis, "
                 f"got shape {tuple(host.shape)}"
             )
-        world = len(self.dc.device_ids)
+        world = self._world_size
         ids = list(range(b)) if worker_ids is None else [int(w) for w in worker_ids]
         if len(ids) != b:
-            raise ValueError(f"worker_ids has {len(ids)} entries; host leading dim is {b}")
+            raise ValueError(f"worker_ids has {len(ids)} entries; host shard-axis extent is {b}")
         if len(set(ids)) != len(ids):
             raise ValueError(f"worker_ids must be distinct (one shard per worker), got {ids}")
         for w in ids:
             if not 0 <= w < world:
                 raise ValueError(f"worker id {w} out of range [0, {world}) (world_size from device_ids)")
-
+        if domain is not None:
+            if buffer is None:
+                raise ValueError("a named buffer is required for domain-backed shards")
+            stacked = self.stack_domain_tensor(
+                domain, buffer, host.shape, host.dtype, shard_axis=shard_axis, worker_ids=ids
+            )
+            for i, rank in enumerate(ids):
+                self.copy_domain_to(domain, rank, buffer, host.select(shard_axis, i).contiguous())
+            return stacked
+        if any(self._rank_to_worker[rank] in self._remote_target_ids for rank in ids):
+            raise ValueError("remote shards require an explicit Device domain and buffer")
         shards: list[DeviceTensor] = []
         try:
             # Upload the shards concurrently: each one targets a different chip
@@ -3077,7 +3725,7 @@ class DistributedWorker(Worker):
                 return self.alloc_tensor(
                     tuple(host.shape[1:]),
                     host.dtype,
-                    init=host[i].contiguous(),
+                    init=host.select(shard_axis, i).contiguous(),
                     worker_id=w,
                 )
 
@@ -3115,12 +3763,39 @@ class DistributedWorker(Worker):
             for shard, w in zip(shards, ids, strict=False):
                 self.free_tensor(shard, worker_id=w)
             raise
-        return StackedDeviceTensor(shards, tuple(host.shape), tuple(ids))
+        return StackedDeviceTensor(shards, tuple(host.shape), tuple(ids), shard_axis=shard_axis)
+
+    def stack_domain_tensor(
+        self,
+        domain: Any,
+        buffer: str,
+        shape: Sequence[int],
+        dtype: torch.dtype,
+        *,
+        shard_axis: int = 0,
+        worker_ids: Sequence[int] | None = None,
+    ) -> StackedDeviceTensor:
+        """Build resident shards without uploading data, including pure outputs."""
+        full = tuple(shape)
+        if type(shard_axis) is not int or not 0 <= shard_axis < len(full):
+            raise ValueError("shard_axis must name a tensor dimension")
+        count = full[shard_axis]
+        ids = tuple(range(count)) if worker_ids is None else tuple(worker_ids)
+        if len(ids) != count or len(set(ids)) != count:
+            raise ValueError("one distinct worker_id is required per shard")
+        local_shape = full[:shard_axis] + full[shard_axis + 1 :]
+        shards = tuple(self.domain_tensor(domain, rank, buffer, local_shape, dtype) for rank in ids)
+        return StackedDeviceTensor(shards, full, ids, shard_axis=shard_axis)
 
     def free_stacked_tensor(self, stacked: StackedDeviceTensor) -> None:
         """Release every shard of *stacked* against its owning worker. Idempotent."""
         for shard, w in zip(stacked.shards, stacked.worker_ids, strict=True):
-            self.free_tensor(shard, worker_id=w)
+            if isinstance(shard, RemoteDeviceTensor):
+                self.release_remote_tensor(shard)
+            elif id(shard) in self.__dict__.get("_domain_tensors", {}):
+                self._domain_tensors.pop(id(shard))
+            else:
+                self.free_tensor(shard, worker_id=w)
 
     def release_inherited_host_tensor_refs(self) -> None:
         """Release compatibility lifetime references supplied at construction.
@@ -3169,17 +3844,40 @@ class DistributedWorker(Worker):
             raise ValueError(f"host dtype {host.dtype} does not match stacked dtype {stacked.dtype}")
         self._require_copy_host_tensor(host, "copy_stacked_from(host=...)")
         for i, (shard, w) in enumerate(zip(stacked.shards, stacked.worker_ids, strict=True)):
+            if shard.strides != _validate_strides(shard.shape, None):
+                raise ValueError("copy_stacked_from requires contiguous device shards")
+            target = host.select(stacked.shard_axis, i)
+            temporary = torch.empty(shard.shape, dtype=shard.dtype)
             # `_device_buffer` accepts the allocation base only, not an interior
             # view pointer, so pass the base and let copy_from apply the view's
             # byte offset on the device side. copy_from still owns the
             # child-visible POSIX-shm staging internally.
-            self.copy_from(
-                host[i].data_ptr(),
-                shard.data_ptr - shard.byte_offset,
-                shard.nbytes,
-                src_offset=shard.byte_offset,
-                worker_id=w,
-            )
+            if isinstance(shard, RemoteDeviceTensor):
+                self.copy_remote_from(shard, temporary)
+            elif any(
+                root.buffer is shard.buffer
+                for root, _domain, _rank in self.__dict__.get("_domain_tensors", {}).values()
+            ):
+                root, domain, rank = next(
+                    item for item in self._domain_tensors.values() if item[0].buffer is shard.buffer
+                )
+                buffer = next(
+                    name
+                    for name, value in domain.member(
+                        tuple(domain.workers).index(self._rank_to_worker[rank])
+                    ).buffers.items()
+                    if value is shard.buffer
+                )
+                self.copy_domain_from(domain, rank, buffer, temporary, byte_offset=shard.byte_offset)
+            else:
+                self.copy_from(
+                    temporary.data_ptr(),
+                    shard.data_ptr - shard.byte_offset,
+                    shard.nbytes,
+                    src_offset=shard.byte_offset,
+                    worker_id=w,
+                )
+            target.copy_(temporary)
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -3235,14 +3933,20 @@ class DistributedWorker(Worker):
 
         if isinstance(arg, StackedDeviceTensor):
             for shard_index, (shard, worker_id) in enumerate(zip(arg.shards, arg.worker_ids, strict=True)):
-                self._require_owned_resident_tensor(
-                    shard,
-                    f"Parameter {info.name!r} shard {shard_index}",
-                    worker_id=worker_id,
-                )
+                if isinstance(shard, RemoteDeviceTensor):
+                    self._require_remote_tensor(shard, rank=worker_id)
+                else:
+                    self._require_resident_arg(
+                        shard,
+                        f"Parameter {info.name!r} shard {shard_index}",
+                        worker_id=worker_id,
+                    )
             _validate_stacked_tensor(arg, info)
+        elif isinstance(arg, RemoteDeviceTensor):
+            self._require_remote_tensor(arg)
+            _validate_device_tensor(arg, info)
         elif isinstance(arg, DeviceTensor):
-            self._require_owned_resident_tensor(arg, f"Parameter {info.name!r}")
+            self._require_resident_arg(arg, f"Parameter {info.name!r}")
             _validate_device_tensor(arg, info)
         elif isinstance(arg, torch.Tensor):
             if not arg.is_shared():
@@ -3251,6 +3955,10 @@ class DistributedWorker(Worker):
                     "must be shared memory allocated BEFORE prepare() (call .share_memory_() and "
                     "reuse the same buffer across dispatches), so the forked chip worker can see it."
                 )
+        elif self._is_staged_arg(arg):
+            if arg.invocation.worker is not self:
+                raise ValueError("staged argument belongs to a different worker")
+            _validate_device_tensor(arg, info)
         elif not _is_simpler_tensor(arg):
             raise TypeError(
                 f"DistributedWorker parameter {info.name!r} got {type(arg).__name__}; expected a "
@@ -3307,6 +4015,11 @@ class DistributedWorker(Worker):
                 frame.keepalive.extend((compiled, pass_config, config, *args))
                 pass_state = state
                 if state["window_requirements"]:
+                    if self._has_remote_chips:
+                        raise NotImplementedError(
+                            "external CommDomain windows require an all-local deployment; "
+                            "use compiled domain layouts with share_domain for mixed placement"
+                        )
                     entry_args, domains = pack_window_args(
                         param_infos, args, self, state["window_requirements"]
                     )
@@ -3345,6 +4058,8 @@ class DistributedWorker(Worker):
                 raise
 
         if two_pass_swimlane:
+            if self._has_remote_chips:
+                raise NotImplementedError("remote per-host swimlane collection is not supported")
             assert config is not None
             assert capture_directory is not None
             _run_l3_swimlane_two_pass(
@@ -3410,8 +4125,43 @@ class DistributedWorker(Worker):
     def _run_compiled(
         self, compiled: DistributedCompiledProgram, *args: Any, config: RunConfig | None = None
     ) -> None:
-        """Blocking compatibility wrapper around :meth:`_submit_compiled`."""
-        self.submit(compiled, *args, config=config).result()
+        """Run resident arguments or synchronously stage CPU tensors."""
+        if self._has_remote_chips and any(isinstance(arg, torch.Tensor) for arg in args):
+            self._require_open("run")
+            if compiled not in self._states:
+                raise ValueError("program is not prepared on this worker")
+            if len(args) != len(self._states[compiled]["param_infos"]):
+                raise TypeError("automatic staging requires one argument per parameter")
+            for info, arg in zip(self._states[compiled]["param_infos"], args, strict=True):
+                if getattr(info, "shape", ()) is None and isinstance(arg, torch.Tensor):
+                    raise TypeError("scalar HOST parameters require Python scalar values")
+            invocation = _StagedInvocation(self, args)
+            try:
+                with self.request(invocation.domain):
+                    invocation.upload()
+                    self.submit(compiled, *invocation.args, config=config).result()
+                    invocation.publish()
+                invocation.release()
+            except BaseException:
+                self.__dict__.setdefault("_unconfirmed_staging", []).append(invocation)
+                raise
+        else:
+            self.submit(compiled, *args, config=config).result()
+
+    @staticmethod
+    def _is_staged_arg(arg: Any) -> bool:
+        return isinstance(arg, _StagedTensor)
+
+    def _require_resident_arg(
+        self, tensor: DeviceTensor, label: str, *, worker_id: int | None = None
+    ) -> None:
+        for root, domain, rank in self.__dict__.get("_domain_tensors", {}).values():
+            if tensor.buffer is root.buffer:
+                self._require_owned_domain(domain)
+                if worker_id is not None and worker_id != rank:
+                    raise ValueError(f"{label}: borrowed domain view belongs to rank {rank}")
+                return
+        self._require_owned_resident_tensor(tensor, label, worker_id=worker_id)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -3435,8 +4185,8 @@ class DistributedWorker(Worker):
                 if first_error is None:
                     first_error = exc
 
-    def close(self) -> None:
-        """Drain registered runs and release all worker-owned resources."""
+    def close(self) -> None:  # noqa: PLR0912 -- retain the first error while draining every owner
+        """Release runtime resources, retrying incomplete Worker cleanup."""
         # Serialize the admission transition with submit() and prevent two
         # callers from running teardown concurrently.
         with self._domain_gate, self._dispatch_submit_mu:
@@ -3468,6 +4218,12 @@ class DistributedWorker(Worker):
                     try:
                         self._release_persistent_domains(self._persistent_domains_by_program)
                     except BaseException as exc:  # noqa: BLE001 - preserve primary error and continue
+                        first_error = self._remember_close_error(first_error, exc)
+
+                for domain in tuple(self._owned_domains.values()):
+                    try:
+                        domain.release()
+                    except BaseException as exc:
                         first_error = self._remember_close_error(first_error, exc)
 
                 # DeviceTensor frees use the still-live simpler control path.
@@ -3517,6 +4273,11 @@ class DistributedWorker(Worker):
         self._persistent_domains_by_program.clear()
         if self._close_complete:
             self._device_buffers.clear()
+            self._owned_domains.clear()
+            self._bound_domains.clear()
+            self._remote_tensors.clear()
+            self.__dict__.get("_domain_tensors", {}).clear()
+            self.__dict__.get("_unconfirmed_staging", []).clear()
         return first_error
 
     def __enter__(self) -> DistributedWorker:
@@ -3552,11 +4313,18 @@ class DistributedWorker(Worker):
         Returns:
             A handle that owns the dispatch lifetime and cached outcome.
         """
+        if self._has_remote_chips and any(isinstance(arg, torch.Tensor) for arg in args):
+            raise NotImplementedError(
+                "automatic CPU staging is synchronous; use run() or submit resident views"
+            )
         with self._domain_gate:
             owners = {value._owner for value in args if isinstance(value, DomainTensor)}
             self._wait_domain_uses(owners)
             with self._dispatch_submit_mu:
-                return self._submit_compiled(compiled, *args, config=config)
+                handle = self._submit_compiled(compiled, *args, config=config)
+                for pending in getattr(self._request_local, "frames", ()):
+                    pending.append(handle)
+                return handle
 
     def _wait_domain_uses(self, owners: set[CommDomain]) -> None:
         if not owners:
@@ -3658,7 +4426,7 @@ class DistributedWorker(Worker):
         dep-gen-disabled timing pass; mutable arguments are not restored between
         them. ``None`` snapshots the program's baseline for this dispatch.
         """
-        return self.submit(compiled, *args, config=config).result()
+        return self._run_compiled(compiled, *args, config=config)
 
     def register(self, compiled: DistributedCompiledProgram) -> RegistrationHandle:
         """Pre-register *compiled* on this DistributedWorker.

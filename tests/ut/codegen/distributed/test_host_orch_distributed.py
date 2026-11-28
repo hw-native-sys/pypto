@@ -17,7 +17,7 @@ Covers four orthogonal pieces of the host_orch emit:
 2. DistributedTensor formal → ``add_tensor(__comm_d0[<r>]
    .buffers["<name>"].tensor(shapes=..., dtype=...), ...)``.
 3. Explicit CommCtx scalar:
-   ``add_scalar(__comm_d0[<r>].device_ctx)`` placed AFTER all tensor adds,
+   ``add_domain_context(*comm_context_arg(orch, __comm_d0, r))`` placed AFTER all tensor adds,
    in IR-arg order (matching the materialized incore function signature).
 4. dispatch ``device=`` attr → ``_submit_chip(orch, ..., config, <r>)`` (the
    rank-pinned wrapper that namespaces per-rank DFX ``output_prefix``).
@@ -47,6 +47,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import codegen, ir
 from pypto.backend import BackendType, pto_backend
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
 from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import passes  # match the import path used by ut/conftest.py
 from pypto.runtime.tensor_arg import check_window_capacity
@@ -227,13 +228,13 @@ def test_dist_tensor_formal_emits_continuous_tensor_make():
     # Buffer.tensor for the DistributedTensor formal — keyed on
     # the alloc op's LHS name_hint (``data_buf``).
     assert re.search(
-        r'__comm_d0\[\w+\]\.buffers\["data_buf"\]\.tensor\('
+        r'comm_domain_member\(orch, __comm_d0, \w+\)\.buffers\["data_buf"\]\.tensor\('
         r"shapes=\(64,\), dtype=DataType\.FLOAT32\)",
         code,
     ), code
     # Trailing per-DistributedTensor ctx scalar — same rank index as
     # the Buffer.tensor above.
-    assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
+    assert re.search(r"\.add_domain_context\(\*comm_context_arg\(orch, __comm_d0, \w+\)\)", code), code
     assert "pld.system.get_comm_ctx" not in code, code
     # ``device=r`` → rank-pinned dispatch routes through ``_submit_chip`` (which
     # namespaces the per-rank DFX ``output_prefix``), passing the rank last.
@@ -347,7 +348,7 @@ def test_symbolic_window_guard_is_emitted_once_for_multiple_dispatches():
 
 
 def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
-    """Two explicit ``CommCtx`` args emit two device_ctx scalars after tensors."""
+    """Two explicit contexts keep logical bindings in scalar ABI order."""
 
     @pl.program
     class Prog:
@@ -373,7 +374,7 @@ def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
 
     # Two Buffer.tensor lines — one per DistributedTensor formal.
     cont_makes = re.findall(
-        r'__comm_d0\[\w+\]\.buffers\["([^"]+)"\]\.tensor\('
+        r'comm_domain_member\(orch, __comm_d0, \w+\)\.buffers\["([^"]+)"\]\.tensor\('
         r"shapes=(\([^)]*\)), dtype=DataType\.([A-Z0-9]+)\)",
         code,
     )
@@ -382,7 +383,7 @@ def test_two_dist_tensor_formals_emit_two_explicit_ctx_scalars():
     assert cont_makes[0] == ("data_buf", "(64,)", "FLOAT32"), cont_makes
     assert cont_makes[1] == ("signal_buf", "(1,)", "INT32"), cont_makes
     # Two add_scalar lines — same rank index, same order as the two formals.
-    scalars = re.findall(r"\.add_scalar\(__comm_d0\[(\w+)\]\.device_ctx\)", code)
+    scalars = re.findall(r"\.add_domain_context\(\*comm_context_arg\(orch, __comm_d0, (\w+)\)\)", code)
     assert len(scalars) == 2, code
     assert scalars[0] == scalars[1], scalars  # both subscript the same rank
 
@@ -410,7 +411,7 @@ def test_wrapper_forwards_explicit_comm_ctx_param_as_scalar_name():
 
     code = _lower(Prog)
 
-    assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
+    assert re.search(r"\.add_domain_context\(\*comm_context_arg\(orch, __comm_d0, \w+\)\)", code), code
     assert "pld.system.get_comm_ctx" not in code, code
 
 
@@ -443,11 +444,11 @@ def test_const_device_kwarg_renders_literal_worker():
 
     code = _lower(Prog)
     assert re.search(r"_submit_chip\(orch, callables\[\"chip_orch\"\],.*config, 0\)", code), code
-    assert "__comm_d0[0].buffers" in code, code
-    assert "__comm_d0[0].device_ctx" in code, code
+    assert "comm_domain_member(orch, __comm_d0, 0).buffers" in code, code
+    assert "comm_context_arg(orch, __comm_d0, 0)" in code, code
 
 
-def test_comm_group_program_emits_domain_provider_with_block():
+def test_parallel_chip_group_emits_domain_provider_and_group():
     """Programs with ``pld.alloc_window_buffer`` emit a
     ``with (_domain_provider or orch.allocate_domain)(...)`` wrapping the
     for-loop body. The optional provider lets persistent execution retain a
@@ -464,11 +465,14 @@ def test_comm_group_program_emits_domain_provider_with_block():
         def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
             data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
-            for r in pl.range(pld.world_size()):
+            for r in pl.parallel(pld.world_size()):
                 self.chip_orch(data, device=r)
             return data  # type: ignore[return-value]
 
     code = _lower(Prog)
+    assert "with _chip_group(orch):" in code, code
+    assert code.index("as __comm_d0:") < code.index("with _chip_group(orch):"), code
+    assert "._pypto_domain_binding_version = 2" in code, code
     # The with-block opens with the literal spec list and binds the handle.
     assert "_domain_provider=None" in code, code
     assert re.search(r"with \(_domain_provider or orch\.allocate_domain\)\(", code), code
@@ -483,7 +487,7 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # Single slot → `window_size=((((64 * 4) + 63) // 64) * 64),`. The inner
     # parentheses come from the Mul expression.
     aligned_size = r"\(\(\(\(64 \* 4\) \+ 63\) // 64\) \* 64\)"
-    assert re.search(rf"window_size=\({aligned_size}\),", code), code
+    assert re.search(rf"window_size=\({aligned_size}\) \+ 64,", code), code
     assert re.search(
         rf'CommBufferSpec\(name="data_buf", dtype="opaque", count=\(64 \* 4\), nbytes={aligned_size}\),',
         code,
@@ -492,7 +496,7 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # All buffer / device_ctx lookups go through the handle; the legacy
     # ``contexts`` parameter must not appear anywhere.
     assert "contexts[" not in code, code
-    assert re.search(r"__comm_d0\[\w+\]\.buffers", code), code
+    assert re.search(r"comm_domain_member\(orch, __comm_d0, \w+\)\.buffers", code), code
 
 
 def test_comm_buffer_specs_align_each_physical_allocation():
@@ -532,7 +536,7 @@ def test_comm_buffer_specs_align_each_physical_allocation():
         ),
         code,
     ), code
-    assert re.search(rf"window_size=\({data_alloc}\) \+ \({signal_alloc}\),", code), code
+    assert re.search(rf"window_size=\({data_alloc}\) \+ \({signal_alloc}\) \+ 64,", code), code
 
 
 def test_comm_buffer_specs_isolate_signal_and_counts_cache_lines():
@@ -638,7 +642,8 @@ def test_comm_signal_and_counts_do_not_share_cache_lines(nr, stride):
         ):
             fields = {kw.arg: kw.value for kw in node.keywords}
             specs.append((constant_size(fields["count"]), constant_size(fields["nbytes"])))
-    assert [logical for logical, _ in specs] == [nr * stride * 4, nr * 4, nr * 4]
+    # The final byte is the domain's DAG ordering dependency.
+    assert [logical for logical, _ in specs] == [nr * stride * 4, nr * 4, nr * 4, 1]
     previous_lines = set()
     offset = 0
     for logical, physical in specs:
@@ -732,7 +737,7 @@ def test_world_size_lowers_to_kwarg_in_expression_context():
     assert re.search(r"for \w+ in range\(.*\bworld_size\b.*\):", code), code
     # Alloc-size: the CommBufferSpec / window_size args carry a dynamic
     # `world_size * 4` expression in place of a constant nbytes literal.
-    assert re.search(r"window_size=\(.*\bworld_size\b.*\),", code), code
+    assert re.search(r"window_size=\(.*\bworld_size\b.*\) \+ 64,", code), code
     assert re.search(r"CommBufferSpec\(.*\bworld_size\b.*\),", code), code
     # Runtime-sized slots need the same cache-line isolation as static ones.
     assert re.search(r"nbytes=\(\(\(.*\bworld_size\b.* \+ 63\) // 64\) \* 64\)", code), code
@@ -765,7 +770,7 @@ def test_hoisted_world_size_temp_in_alloc_size_lowers_to_kwarg():
             return signal  # type: ignore[return-value]
 
     code = _lower(Prog)
-    assert re.search(r"window_size=\(.*\bworld_size\b.*\),", code), code
+    assert re.search(r"window_size=\(.*\bworld_size\b.*\) \+ 64,", code), code
     assert re.search(r"CommBufferSpec\(.*\bworld_size\b.*\),", code), code
     alloc_block = code.split("with (_domain_provider or orch.allocate_domain)(")[1].split(") as __comm_d0:")[
         0
@@ -844,16 +849,16 @@ def test_two_groups_emit_nested_allocate_domain():
     # group A dispatches: __comm_d0[...].buffers["buf_a"].tensor(...)
     # and add_scalar(__comm_d0[...].device_ctx).
     assert re.search(
-        r'__comm_d0\[\w+\]\.buffers\["buf_a"\]\.tensor\(',
+        r'comm_domain_member\(orch, __comm_d0, \w+\)\.buffers\["buf_a"\]\.tensor\(',
         code,
     ), code
     assert re.search(
-        r'__comm_d1\[\w+\]\.buffers\["buf_b"\]\.tensor\(',
+        r'comm_domain_member\(orch, __comm_d1, \w+\)\.buffers\["buf_b"\]\.tensor\(',
         code,
     ), code
     # The trailing per-tensor ctx scalar uses the matching handle too.
-    assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
-    assert re.search(r"\.add_scalar\(__comm_d1\[\w+\]\.device_ctx\)", code), code
+    assert re.search(r"\.add_domain_context\(\*comm_context_arg\(orch, __comm_d0, \w+\)\)", code), code
+    assert re.search(r"\.add_domain_context\(\*comm_context_arg\(orch, __comm_d1, \w+\)\)", code), code
 
 
 def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
@@ -891,7 +896,7 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
     # Each dispatch site emits one Buffer.tensor line; the handle
     # prefix uniquely identifies the group.
     cont_makes = re.findall(
-        r'(__comm_d\d+)\[\w+\]\.buffers\["([^"]+)"\]\.tensor\(',
+        r'comm_domain_member\(orch, (__comm_d\d+), \w+\)\.buffers\["([^"]+)"\]\.tensor\(',
         code,
     )
     assert cont_makes == [
@@ -900,7 +905,7 @@ def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
     ], (cont_makes, code)
 
     # Each dispatch's explicit ctx scalar follows the same routing.
-    scalars = re.findall(r"\.add_scalar\((__comm_d\d+)\[\w+\]\.device_ctx\)", code)
+    scalars = re.findall(r"\.add_domain_context\(\*comm_context_arg\(orch, (__comm_d\d+), \w+\)\)", code)
     assert scalars == ["__comm_d0", "__comm_d1"], (scalars, code)
 
 
@@ -1064,7 +1069,7 @@ def test_host_allreduce_builtin_codegen_uses_submit_chip_with_callable_key():
     assert "_keep.append(_ta_1)" in generated, generated
     assert "CallConfig()" not in generated, generated
     assert "orch.submit_next_level" not in generated, generated
-    assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
+    assert ".add_scalar(len(__comm_d0.workers))" in generated, generated
     assert ".add_scalar((64))" not in generated, generated
     assert "distributed_collectives" not in generated, generated
     assert "pld_collectives" not in generated, generated
@@ -1250,7 +1255,7 @@ def test_implicit_host_allreduce_builtin_codegen_materializes_signal():
     assert 'buffers["data_buf"]' in generated, generated
     assert 'buffers["signal_buf"]' not in generated, generated
     assert '_submit_chip(orch, callables["builtin.tensor.allreduce__sum__fp32"]' in generated, generated
-    assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
+    assert ".add_scalar(len(__comm_d0.workers))" in generated, generated
     assert "data = data" not in generated, generated
 
     specs = cg.get_builtin_next_level_specs()
@@ -2740,7 +2745,9 @@ def test_scatter_get_groups_both_endpoint_windows_with_urma(tmp_path):
     # The independent MTE signal must not pull the local Scatter window out of the source MR.
     buffers = {
         name: domain
-        for domain, name in re.findall(r'(__comm_d\d+)\[[^\]]+\]\.buffers\["(\w+?)__ssa_v0"\]', code)
+        for domain, name in re.findall(
+            r'comm_domain_member\(orch, (__comm_d\d+), [^)]+\)\.buffers\["(\w+?)__ssa_v0"\]', code
+        )
     }
     assert buffers["src_buf"] == buffers["dst_buf"]
     assert buffers["sig_buf"] != buffers["src_buf"]
@@ -2885,6 +2892,62 @@ def test_materialized_scope_splits_when_buffers_gain_distinct_engines():
     code = _lower(updated)
     assert code.count("with (_domain_provider or orch.allocate_domain)(") == 2
     assert code.count('workspace_engines=("urma",)') == 1
+
+
+def test_parallel_chip_group_rejects_multiple_dispatch_sites():
+    # Group membership is explicit: a loop iteration supplies one card's task.
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[SIZE], pl.FP32]) -> pl.Tensor[[SIZE], pl.FP32]:
+            return data  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            for r in pl.parallel(pld.world_size()):
+                self.chip_orch(data, device=r)
+                self.chip_orch(data, device=r)
+            return data  # type: ignore[return-value]
+
+    with pytest.raises(ValueError, match="exactly one direct CHIP call"):
+        _lower(Prog)
+
+
+def test_domain_layout_metadata_and_cold_reload(tmp_path):
+    @pl.program
+    class LayoutProgram:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip(self, data: pld.DistributedTensor[[64], pl.FP32]) -> pld.DistributedTensor[[64], pl.FP32]:
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host(self) -> pld.DistributedTensor[[64], pl.FP32]:
+            buf = pld.alloc_window_buffer(pld.world_size() * 256)
+            data = pld.window(buf, [64], dtype=pl.FP32)
+            for rank in pl.range(pld.world_size()):
+                self.chip(data, device=rank)
+            return data
+
+    compiled = ir.compile(
+        LayoutProgram,
+        output_dir=str(tmp_path),
+        skip_ptoas=True,
+        distributed_config=DistributedConfig(device_ids=[0, 1]),
+    )
+    (layout,) = compiled.domain_layouts(world_size=4)
+    assert layout.workers == (0, 1, 2, 3)
+    assert layout.window_size == 1024
+    assert layout.buffers[0].logical_nbytes == 1024
+    assert layout.buffers[0].byte_offset == 0
+    restored = DistributedCompiledProgram.from_dir(tmp_path)
+    assert restored.domain_layouts(world_size=4) == compiled.domain_layouts(world_size=4)
+    restored.validate_artifacts()
+    source = tmp_path / "orchestration/host_orch.py"
+    source.write_text(source.read_text() + "\n# modified\n")
+    with pytest.raises(ValueError, match="changed"):
+        restored.validate_artifacts()
 
 
 if __name__ == "__main__":

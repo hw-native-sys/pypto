@@ -9,9 +9,12 @@
 
 """Unit tests for :class:`pypto.runtime.DeviceTensor` construction and metadata."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 import torch
-from pypto.runtime import DeviceTensor, StackedDeviceTensor
+from pypto.runtime import DeviceTensor, RemoteDeviceTensor, StackedDeviceTensor
 
 
 class TestDeviceTensorConstruction:
@@ -207,20 +210,41 @@ class TestStackedDeviceTensorIndexing:
         with pytest.raises(IndexError, match="at most one Ellipsis"):
             _ = s[0, ..., ...]
 
-    def test_partial_tail_slice_rejected(self):
+    def test_partial_tail_slice_preserves_view(self):
         s = StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 2))
-        with pytest.raises(ValueError, match="whole-shard"):
-            _ = s[0, 0:2, 0:5]
+        view = s[0, 0:2, 0:5]
+        assert view.shape == (2, 5)
+        assert view.strides == (5, 1)
+        assert view.data_ptr == s.shards[0].data_ptr
 
     def test_out_of_range_index_raises(self):
         s = StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 2))
         with pytest.raises(IndexError, match="out of range"):
             _ = s[3]
 
-    def test_non_int_leading_index_raises(self):
+    def test_rank_slice_retains_sharded_tensor(self):
         s = StackedDeviceTensor(_shards(3), (3, 4, 5), (0, 1, 2))
-        with pytest.raises(TypeError, match="leading index"):
-            _ = s[0:1]
+        view = s[0:1]
+        assert view.full_shape == (1, 4, 5)
+        assert view.worker_ids == (0,)
+        assert view.shards[0] is s.shards[0]
+
+
+def test_remote_view_requires_device_storage_and_respects_slice_bounds(monkeypatch):
+    device = object()
+    monkeypatch.setitem(
+        sys.modules, "simpler.buffer", SimpleNamespace(AddressSpace=SimpleNamespace(DEVICE=device))
+    )
+    backing = SimpleNamespace(address_space=device, nbytes=64)
+    domain = SimpleNamespace(member=lambda rank: SimpleNamespace(buffers={"payload": backing}))
+    view = RemoteDeviceTensor(domain, 0, "payload", (4,), torch.float32, backing, 48)
+    assert view.nbytes == 16
+    assert not hasattr(view, "data_ptr")
+    with pytest.raises(ValueError, match="misaligned or exceeds"):
+        RemoteDeviceTensor(domain, 0, "payload", (4,), torch.float32, backing, 52)
+    backing.address_space = object()
+    with pytest.raises(ValueError, match="Device-source"):
+        RemoteDeviceTensor(domain, 0, "payload", (4,), torch.float32, backing)
 
 
 if __name__ == "__main__":

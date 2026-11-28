@@ -294,7 +294,9 @@ def test_external_parameter_and_local_scratch_have_separate_bindings():
     assert generated.count("with (_domain_provider or orch.allocate_domain)(") == 1
     assert 'CommBufferSpec(name="storage"' in generated
     assert "__domain_0[0].buffers[__slot_0].tensor(" in generated
-    assert '__comm_d0[0].buffers["storage"].tensor(' in generated
+    assert 'comm_domain_member(orch, __comm_d0, 0).buffers["storage"].tensor(' in generated
+    assert "tensors['.domain_tokens'][__ref][0]" in generated
+    assert "comm_order_tensor(comm_context_arg(orch, __comm_d0, 0))" in generated
 
 
 if __name__ == "__main__":
