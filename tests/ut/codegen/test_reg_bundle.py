@@ -1071,7 +1071,7 @@ def test_bundle_manifest_preserves_both_interfaces_and_effects(tmp_path, monkeyp
         helpers=tuple(bundle.helpers),
         entry_helpers=bundle.entry_helpers,
     )
-    monkeypatch.setattr(pto_backend, "_emit_single_function_output", lambda *args: None)
+    monkeypatch.setattr(pto_backend, "_emit_single_function_output", lambda *args, **kwargs: None)
     result = pto_backend._emit_unit(unit, str(tmp_path), skip_ptoas=True)
     assert result.error is None
     manifest = json.loads(result.files["vpto/register_kernel/manifest.json"])
