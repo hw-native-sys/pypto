@@ -33,14 +33,12 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -58,11 +56,11 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/scalar_offset_facts.h"
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
@@ -73,79 +71,6 @@ namespace {
 
 constexpr const char* kMxBlockedAttr = "mx_tensor_views_blocked";
 constexpr const char* kMxLogicalAttr = "mx_tensor_views_legalized";
-constexpr int kMxProofStepBudget = 256;
-
-struct MxOffsetFacts {
-  std::function<ExprPtr(const VarPtr&)> definition;
-  std::function<bool(const VarPtr&, int64_t, int*)> is_multiple_of;
-  std::function<bool(const VarPtr&, int*)> is_non_negative;
-};
-
-bool IsMxProvableMultipleOf(const ExprPtr& expr, int64_t divisor, const MxOffsetFacts& facts, int* budget) {
-  INTERNAL_CHECK(divisor > 0 && (divisor & (divisor - 1)) == 0)
-      << "Internal error: MX divisibility proofs require a power-of-two divisor, got " << divisor;
-  if (!expr || --*budget < 0) return false;
-
-  if (auto value = As<ConstInt>(expr)) return value->value_ % divisor == 0;
-  if (auto mul = As<Mul>(expr)) {
-    return IsMxProvableMultipleOf(mul->left_, divisor, facts, budget) ||
-           IsMxProvableMultipleOf(mul->right_, divisor, facts, budget);
-  }
-  if (auto add = As<Add>(expr)) {
-    return IsMxProvableMultipleOf(add->left_, divisor, facts, budget) &&
-           IsMxProvableMultipleOf(add->right_, divisor, facts, budget);
-  }
-  if (auto sub = As<Sub>(expr)) {
-    return IsMxProvableMultipleOf(sub->left_, divisor, facts, budget) &&
-           IsMxProvableMultipleOf(sub->right_, divisor, facts, budget);
-  }
-  if (auto floordiv = As<FloorDiv>(expr)) {
-    auto denominator = As<ConstInt>(floordiv->right_);
-    if (!denominator || denominator->value_ <= 0 || (denominator->value_ & (denominator->value_ - 1)) != 0) {
-      return false;
-    }
-    int64_t combined = 0;
-    if (__builtin_mul_overflow(denominator->value_, divisor, &combined)) return false;
-    return IsMxProvableMultipleOf(floordiv->left_, combined, facts, budget);
-  }
-  if (auto var = As<Var>(expr)) {
-    if (facts.is_multiple_of && facts.is_multiple_of(var, divisor, budget)) return true;
-    if (facts.definition) {
-      if (auto definition = facts.definition(var)) {
-        return IsMxProvableMultipleOf(definition, divisor, facts, budget);
-      }
-    }
-  }
-  return false;
-}
-
-bool IsMxProvableNonNegative(const ExprPtr& expr, const MxOffsetFacts& facts, int* budget) {
-  if (!expr || --*budget < 0) return false;
-
-  if (auto value = As<ConstInt>(expr)) return value->value_ >= 0;
-  if (auto mul = As<Mul>(expr)) {
-    return IsMxProvableNonNegative(mul->left_, facts, budget) &&
-           IsMxProvableNonNegative(mul->right_, facts, budget);
-  }
-  if (auto add = As<Add>(expr)) {
-    return IsMxProvableNonNegative(add->left_, facts, budget) &&
-           IsMxProvableNonNegative(add->right_, facts, budget);
-  }
-  if (auto floordiv = As<FloorDiv>(expr)) {
-    auto denominator = As<ConstInt>(floordiv->right_);
-    if (!denominator || denominator->value_ <= 0) return false;
-    return IsMxProvableNonNegative(floordiv->left_, facts, budget);
-  }
-  if (auto var = As<Var>(expr)) {
-    if (facts.is_non_negative && facts.is_non_negative(var, budget)) return true;
-    if (facts.definition) {
-      if (auto definition = facts.definition(var)) {
-        return IsMxProvableNonNegative(definition, facts, budget);
-      }
-    }
-  }
-  return false;
-}
 
 bool IsMxTensorType(const TypePtr& type) {
   auto tensor_type = AsTensorTypeLike(type);
@@ -198,7 +123,7 @@ std::vector<ExprPtr> BlockMxShape(const std::vector<ExprPtr>& shape, TensorLayou
 }
 
 std::vector<ExprPtr> BlockMxOffsets(const std::vector<ExprPtr>& offsets, TensorLayout layout,
-                                    const Span& span, const MxOffsetFacts& facts) {
+                                    const Span& span, const scalar_offset_facts::ScalarOffsetFacts& facts) {
   CHECK_SPAN(IsMxTensorLayout(layout), span)
       << "BlockMxOffsets requires an MX layout, got " << TensorLayoutToString(layout);
   CHECK_SPAN(offsets.size() == 2, span) << "MX layout requires rank-2 offsets, got " << offsets.size();
@@ -217,15 +142,15 @@ std::vector<ExprPtr> BlockMxOffsets(const std::vector<ExprPtr>& offsets, TensorL
           << " axis must be a non-negative multiple of " << divisor << ", got " << value->value_ << ".";
       return std::make_shared<ConstInt>(value->value_ / divisor, DataType::INDEX, span);
     }
-    int divisibility_budget = kMxProofStepBudget;
-    CHECK_SPAN(IsMxProvableMultipleOf(offset, divisor, facts, &divisibility_budget), span)
+    int divisibility_budget = scalar_offset_facts::kScalarOffsetProofStepBudget;
+    CHECK_SPAN(scalar_offset_facts::IsProvableMultipleOf(offset, divisor, facts, &divisibility_budget), span)
         << layout_name << " layout requires the slice offset on the " << axis_name
         << " axis to be a multiple of " << divisor
         << ", and this one cannot be proven to be. Provable forms are a constant, a loop variable whose "
         << "start and step are both multiples, a floor-division with a suitably aligned numerator, and "
         << "sums, differences, or constant multiples built from those. Slice on an aligned boundary.";
-    int sign_budget = kMxProofStepBudget;
-    CHECK_SPAN(IsMxProvableNonNegative(offset, facts, &sign_budget), span)
+    int sign_budget = scalar_offset_facts::kScalarOffsetProofStepBudget;
+    CHECK_SPAN(scalar_offset_facts::IsProvableNonNegative(offset, facts, &sign_budget), span)
         << layout_name << " layout requires the slice offset on the " << axis_name
         << " axis to be non-negative, and this one cannot be proven to be. A negative partition offset "
         << "would otherwise be clamped and silently read the wrong SFractal.";
@@ -281,145 +206,8 @@ TypePtr BlockMxType(const TypePtr& type, const Span& span, bool logical_views) {
   return type;
 }
 
-class MxOffsetFactStore {
- public:
-  explicit MxOffsetFactStore(ProgramPtr program) : program_(std::move(program)) {
-    if (!program_) return;
-    Collector collector(this);
-    collector.VisitProgram(program_);
-  }
-
-  [[nodiscard]] MxOffsetFacts Facts() const {
-    MxOffsetFacts facts;
-    facts.definition = [this](const VarPtr& var) -> ExprPtr {
-      auto it = definitions_.find(var);
-      return it == definitions_.end() ? nullptr : it->second;
-    };
-    facts.is_multiple_of = [this](const VarPtr& var, int64_t divisor, int* budget) {
-      auto loop = loop_bindings_.find(var);
-      if (loop != loop_bindings_.end()) {
-        const auto& [start, step] = loop->second;
-        if (start % divisor == 0 && step % divisor == 0) return true;
-      }
-      auto sources = parameter_sources_.find(var);
-      if (sources == parameter_sources_.end() || sources->second.empty()) return false;
-      auto recursive_facts = Facts();
-      for (const auto& source : sources->second) {
-        if (!IsMxProvableMultipleOf(source, divisor, recursive_facts, budget)) return false;
-      }
-      return true;
-    };
-    facts.is_non_negative = [this](const VarPtr& var, int* budget) {
-      if (non_negative_vars_.count(var) != 0) return true;
-      auto loop = loop_bindings_.find(var);
-      if (loop != loop_bindings_.end()) {
-        const auto& [start, step] = loop->second;
-        if (start >= 0 && step >= 0) return true;
-      }
-      auto sources = parameter_sources_.find(var);
-      if (sources == parameter_sources_.end() || sources->second.empty()) return false;
-      auto recursive_facts = Facts();
-      for (const auto& source : sources->second) {
-        if (!IsMxProvableNonNegative(source, recursive_facts, budget)) return false;
-      }
-      return true;
-    };
-    return facts;
-  }
-
- private:
-  void RecordParamSource(const VarPtr& param, const ExprPtr& source) {
-    if (param && As<ScalarType>(param->GetType())) parameter_sources_[param].push_back(source);
-  }
-
-  void RecordUnknownParamSources(const FunctionPtr& callee) {
-    for (const auto& param : callee->params_) RecordParamSource(param, nullptr);
-  }
-
-  void RecordCall(const OpPtr& op, const std::vector<ExprPtr>& args, bool is_submit) {
-    auto callee_var = As<GlobalVar>(op);
-    if (!callee_var || !program_) return;
-    auto callee = program_->GetFunction(callee_var->name_);
-    if (!callee) return;
-
-    if (!is_submit) {
-      if (args.size() != callee->params_.size()) {
-        RecordUnknownParamSources(callee);
-        return;
-      }
-      for (size_t i = 0; i < args.size(); ++i) RecordParamSource(callee->params_[i], args[i]);
-      return;
-    }
-
-    if (args.size() > callee->params_.size()) {
-      RecordUnknownParamSources(callee);
-      return;
-    }
-    size_t ctx_count = 0;
-    while (ctx_count < callee->params_.size() &&
-           IsA<CommCtxType>(callee->params_[callee->params_.size() - 1 - ctx_count]->GetType())) {
-      ++ctx_count;
-    }
-    if (args.size() < ctx_count) {
-      RecordUnknownParamSources(callee);
-      return;
-    }
-    const size_t prefix_count = args.size() - ctx_count;
-    const size_t gap = callee->params_.size() - args.size();
-    for (size_t i = 0; i < prefix_count; ++i) RecordParamSource(callee->params_[i], args[i]);
-    for (size_t i = prefix_count; i < args.size(); ++i) {
-      RecordParamSource(callee->params_[i + gap], args[i]);
-    }
-  }
-
-  class Collector : public IRVisitor {
-   public:
-    explicit Collector(MxOffsetFactStore* store) : store_(store) {}
-
-   protected:
-    void VisitStmt_(const AssignStmtPtr& op) override {
-      if (op->var_ && As<ScalarType>(op->var_->GetType())) {
-        store_->definitions_.emplace(op->var_, op->value_);
-        auto call = As<Call>(op->value_);
-        if (call && (IsOp(call, "tile.get_block_idx") || IsOp(call, "tile.get_block_num"))) {
-          store_->non_negative_vars_.insert(op->var_);
-        }
-      }
-      IRVisitor::VisitStmt_(op);
-    }
-
-    void VisitStmt_(const ForStmtPtr& op) override {
-      auto start = As<ConstInt>(op->start_);
-      auto step = As<ConstInt>(op->step_);
-      if (op->loop_var_ && start && step) {
-        store_->loop_bindings_.emplace(op->loop_var_, std::make_pair(start->value_, step->value_));
-      }
-      IRVisitor::VisitStmt_(op);
-    }
-
-    void VisitExpr_(const CallPtr& op) override {
-      store_->RecordCall(op->op_, op->args_, /*is_submit=*/false);
-      IRVisitor::VisitExpr_(op);
-    }
-
-    void VisitExpr_(const SubmitPtr& op) override {
-      store_->RecordCall(op->op_, op->args_, /*is_submit=*/true);
-      IRVisitor::VisitExpr_(op);
-    }
-
-   private:
-    MxOffsetFactStore* store_;
-  };
-
-  ProgramPtr program_;
-  std::unordered_map<VarPtr, ExprPtr> definitions_;
-  std::unordered_map<VarPtr, std::pair<int64_t, int64_t>> loop_bindings_;
-  std::unordered_set<VarPtr> non_negative_vars_;
-  std::unordered_map<VarPtr, std::vector<ExprPtr>> parameter_sources_;
-};
-
 ExprPtr BlockMxTupleArg(const ExprPtr& arg, TensorLayout layout, const Span& span, bool is_offsets,
-                        const MxOffsetFacts& facts, bool logical_views) {
+                        const scalar_offset_facts::ScalarOffsetFacts& facts, bool logical_views) {
   auto tuple = As<MakeTuple>(arg);
   INTERNAL_CHECK_SPAN(tuple, span) << "Internal error: tile.load coordinate argument must be a MakeTuple";
   auto blocked = is_offsets ? BlockMxOffsets(tuple->elements_, layout, span, facts)
@@ -430,7 +218,7 @@ ExprPtr BlockMxTupleArg(const ExprPtr& arg, TensorLayout layout, const Span& spa
 
 class BlockMxMutator : public IRMutator {
  public:
-  BlockMxMutator(MxOffsetFacts facts, bool logical_views)
+  BlockMxMutator(scalar_offset_facts::ScalarOffsetFacts facts, bool logical_views)
       : facts_(std::move(facts)), logical_views_(logical_views) {}
 
   void AddSubstitution(const VarPtr& old_var, const VarPtr& new_var) { var_cache_[old_var] = new_var; }
@@ -737,13 +525,14 @@ class BlockMxMutator : public IRMutator {
     return args;
   }
 
-  MxOffsetFacts facts_;
+  scalar_offset_facts::ScalarOffsetFacts facts_;
   bool logical_views_;
   size_t store_index_ = 0;
   std::unordered_map<VarPtr, VarPtr> var_cache_;
 };
 
-FunctionPtr TransformFunction(const FunctionPtr& func, const MxOffsetFacts& facts, bool logical_views) {
+FunctionPtr TransformFunction(const FunctionPtr& func, const scalar_offset_facts::ScalarOffsetFacts& facts,
+                              bool logical_views) {
   const char* stamp = logical_views ? kMxLogicalAttr : kMxBlockedAttr;
   if (func->HasAttr(stamp)) return func;
 
@@ -800,7 +589,7 @@ namespace pass {
 
 static Pass CreateMxScaleTensorViewsPass(bool logical_views) {
   auto pass_func = [logical_views](const ProgramPtr& program) -> ProgramPtr {
-    MxOffsetFactStore fact_store(program);
+    scalar_offset_facts::ScalarOffsetFactStore fact_store(program);
     auto facts = fact_store.Facts();
     bool modified = false;
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;

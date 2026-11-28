@@ -46,8 +46,8 @@ rank-5 SFractal 紧致形式，并改写所有坐标依赖这一物理形式的�
 窗口、别名、stride 物化、验证器与通用 codegen 都只看到同一种规范表示；
 codegen 不再私下重建另一套 MX view。
 
-本 pass 与 `BlockNzTensorViews` 相互独立。MX 与 NZ 是不同 layout，转换和证明
-实现也分别维护。
+MX 与 NZ 分别改写各自的布局，两者都使用 [scalar_offset_facts.h](utils.md#标量偏移量事实)
+提供的标量偏移量证明。
 
 ## 物理形式
 
@@ -117,15 +117,10 @@ MX_A_ZZ [m0, g0] -> [0, m0/16, g0/2, 0, 0]
 MX_B_NN [g0, n0] -> [0, n0/16, g0/2, 0, 0]
 ```
 
-常量必须非负且对齐。符号 offset 只有在本 pass 私有的 MX 证明引擎同时证明
-整除性与非负性后才会被接受。证明引擎支持：
-
-- scalar SSA 定义；
-- 常量、乘法、加法，以及用于整除证明的减法；
-- 正的 2 的幂 floor division，包括 `k0 // 32`；
-- start 与 step 为常量的循环变量；
-- `tile.get_block_idx` 和 `tile.get_block_num` 的非负结果；
-- 经每个 Call 与 Submit 调用点传播的 scalar 参数。
+两个 MX pass 都通过 `ScalarOffsetFactStore` 检查对齐性与非负性。循环起点和步长可以
+是符号表达式。例如，在编排函数中计算的步长 `pl.max(1, pl.min(tasks, 8))` 传入提取的
+内核后仍有已知下界。若循环从零开始，则 `base * 16` 可证明为 16 的非负倍数。
+同一组规则也支持块编号、限幅表达式以及 `k0 // 32` 等整除得到的组偏移量。
 
 callee 参数必须在每一个 caller 中都可证明。调用映射缺失或畸形、递归，以及超出
 256 步有界证明预算的表达式都会被保守拒绝。该上界使 pass 保持 O(N)，且证明失败

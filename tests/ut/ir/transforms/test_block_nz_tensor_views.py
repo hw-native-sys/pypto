@@ -115,7 +115,7 @@ def _nz_param(program: ir.Program) -> ir.TensorType:
 
 
 def _walk(stmt):
-    """Yield every statement in a body, descending into SeqStmts and loop bodies."""
+    """Yield every statement in a body, descending into sequences, loops and branches."""
     if stmt is None:
         return
     if isinstance(stmt, ir.SeqStmts):
@@ -127,6 +127,9 @@ def _walk(stmt):
         yield from _walk(stmt.body)
         return
     yield stmt
+    if isinstance(stmt, ir.IfStmt):
+        yield from _walk(stmt.then_body)
+        yield from _walk(stmt.else_body)
 
 
 def _nz_slices(program: ir.Program) -> list[ir.Call]:
@@ -833,6 +836,172 @@ def test_rejects_a_slice_offset_whose_sign_cannot_be_proven():
     program = _maybe_negative._compile_to_program(tm, sd, cx, dyn, pl)
     with pytest.raises(ValueError, match=r"offset on shape\[-2\] to be non-negative"):
         _run(program)
+
+
+@pytest.mark.parametrize(
+    ("guard", "remainder"), [(True, True), (False, True), (False, False)], ids=["issue3512", "mod", "linear"]
+)
+def test_nz_clamped_stride_across_outlining(guard, remainder):
+    cols = 512 if remainder else 1024
+
+    @pl.jit
+    def grid(
+        left: pl.Tensor[[16, 256], pl.BF16],
+        weight: pl.Tensor[[256, cols], pl.BF16, pl.NZ],
+        output: pl.Out[pl.Tensor[[16, cols], pl.BF16]],
+        tasks: pl.Scalar[pl.INT32],
+        linear: pl.constexpr,
+        guarded: pl.constexpr,
+    ):
+        if linear:
+            # Bound the direct task index to the 16 tiles in this variant.
+            tasks = pl.min(tasks, 16)
+        workers = pl.max(1, pl.min(tasks, 8))
+        for worker in pl.spmd(workers):
+            for base in pl.range(0, tasks, workers):
+                task = base + worker
+                if task < tasks:
+                    if guarded:
+                        col = pl.max(0, (task % 8) * 64)
+                    elif linear:
+                        col = task * 64
+                    else:
+                        col = (task % 8) * 64
+                    a = pl.load(left, [0, 0], [16, 256], target_memory=pl.Mem.Mat)
+                    b = pl.load(weight, [0, col], [256, 64], target_memory=pl.Mem.Mat)
+                    c = pl.matmul(a, b)
+                    output = pl.store(c, [0, col], output)
+        return output
+
+    # Simplify may remove the explicit guard before the runtime stride is outlined.
+    program = grid.specialize(linear=not remainder, guarded=guard)
+    set_backend_type(BackendType.Ascend950)
+    load = _nz_load(_run(program))
+    col_block = _elements(load.args[1])[1]
+    assert isinstance(col_block, ir.FloorDiv) and _const(col_block.right) == 16
+    pto = _emit_pto(program, BackendType.Ascend950)
+    assert "layout<nz>" in pto and "pto.tmatmul" in pto
+
+
+def test_nz_rejects_unconstrained_stride_across_outlining():
+    @pl.jit
+    def grid(
+        weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ],
+        tasks: pl.Scalar[pl.INT32],
+        bad_stride: pl.Scalar[pl.INT32],
+    ):
+        for worker in pl.spmd(8):
+            for base in pl.range(0, tasks, bad_stride):
+                col = ((base + worker) % 8) * 64
+                _ = pl.load(weight, [0, col], [256, 64], target_memory=pl.Mem.Mat)
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _run(grid.specialize())
+
+
+def test_nz_submit_proves_kernel_column_from_caller():
+    @pl.program
+    class Grid:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ], col: pl.Scalar[pl.INT32]):
+            _ = pl.load(weight, [0, col], [256, 64], target_memory=pl.Mem.Mat)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ], task: pl.Scalar[pl.INT32]):
+            col = pl.max(0, pl.min(task, 7)) * 64
+            with pl.manual_scope():
+                _ = pl.submit(self.kernel, weight, col)
+
+    col_block = _elements(_nz_load(_run(Grid)).args[1])[1]
+    assert isinstance(col_block, ir.FloorDiv) and _const(col_block.right) == 16
+
+
+def test_nz_rejects_one_unproven_caller():
+    @pl.program
+    class Grid:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ], col: pl.Scalar[pl.INT32]):
+            _ = pl.load(weight, [0, col], [256, 64], target_memory=pl.Mem.Mat)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ], task: pl.Scalar[pl.INT32]):
+            self.kernel(weight, pl.max(0, task) * 64)
+            self.kernel(weight, task * 64)
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _run(Grid)
+
+
+@pytest.mark.parametrize("reassigned", [False, True], ids=["same-source", "ambiguous-source"])
+def test_nz_repeated_calls_with_the_same_scalar(reassigned):
+    @pl.program
+    class Grid:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ], col: pl.Scalar[pl.INT32]):
+            _ = pl.load(weight, [0, col], [256, 64], target_memory=pl.Mem.Mat)
+
+    kernel = next(iter(Grid.functions.values()))
+    span = kernel.span
+    weight = ir.Var("input", kernel.params[0].type, span)
+    col = ir.Var("col", kernel.params[1].type, span)
+    statements: list[ir.Stmt] = [ir.AssignStmt(col, ir.ConstInt(64, DataType.INT32, span), span)]
+    if reassigned:
+        # Deliberately reuse the Var identity as pre-SSA IR can do.
+        statements.append(ir.AssignStmt(col, ir.ConstInt(1, DataType.INT32, span), span))
+    # Repeated call sites after unrolling all provide the same source. Its
+    # proof should consume the same budget as it would for a single call.
+    for _ in range(300):
+        call = ir.Call(ir.GlobalVar(kernel.name), [weight, col], span)
+        statements.append(ir.EvalStmt(call, span))
+    caller = ir.Function(
+        "main", [weight], [], ir.SeqStmts(statements, span), span, pl.FunctionType.Orchestration
+    )
+    program = ir.Program([kernel, caller], "RepeatedCalls", span)
+    with passes.PassContext([]):
+        if reassigned:
+            with pytest.raises(ValueError, match="multiple of"):
+                passes.block_nz_tensor_views()(program)
+        else:
+            load = _nz_load(passes.block_nz_tensor_views()(program))
+            assert isinstance(_elements(load.args[1])[1], ir.FloorDiv)
+
+
+def test_nz_rejects_offset_rebound_as_if_return_var():
+    @pl.program
+    class Grid:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ], col: pl.Scalar[pl.INT32]):
+            _ = pl.load(weight, [0, col], [256, 64], target_memory=pl.Mem.Mat)
+
+    kernel = next(iter(Grid.functions.values()))
+    weight, col = kernel.params
+    span = kernel.span
+    cond = ir.Var("cond", ir.ScalarType(DataType.BOOL), span)
+    aligned = ir.ConstInt(64, DataType.INT32, span)
+    unaligned = ir.ConstInt(1, DataType.INT32, span)
+    # Reuse the same pre-SSA Var for the assignment, the branch result and the load.
+    branch = ir.IfStmt(cond, ir.YieldStmt([aligned], span), ir.YieldStmt([unaligned], span), [col], span)
+    body = ir.SeqStmts([ir.AssignStmt(col, aligned, span), branch, kernel.body], span)
+    function = ir.Function(kernel.name, [weight, cond], [], body, span, kernel.func_type)
+    with passes.PassContext([]), pytest.raises(ValueError, match="multiple of"):
+        passes.block_nz_tensor_views()(ir.Program([function], "ReboundOffset", span))
+
+
+def test_nz_rejects_recursive_scalar_source():
+    @pl.program
+    class Grid:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, weight: pl.Tensor[[256, 512], pl.BF16, pl.NZ], task: pl.Scalar[pl.INT32]):
+            _ = pl.load(weight, [0, task * 64], [256, 64], target_memory=pl.Mem.Mat)
+
+    # Construct the recursive edge directly so the offset pass itself sees the cycle.
+    kernel = next(iter(Grid.functions.values()))
+    span = kernel.span
+    recursive_call = ir.Call(ir.GlobalVar(kernel.name), kernel.params, span)
+    body = ir.SeqStmts([kernel.body, ir.EvalStmt(recursive_call, span)], span)
+    recursive = ir.Function(kernel.name, kernel.params, [], body, span, kernel.func_type)
+    with passes.PassContext([]), pytest.raises(ValueError, match="non-negative"):
+        passes.block_nz_tensor_views()(ir.Program([recursive], "RecursiveGrid", span))
 
 
 def test_maps_a_split_k_offset_built_from_a_remainder():
@@ -2063,6 +2232,18 @@ def test_rejects_acc_nz_store_with_unknown_column_offset():
     column = ir.Var("column", ir.ScalarType(DataType.INDEX), ir.Span.unknown())
     with pytest.raises(ValueError, match="NZ"):
         passes.block_nz_tensor_views()(_nz_store_program(offsets=(0, column)))
+
+
+@pytest.mark.parametrize("operation", [ir.FloorDiv, ir.FloorMod])
+@pytest.mark.usefixtures("ascend_backend")
+def test_nz_rejects_divisor_that_wraps_in_the_offset_dtype(operation):
+    span = ir.Span.unknown()
+    dtype = DataType.INT8
+    # 256 is positive in the stored int64 literal, but lowers to zero in i8.
+    result = operation(ir.ConstInt(0, dtype, span), ir.ConstInt(256, dtype, span), dtype, span)
+    aligned = ir.Mul(result, ir.ConstInt(8, dtype, span), dtype, span)
+    with passes.PassContext([]), pytest.raises(ValueError, match="non-negative"):
+        passes.block_nz_tensor_views()(_nz_store_program(offsets=(0, aligned)))
 
 
 @pytest.mark.usefixtures("ascend_backend")

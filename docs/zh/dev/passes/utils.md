@@ -112,6 +112,17 @@ auto expr_memrefs = memref_collectors::CollectShapedTypeMemRefs(expr);
 auto used = memref_collectors::CollectUsedBasePtrs(func->body_);
 ```
 
+## 标量偏移量事实
+
+`scalar_offset_facts.h` 在 `pypto::ir::scalar_offset_facts` 命名空间提供
+`ScalarOffsetFactStore`。每次处理输入程序时构造一次。`Facts()` 返回的回调借用该对象，
+可查询标量的唯一定义、循环的符号起点和步长、块编号与块数，以及各 `Call` 和 `Submit`
+调用点去重后的标量实参。匹配 Submit 实参时会跳过末尾通信上下文之前省略的输出参数。
+
+`IsProvableMultipleOf` 检查以 2 的幂为因子的对齐性，`IsProvableNonNegative` 检查
+非负性。两者都会追溯提取函数形参的所有来源，每次证明的所有分支共用 256 个节点的预算。
+重复绑定、未知来源和形参间的循环依赖均无法建立相应的事实。
+
 ## 其他共享工具
 
 | 头文件 | 工具 |

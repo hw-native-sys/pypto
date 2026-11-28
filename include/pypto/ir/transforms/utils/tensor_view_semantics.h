@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -30,6 +29,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/utils/scalar_offset_facts.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir::tensor_view_semantics {
@@ -300,200 +300,10 @@ inline std::vector<ExprPtr> BlockNzShape(const std::vector<ExprPtr>& shape, Data
   return blocked;
 }
 
-/// How an index expression is bound, supplied by the pass that owns the
-/// enclosing function.
-///
-/// A slice offset reaches ``BlockNzOffsets`` as the SSA name it was bound to
-/// (``n0__ssa_v0``), never as the arithmetic that produced it, so without these
-/// facts the only provable offset is a literal constant. Both callbacks are
-/// optional: a default-constructed ``NzOffsetFacts`` proves nothing beyond
-/// constant folding.
-struct NzOffsetFacts {
-  /// The expression an SSA ``Var`` was assigned, or nullptr when unknown.
-  std::function<ExprPtr(const VarPtr&)> definition;
-  /// The ``(start, step)`` of the loop that binds a ``Var`` as its loop
-  /// variable, or ``{nullptr, nullptr}`` when it is not one. Every value the
-  /// variable takes is ``start + i * step``, so the proofs below recurse into
-  /// both — which is what lets a symbolic start, such as a strided loop that
-  /// begins at the block index, carry its facts into the loop. A loop variable
-  /// has no exact structural quotient (nothing in the IR names its trip
-  /// count), so these properties are the only thing that licenses dividing it.
-  std::function<std::pair<ExprPtr, ExprPtr>(const VarPtr&)> loop_range;
-  /// Whether a ``Var`` is bound to an operator whose result cannot be negative
-  /// (the SPMD block index). That is an *operator* fact, which is why the owning
-  /// pass supplies it rather than this header deciding it structurally.
-  std::function<bool(const VarPtr&)> is_non_negative;
-};
-
-/// Node-visit allowance for one ``IsProvableMultipleOf`` walk.
-///
-/// The walk follows SSA definitions, so a diamond-shaped def chain
-/// (``x = y + y``) can be re-entered exponentially. Bounding the visits keeps
-/// the proof O(1) per offset — and the pass O(N) — and exhausting the budget
-/// degrades to a refusal, never to a wrong answer.
-constexpr int kNzDivideStepBudget = 256;
-
-/// Whether every runtime value of ``expr`` is a multiple of ``divisor``.
-///
-/// This only *proves* the property; it deliberately does not build the
-/// quotient. Re-associating the offset arithmetic to divide it symbolically —
-/// rewriting ``nb * 256`` into ``nb * 16`` — is unsound, because IR arithmetic
-/// wraps at its declared width while the rewritten form does not:
-///
-///     x : INT32 = 1 << 24
-///     (x * 256) / 16   ==  0            // x * 256 wraps to 0 in i32
-///     x * (256 / 16)   ==  268435456    // re-associated: no wrap, wrong answer
-///
-/// Widening is not the culprit and matching the original width does not help:
-/// with ``a * b = q * 2^W + r``, the original yields ``r / d`` while any
-/// re-association yields ``r / d + q * 2^(W - log2 d)``. Callers therefore
-/// divide the *result* of the original expression (``FloorDiv(expr, divisor)``),
-/// which evaluates the offset exactly as written and only then divides.
-///
-/// The proof itself survives wraparound because every divisor here is a power
-/// of two and therefore divides ``2^W``: reducing a multiple of ``d`` modulo
-/// ``2^W`` leaves a multiple of ``d``. ``INTERNAL_CHECK`` pins that precondition
-/// rather than leaving it implicit.
-inline bool IsProvableMultipleOf(const ExprPtr& expr, int64_t divisor, const NzOffsetFacts& facts,
-                                 int* budget) {
-  INTERNAL_CHECK(divisor > 0 && (divisor & (divisor - 1)) == 0)
-      << "Internal error: NZ divisibility proofs require a power-of-two divisor (it must divide the "
-         "wraparound modulus to survive fixed-width overflow), got "
-      << divisor;
-  if (!expr || --*budget < 0) return false;
-
-  if (auto const_expr = As<ConstInt>(expr)) return const_expr->value_ % divisor == 0;
-
-  // One divisible factor makes the whole product divisible.
-  if (auto mul = As<Mul>(expr)) {
-    return IsProvableMultipleOf(mul->left_, divisor, facts, budget) ||
-           IsProvableMultipleOf(mul->right_, divisor, facts, budget);
-  }
-
-  if (auto add = As<Add>(expr)) {
-    return IsProvableMultipleOf(add->left_, divisor, facts, budget) &&
-           IsProvableMultipleOf(add->right_, divisor, facts, budget);
-  }
-
-  if (auto sub = As<Sub>(expr)) {
-    return IsProvableMultipleOf(sub->left_, divisor, facts, budget) &&
-           IsProvableMultipleOf(sub->right_, divisor, facts, budget);
-  }
-
-  // Either operand is the result, so both have to qualify. This is how a
-  // ragged last tile names its width -- ``min(extent - o0, TILE)``.
-  if (auto min_expr = As<Min>(expr)) {
-    return IsProvableMultipleOf(min_expr->left_, divisor, facts, budget) &&
-           IsProvableMultipleOf(min_expr->right_, divisor, facts, budget);
-  }
-  if (auto max_expr = As<Max>(expr)) {
-    return IsProvableMultipleOf(max_expr->left_, divisor, facts, budget) &&
-           IsProvableMultipleOf(max_expr->right_, divisor, facts, budget);
-  }
-
-  // ``As<Var>`` deliberately excludes ``IterArg`` (see ir-kind-traits): an
-  // IterArg's value changes every iteration, so neither its initial value nor
-  // any binding recorded for it proves anything about the value this use sees.
-  if (auto var = As<Var>(expr)) {
-    if (facts.loop_range) {
-      auto [start, step] = facts.loop_range(var);
-      if (start && step && IsProvableMultipleOf(start, divisor, facts, budget) &&
-          IsProvableMultipleOf(step, divisor, facts, budget)) {
-        return true;
-      }
-    }
-    if (facts.definition) {
-      if (auto def = facts.definition(var)) {
-        return IsProvableMultipleOf(def, divisor, facts, budget);
-      }
-    }
-  }
-
-  return false;
-}
-
-/// Whether every runtime value of ``expr`` is non-negative.
-///
-/// Divisibility alone does not make a blocked coordinate safe. ``n0 = -16`` is
-/// a perfectly good multiple of 16, and ``FloorDiv(n0, 16)`` is ``-1``; codegen
-/// then clamps a negative ``pto.partition_view`` offset to 0 rather than
-/// failing, so the load silently reads fractal 0 instead of reporting anything.
-/// That is the same silent-wrong-data shape #2543 fixed for row indices. A
-/// literal ``-16`` is already rejected by the constant path, so without this a
-/// negative offset would be caught inline and waved through once bound to a
-/// name.
-///
-/// ``Sub`` is deliberately absent: ``a - b`` is negative whenever ``b > a``,
-/// and nothing here bounds either side. A difference is therefore refused, even
-/// though its divisibility is provable.
-inline bool IsProvableNonNegative(const ExprPtr& expr, const NzOffsetFacts& facts, int* budget) {
-  if (!expr || --*budget < 0) return false;
-
-  if (auto const_expr = As<ConstInt>(expr)) return const_expr->value_ >= 0;
-
-  // Both operands non-negative implies the product and the sum are too. The
-  // converse cases (two negatives multiplying to a positive) are not worth
-  // proving: refusing them costs nothing real.
-  if (auto mul = As<Mul>(expr)) {
-    return IsProvableNonNegative(mul->left_, facts, budget) &&
-           IsProvableNonNegative(mul->right_, facts, budget);
-  }
-
-  if (auto add = As<Add>(expr)) {
-    return IsProvableNonNegative(add->left_, facts, budget) &&
-           IsProvableNonNegative(add->right_, facts, budget);
-  }
-
-  // A remainder of a non-negative dividend by a positive divisor is itself
-  // non-negative. This is what a split-K block index reaches for --
-  // ``(block % OK) * K_SLICE`` names the K half.
-  //
-  // Keep the proof conservative: signed integer and INDEX FloorMod codegen
-  // corrects arith.remsi to floor semantics, but this predicate still requires
-  // a non-negative dividend instead of relying on that stronger result bound.
-  if (auto mod = As<FloorMod>(expr)) {
-    auto divisor = As<ConstInt>(mod->right_);
-    return divisor && divisor->value_ > 0 && IsProvableNonNegative(mod->left_, facts, budget);
-  }
-
-  // A quotient keeps the sign of the dividend when the divisor is positive, so
-  // the companion ``block // OK`` of that same split is non-negative too.
-  if (auto div = As<FloorDiv>(expr)) {
-    auto divisor = As<ConstInt>(div->right_);
-    return divisor && divisor->value_ > 0 && IsProvableNonNegative(div->left_, facts, budget);
-  }
-
-  // A minimum is at least as small as either operand, so both must be
-  // non-negative; a maximum is at least as large, so one is enough.
-  if (auto min_expr = As<Min>(expr)) {
-    return IsProvableNonNegative(min_expr->left_, facts, budget) &&
-           IsProvableNonNegative(min_expr->right_, facts, budget);
-  }
-  if (auto max_expr = As<Max>(expr)) {
-    return IsProvableNonNegative(max_expr->left_, facts, budget) ||
-           IsProvableNonNegative(max_expr->right_, facts, budget);
-  }
-
-  if (auto var = As<Var>(expr)) {
-    if (facts.is_non_negative && facts.is_non_negative(var)) return true;
-    // ``start + i * step`` only stays at or above ``start`` while the step does
-    // not walk downwards, so both have to be non-negative.
-    if (facts.loop_range) {
-      auto [start, step] = facts.loop_range(var);
-      if (start && step && IsProvableNonNegative(start, facts, budget) &&
-          IsProvableNonNegative(step, facts, budget)) {
-        return true;
-      }
-    }
-    if (facts.definition) {
-      if (auto def = facts.definition(var)) {
-        return IsProvableNonNegative(def, facts, budget);
-      }
-    }
-  }
-
-  return false;
-}
+using NzOffsetFacts = scalar_offset_facts::ScalarOffsetFacts;
+constexpr int kNzDivideStepBudget = scalar_offset_facts::kScalarOffsetProofStepBudget;
+using scalar_offset_facts::IsProvableMultipleOf;
+using scalar_offset_facts::IsProvableNonNegative;
 
 /// Block a ``tile.load``'s ``valid_shape`` into NZ coordinates.
 ///

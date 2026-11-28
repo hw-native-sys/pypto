@@ -335,6 +335,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/software_pipeline.cpp
     src/ir/transforms/utils/return_lineage_utils.cpp
     src/ir/transforms/utils/result_alias_utils.cpp
+    src/ir/transforms/utils/scalar_offset_facts.cpp
     src/ir/transforms/utils/scalar_output_hoist.cpp
     src/ir/transforms/utils/scope_outline_utils.cpp
     src/ir/transforms/utils/split_axis_utils.cpp

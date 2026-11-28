@@ -283,6 +283,35 @@ def test_proves_offset_through_outlined_scalar_params():
     assert _const(block_offset.right) == 16
 
 
+@pytest.mark.parametrize("logical_views", [False, True])
+@pytest.mark.parametrize("clamped", [True, False], ids=["clamped", "unproven"])
+def test_mx_runtime_stride_across_outlining(logical_views, clamped):
+    @pl.jit
+    def grid(
+        scales: pl.Tensor[[128, 2], pl.FP8E8M0, pl.MX_A_ZZ], tasks: pl.Scalar[pl.INT32], safe: pl.constexpr
+    ):
+        if safe:
+            workers = pl.max(1, pl.min(tasks, 8))
+        else:
+            workers = tasks
+        for worker in pl.spmd(workers):
+            for base in pl.range(0, tasks, workers):
+                row = ((base + worker) % 8) * 16
+                _ = pl.load(scales, [row, 0], [16, 2], target_memory=pl.Mem.Mat)
+
+    program = grid.specialize(safe=clamped)
+    if not clamped:
+        with pytest.raises(ValueError, match="non-negative"):
+            _run(program, logical_views=logical_views)
+        return
+    (load,) = _mx_loads(_run(program, logical_views=logical_views))
+    if logical_views:
+        assert len(_elements(load.args[1])) == 2
+    else:
+        row_block = _elements(load.args[1])[1]
+        assert isinstance(row_block, ir.FloorDiv) and _const(row_block.right) == 16
+
+
 def test_rejects_param_offset_if_any_caller_is_unaligned():
     @pl.program
     class Input:
