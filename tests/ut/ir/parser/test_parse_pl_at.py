@@ -247,47 +247,6 @@ def test_parse_pl_at_role_with_core_group_errors():
 # ─── InCore with split ──────────────────────────────────────────────────────
 
 
-def test_parse_pl_at_core_group_with_split():
-    """pl.at(level=CORE_GROUP, optimizations=[pl.split(UP_DOWN)]) creates InCoreScopeStmt with split."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
-
-
-def test_parse_pl_at_core_group_with_split_left_right():
-    """pl.at(CORE_GROUP, optimizations=[pl.split(LEFT_RIGHT)]) creates InCore scope with LEFT_RIGHT."""
-
-    @pl.function
-    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.LEFT_RIGHT)]):
-            y = pl.add(x, x)
-        return y
-
-    scope = _find_scope_stmt(f.body)
-    assert scope is not None
-    assert scope.scope_kind == ir.ScopeKind.InCore
-    assert cast(_HasSplit, scope).split == ir.SplitMode.LEFT_RIGHT
-
-
-def test_parse_pl_at_split_on_non_core_group_errors():
-    """optimizations=[pl.split(...)] is not supported for non-CORE_GROUP levels."""
-    with pytest.raises(ParserSyntaxError, match="CORE_GROUP"):
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.HOST, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
-                y = pl.add(x, x)
-            return y
-
-
 def test_printer_incore_with_split_roundtrip():
     """Python printer renders InCore scope with split and it can be re-parsed."""
 

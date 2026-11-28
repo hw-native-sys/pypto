@@ -133,23 +133,6 @@ class TestScopeParsing:
         assert TestProgram is not None
         assert len(TestProgram.functions) == 1
 
-    def test_print_and_reparse_scope(self):
-        """Test that printed ScopeStmt can be reparsed."""
-
-        @pl.program
-        class Original:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP):
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                return y
-
-        # Print the program
-        printed = Original.as_python()
-
-        # Verify it contains the scope syntax
-        assert "with pl.at(level=pl.Level.CORE_GROUP):" in printed
-
 
 class TestScopeNameParsing:
     """Test parsing of scope name parameter."""

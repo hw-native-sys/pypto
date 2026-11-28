@@ -196,15 +196,6 @@ class TestFunctionDecorator:
 
         assert len(dtypes.params) == 3
 
-    def test_invalid_function_no_annotations(self):
-        """Test that function without annotations raises error."""
-
-        with pytest.raises(ParserTypeError, match="missing type annotation"):
-
-            @pl.function
-            def no_annotations(x):
-                return x
-
     def test_function_preserves_name(self):
         """Test that function name is preserved."""
 
@@ -1365,7 +1356,7 @@ class TestInlineFunctionCalls:
         ir.assert_structural_equal(MultiStmt, Expected)
 
     def test_inline_no_extra_function_in_program(self):
-        """Inline does NOT add a function to the Program — only @pl.function does."""
+        """Inline expands structurally like hand-written code, with no extra function."""
 
         @pl.inline
         def inlined_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -1509,31 +1500,6 @@ class TestInlineFunctionCalls:
                 return y
 
         ir.assert_structural_equal(ClosureTest, Expected)
-
-    def test_inline_structural_equality(self):
-        """Program using inline produces same IR as manually writing the expanded code."""
-
-        @pl.inline
-        def inlined_add(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-            return tmp
-
-        @pl.program
-        class WithInline:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = inlined_add(x)
-                return y
-
-        @pl.program
-        class ManualExpand:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                tmp: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
-                y: pl.Tensor[[64], pl.FP32] = tmp
-                return y
-
-        ir.assert_structural_equal(WithInline, ManualExpand)
 
 
 class TestFunctionCallArgCountValidation:

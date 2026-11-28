@@ -397,8 +397,8 @@ class TestCrossCoreTpushTpopCodegen:
             result[func.name] = mlir_code
         return result
 
-    def test_unidirectional_v2c_vector_producer(self):
-        """Test Vector producer generates correct V2C cross-core PTO ops."""
+    def test_unidirectional_v2c(self):
+        """Test both ends of the V2C pipe, including the default slot attributes."""
         codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
         vector_code = codes["vector_producer"]
 
@@ -415,9 +415,6 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.tpush_to_aic" in vector_code, "Should contain pto.tpush_to_aic"
         assert "pto.tadd" in vector_code, "Should contain elementwise add (Vector op)"
 
-    def test_unidirectional_v2c_cube_consumer(self):
-        """Test Cube consumer generates correct V2C cross-core PTO ops."""
-        codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
         cube_code = codes["cube_consumer"]
 
         assert cube_code, "Cube consumer MLIR should not be empty"
@@ -440,6 +437,10 @@ class TestCrossCoreTpushTpopCodegen:
         assert "{split = " in tfree_line, f"tfree should have split attribute: {tfree_line}"
         assert "pto.tmatmul" in cube_code, "Should contain matmul (Cube op)"
 
+        # Hand-authored setup lets PTOAS derive the default depth from dir_mask.
+        assert "slot_num" not in codes["vector_producer"], "Default path must not emit slot_num"
+        assert "slot_num" not in codes["cube_consumer"], "Default path must not emit slot_num"
+
     def test_explicit_slot_num_emitted(self):
         """Explicit slot_num / local_slot_num flow into both AIV and AIC init pipe PTO ops."""
         codes = self._compile_and_generate(CrossCoreExplicitSlotNumProgram)
@@ -457,16 +458,6 @@ class TestCrossCoreTpushTpopCodegen:
         assert "local_slot_num = 4" in cube_code, (
             f"AIC init pipe should carry local_slot_num = 4:\n{cube_code}"
         )
-
-    def test_slot_num_omitted_by_default(self):
-        """A hand-written init pipe without the knobs emits no slot_num/local_slot_num.
-
-        Only hand-authored setup reaches PTOAS's own dir_mask-derived depth: pipes built by
-        ExpandMixedKernel always carry an explicit slot_num.
-        """
-        codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
-        assert "slot_num" not in codes["vector_producer"], "Default path must not emit slot_num"
-        assert "slot_num" not in codes["cube_consumer"], "Default path must not emit slot_num"
 
     def test_tpop_dynamic_valid_shape_operands(self):
         """Dynamic tpop result valid_shape should emit PTOAS frontend operands."""
@@ -1644,8 +1635,8 @@ class TestCrossCoreTpushTpopCodegen:
             "The tpop user must remain after the if-defined scalar dependency"
         )
 
-    def test_bidirectional_vector(self):
-        """Test Vector kernel keeps bidirectional communication on one default pipe."""
+    def test_bidirectional(self):
+        """Test both kernels sharing a bidirectional default pipe."""
         codes = self._compile_and_generate(BidirectionalCrossCorProgram)
         vector_code = codes["vector_bidir"]
 
@@ -1672,9 +1663,6 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.texp" in vector_code, "Should do exp post-processing (Vector op)"
         assert "pto.tfree_from_aic" in vector_code, "Should free C2V slot"
 
-    def test_bidirectional_cube(self):
-        """Test Cube kernel keeps bidirectional communication on one default pipe."""
-        codes = self._compile_and_generate(BidirectionalCrossCorProgram)
         cube_code = codes["cube_bidir"]
 
         assert cube_code, "Cube bidir MLIR should not be empty"
@@ -1699,8 +1687,8 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.tpush_to_aiv" in cube_code, "Should push to AIV"
         assert "pto.tmatmul" in cube_code, "Should do matmul (Cube op)"
 
-    def test_multiple_pipe_vector(self):
-        """Test Vector kernel with two explicit V2C frontend pipes."""
+    def test_multiple_pipes(self):
+        """Test both kernels with two explicit V2C frontend pipes."""
         codes = self._compile_and_generate(MultiPipeSameDirectionCrossCoreProgram)
         vector_code = codes["vector_multi_pipe"]
 
@@ -1726,9 +1714,6 @@ class TestCrossCoreTpushTpopCodegen:
         assert vector_code.count("{id = 0, split = 0}") == 1
         assert vector_code.count("{id = 1, split = 0}") == 1
 
-    def test_multiple_pipe_cube(self):
-        """Test Cube kernel with two explicit V2C frontend pipes."""
-        codes = self._compile_and_generate(MultiPipeSameDirectionCrossCoreProgram)
         cube_code = codes["cube_multi_pipe"]
 
         assert cube_code, "Cube multi-pipe MLIR should not be empty"
@@ -1756,27 +1741,6 @@ class TestCrossCoreTpushTpopCodegen:
         # tpop ids are inherited by tfree even when user code omits tfree id.
         assert cube_code.count("{id = 0, split = 0}") == 2
         assert cube_code.count("{id = 1, split = 0}") == 2
-
-    def test_all_cross_core_pto_ops_covered(self):
-        """Verify all 10 cross-core PTO operations are exercised across both test programs."""
-        unidir_codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
-        bidir_codes = self._compile_and_generate(BidirectionalCrossCorProgram)
-        all_code = "\n".join(unidir_codes.values()) + "\n" + "\n".join(bidir_codes.values())
-
-        expected_ops = [
-            "pto.tpush_to_aiv",
-            "pto.tpush_to_aic",
-            "pto.tpop_from_aic",
-            "pto.tpop_from_aiv",
-            "pto.tfree_from_aic",
-            "pto.tfree_from_aiv",
-            "pto.aic_initialize_pipe",
-            "pto.aiv_initialize_pipe",
-            "pto.reserve_buffer",
-            "pto.import_reserved_buffer",
-        ]
-        for op in expected_ops:
-            assert op in all_code, f"Expected PTO op '{op}' not found in generated MLIR"
 
 
 class TestExpandMixedKernelCodegen:

@@ -2193,17 +2193,18 @@ class TestGenerateArgUnpacking:
         assert "y_conv.u64 = args[1];" in code
         assert names == ["x", "y"]
 
-    def test_dynamic_tensor_extracts_shapes_dims(self):
+    def test_dynamic_tensor_extracts_each_shape_dim_once(self):
         func = _get_dyn_incore_func()
         code, names = _generate_arg_unpacking(func)
         # TH is dim 0 of first tensor a__ssa_v0 — read from a__ssa_v0_tensor->shapes[0]
         assert "a__ssa_v0_tensor->shapes[0]" in code
-        assert "int64_t TH" in code
         # TW is dim 1 of first tensor a__ssa_v0 — read from a__ssa_v0_tensor->shapes[1]
         assert "a__ssa_v0_tensor->shapes[1]" in code
-        assert "int64_t TW" in code
         # dynamic dims appended after tensor params
         assert names == ["a__ssa_v0", "b__ssa_v0", "output__ssa_v0", "TH", "TW"]
+        # TH and TW appear in all three tensors but each is extracted only once.
+        assert code.count("int64_t TH") == 1
+        assert code.count("int64_t TW") == 1
 
     @pytest.mark.parametrize("dtype", [DataType.FP4E2M1X2, DataType.FP4E1M2X2])
     def test_dynamic_fp4_last_dim_preserves_runtime_carriers(self, dtype):
@@ -2217,13 +2218,6 @@ class TestGenerateArgUnpacking:
         code, names = _generate_arg_unpacking(f.get_result())
         assert "int64_t CARRIER_K = static_cast<int64_t>(x_tensor->shapes[1]);" in code
         assert names == ["x", "CARRIER_K"]
-
-    def test_dynamic_tensor_deduplicates_vars(self):
-        # TH and TW each appear in a__ssa_v0, b__ssa_v0, and output__ssa_v0 but should be extracted only once
-        func = _get_dyn_incore_func()
-        code, names = _generate_arg_unpacking(func)
-        assert code.count("int64_t TH") == 1
-        assert code.count("int64_t TW") == 1
 
     def test_dynamic_tensor_expr_dim_extracts_base_var(self):
         # Regression: for shape dim (BATCH * 128), wrapper should recover BATCH
@@ -2436,17 +2430,22 @@ class TestGenerateArgUnpacking:
 class TestGenerateKernelWrapper:
     """Tests for _generate_kernel_wrapper."""
 
-    def test_contains_kernel_entry(self):
+    def test_kernel_wrapper_entry_includes_and_forwarding(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         assert "void kernel_entry(__gm__ int64_t* args)" in wrapper
 
-    def test_contains_includes(self):
-        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         assert "#include <cstdint>" in wrapper
-        assert "#include <pto/pto-inst.hpp>" in wrapper
         assert '#include "tensor.h"' in wrapper
+
+        # Tensors-first: a=arg0, out=arg1, s=arg2
+        assert "my_kernel(a, out, s);" in wrapper
+
+        assert "__global__ AICORE" not in wrapper
+        assert "static __aicore__ void test_func" in wrapper
+
+        count = wrapper.count("#include <pto/pto-inst.hpp>")
+        assert count == 1, f"Expected 1 pto-inst include, found {count}"
 
     def test_clears_atomic_mode_before_argument_unpacking(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
@@ -2463,12 +2462,6 @@ class TestGenerateKernelWrapper:
             "#endif"
         ) in entry
         assert entry.index("set_atomic_none();") < entry.index("// Unpack tensor: a")
-
-    def test_contains_forward_call(self):
-        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
-        # Tensors-first: a=arg0, out=arg1, s=arg2
-        assert "my_kernel(a, out, s);" in wrapper
 
     def test_clears_inherited_hf32_mode_on_device_cube_before_forwarding(self):
         func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
@@ -2620,27 +2613,12 @@ class TestGenerateKernelWrapper:
         assert f"static __aicore__ void pypto_urma_put_async_{suffix}(" in wrapper
         assert f"pypto_urma_transfer_impl<{cpp_type}, true>" in wrapper
 
-    def test_ptoas_code_made_static(self):
-        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
-        assert "__global__ AICORE" not in wrapper
-        assert "static __aicore__ void test_func" in wrapper
-
-    def test_no_duplicate_includes(self):
-        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
-        count = wrapper.count("#include <pto/pto-inst.hpp>")
-        assert count == 1, f"Expected 1 pto-inst include, found {count}"
-
-    def test_dynamic_shape_forward_call_includes_dims(self):
+    def test_dynamic_shape_wrapper_extracts_and_forwards_dims(self):
         func = _get_dyn_incore_func()
         wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         # Forward call must include dynamic dims TH and TW after tensor args.
         assert "dyn_func(a__ssa_v0, b__ssa_v0, output__ssa_v0, TH, TW);" in wrapper
 
-    def test_dynamic_shape_shapes_extraction_in_wrapper(self):
-        func = _get_dyn_incore_func()
-        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
         assert "a__ssa_v0_tensor->shapes[0]" in wrapper
         assert "a__ssa_v0_tensor->shapes[1]" in wrapper
 
@@ -4965,7 +4943,9 @@ def test_wrapper_diagnoses_runtime_payload_capacity(kind, limit, overflow):
 
 @pytest.mark.parametrize("extent", ["B * 2", "2 * B", "B + 2", "2 + B", "B - 2", "32 - B"])
 @pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
-def test_outline_preserves_shape_only_affine_extraction(tmp_path, extent, scope):
+def test_outline_preserves_shape_only_affine_extraction(
+    tmp_path, extent, scope, pass_verification_instruments
+):
     """Shape-only B has no orch scalar binding; the wrapper must recover it."""
     backend.reset_for_testing()
     program = pl.parse(f"""import pypto.language as pl
@@ -4985,12 +4965,23 @@ class Program:
         return out
 """)
     assert isinstance(program, ir.Program)
-    compiled = ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    # Reuse the last pass result from the real compile for the ABI check below,
+    # instead of running the full pipeline again (including roundtrip checks).
+    lowered_programs: list[ir.Program] = []
+
+    def capture_lowered(_pass, intermediate):
+        lowered_programs[:] = [intermediate]
+
+    with passes.PassContext(
+        [*pass_verification_instruments, passes.CallbackInstrument(after_pass=capture_lowered)]
+    ):
+        compiled = ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True, dump_passes=False)
     assert compiled is not None
     orch = (tmp_path / "orchestration" / "main.cpp").read_text()
     assert ".add_scalar(B)" not in orch
     # Check the ABI extractor independently of assembler availability.
-    lowered = _run_default_passes(program)
+    assert lowered_programs
+    lowered = lowered_programs[0]
     kernels = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
     assert len(kernels) == 1
     unpacking, names = _generate_arg_unpacking(kernels[0])
@@ -5018,7 +5009,7 @@ class Program:
 """)
     assert isinstance(program, ir.Program)
     with pytest.raises(ValueError, match="B.*no caller-side runtime binding"):
-        ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+        ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True, dump_passes=False)
 
 
 @pytest.mark.parametrize("binding", ["B: pl.Scalar[pl.INDEX]", "source: pl.Tensor[[B, 16], pl.FP32]"])
@@ -5039,7 +5030,7 @@ class Program:
         return x
 """)
     assert isinstance(program, ir.Program)
-    ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True, dump_passes=False)
     orch = (tmp_path / "orchestration" / "main.cpp").read_text()
     assert ".add_scalar(B)" in orch
     assert "int64_t B =" in orch

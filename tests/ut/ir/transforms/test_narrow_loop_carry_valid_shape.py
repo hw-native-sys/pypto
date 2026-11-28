@@ -723,9 +723,10 @@ def test_vec_carry_is_left_alone():
     assert not [call for call in _calls(after, _TILE_CREATE_OP) if call.kwargs.get("compact")]
 
 
-@pytest.mark.parametrize("kernel", [create_tensor_seeded_acc, create_tensor_seeded_acc_2d])
-def test_default_pipeline_accepts_the_narrowed_carry(kernel):
-    """The whole Default pipeline, verification on, must accept both reproducers.
+def test_default_pipeline_accepts_the_2d_narrowed_carry():
+    """The Default pipeline must also accept the distinct 2D-seeded reproducer.
+
+    The ND seed goes through the same pipeline in the emitted-PTO test below.
 
     Before the repair the ``AccCompactValid`` property verifier rejected them after
     ``InferTileMemorySpace``: every ``tile.matmul_acc`` accumulated a runtime row count
@@ -736,7 +737,7 @@ def test_default_pipeline_accepts_the_narrowed_carry(kernel):
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
     pass_manager = PassManager.get_strategy(OptimizationStrategy.Default)
-    result = pass_manager.run_passes(_jit_program(kernel))
+    result = pass_manager.run_passes(_jit_program(create_tensor_seeded_acc_2d))
 
     assert result is not None
 

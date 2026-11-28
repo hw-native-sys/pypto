@@ -83,55 +83,22 @@ class TestCompileReturnsCompiledProgram:
         compiled = copy_with_padding.compile(torch.zeros(16, 32), torch.empty(16, 32))
         assert isinstance(compiled, CompiledProgram)
 
-    def test_compile_returns_compiled_program_instance(self):
+    def test_compile_cache_lifecycle(self, monkeypatch):
+        """compile() returns a program, preserves it across dispatch, and splits on shape."""
         torch = pytest.importorskip("torch")
+        args32 = tuple(torch.empty(32, 32, dtype=torch.float32) for _ in range(3))
+        args48 = tuple(torch.empty(48, 48, dtype=torch.float32) for _ in range(3))
 
-        a = torch.zeros(128, 128, dtype=torch.float32)
-        b = torch.zeros(128, 128, dtype=torch.float32)
-        c = torch.empty(128, 128, dtype=torch.float32)
-
-        compiled = add_kernel.compile(a, b, c)
-        assert isinstance(compiled, CompiledProgram)
-
-    def test_compile_cache_hit_returns_same_instance(self):
-        """Two compile() calls with the same specialisation must reuse the cache."""
-        torch = pytest.importorskip("torch")
-
-        a = torch.zeros(64, 64, dtype=torch.float32)
-        b = torch.zeros(64, 64, dtype=torch.float32)
-        c = torch.empty(64, 64, dtype=torch.float32)
-
-        first = add_kernel.compile(a, b, c)
-        second = add_kernel.compile(a, b, c)
-        assert first is second
-
-    def test_program_dispatch_then_compile_returns_cached_instance(self, monkeypatch):
-        """Explicit program dispatch preserves the compile() cache after the JIT mode switch."""
-        torch = pytest.importorskip("torch")
-
-        a = torch.zeros(96, 96, dtype=torch.float32)
-        b = torch.zeros(96, 96, dtype=torch.float32)
-        c = torch.empty(96, 96, dtype=torch.float32)
-
-        compiled = add_kernel.compile(a, b, c)
+        first = add_kernel.compile(*args32)
+        assert isinstance(first, CompiledProgram)
+        assert add_kernel.compile(*args32) is first
+        # Explicit program dispatch must not clear the compile() cache.
         monkeypatch.setattr(CompiledProgram, "__call__", lambda self, *_args, **_kwargs: "called")
-        assert compiled(a, b, c) == "called"
-        assert add_kernel.compile(a, b, c) is compiled
-
-    def test_compile_cache_miss_on_different_shape(self):
-        """Different shape causes a new compilation (distinct CompiledProgram)."""
-        torch = pytest.importorskip("torch")
-
-        a_a = torch.zeros(32, 32, dtype=torch.float32)
-        b_a = torch.zeros(32, 32, dtype=torch.float32)
-        c_a = torch.empty(32, 32, dtype=torch.float32)
-        a_b = torch.zeros(48, 48, dtype=torch.float32)
-        b_b = torch.zeros(48, 48, dtype=torch.float32)
-        c_b = torch.empty(48, 48, dtype=torch.float32)
-
-        compiled_a = add_kernel.compile(a_a, b_a, c_a)
-        compiled_b = add_kernel.compile(a_b, b_b, c_b)
-        assert compiled_a is not compiled_b
+        assert first(*args32) == "called"
+        assert add_kernel.compile(*args32) is first
+        second = add_kernel.compile(*args48)
+        assert isinstance(second, CompiledProgram)
+        assert second is not first
 
     def test_compile_keeps_outer_report_instrument(self, tmp_path):
         torch = pytest.importorskip("torch")

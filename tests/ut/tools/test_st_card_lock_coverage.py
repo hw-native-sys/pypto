@@ -70,22 +70,15 @@ def test_the_lock_is_installed_on_the_class_that_opens_a_card(card_lock):
     assert "Worker.close = guarded_close" in source
 
 
-@pytest.mark.parametrize(
-    ("module", "function"),
-    [
-        ("distributed_runner.py", "_execute_distributed"),
-        ("distributed_runner.py", "__init__"),
-        ("worker.py", "__init__"),
-    ],
-)
-def test_every_pypto_worker_path_builds_a_simpler_worker(module, function):
+@pytest.mark.parametrize("module", ["distributed_runner.py", "worker.py"])
+def test_worker_modules_build_a_simpler_worker(module):
     """The wrappers reach a card only through a guarded `Worker`, not around it.
 
     If a path ever opened a device directly -- its own `rtSetDevice`, a second
     runtime class -- it would escape the lock, so pin that they all go through
     one of the known factories.
     """
-    del function  # the assertion is file-level; the id names the path it covers
+    # The assertion is file-level, so run it once for each worker module.
     calls = _calls_in(_RUNTIME / module)
     assert calls & _WORKER_FACTORIES, (
         f"{module} no longer builds its worker through {sorted(_WORKER_FACTORIES)}. "

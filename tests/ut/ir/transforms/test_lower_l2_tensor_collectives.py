@@ -112,7 +112,7 @@ def test_collective_becomes_a_local_builtin_kernel_call():
     assert names == ["stage_step", _KERNEL_NAME, "consume_step"], names
 
 
-def test_synthesized_kernel_signature_and_directions():
+def test_synthesized_kernel_contract():
     """The kernel is an AIV function carrying the five collective operands.
 
     ``core_num`` is the public op's 6th argument but is gated (compile-time 1)
@@ -143,13 +143,7 @@ def test_synthesized_kernel_signature_and_directions():
         ir.ParamDirection.InOut,
     ]
 
-
-def test_synthesized_kernel_carries_builtin_template_attrs():
-    """The kernel names its source indirectly, for the backend to render."""
-    result = passes.lower_l2_tensor_collectives()(_build_program())
-
-    kernel = _get_func(result, _KERNEL_NAME)
-    assert kernel is not None
+    # The backend renders the builtin template, specialized only by dtype.
     attrs = dict(kernel.attrs)
     assert attrs["builtin_template_dir"] == ":pypto.runtime.builtins.collectives.all_to_all_v"
     # dtype is the only substitution either rail makes: both reach the same
@@ -158,27 +152,11 @@ def test_synthesized_kernel_carries_builtin_template_attrs():
     template_vars = dict(item.split("=", 1) for item in attrs["builtin_template_vars"].split(","))
     assert template_vars == {"dtype_cpp": "float"}
 
+    # The builtin reads dense row-major operands, so orchestration codegen must
+    # check each operand's runtime is_contiguous flag before submitting it.
+    assert attrs[REQUIRE_CONTIGUOUS_OPERANDS_ATTR] is True
 
-def test_synthesized_kernel_requires_contiguous_operands():
-    """The kernel opts in to the runtime contiguity check (RFC #2521 O1 criterion 7).
-
-    The builtin kernel reads every operand as dense row-major; this attribute is
-    what makes orchestration codegen check each operand's runtime
-    ``is_contiguous`` flag before the submit.
-    """
-    result = passes.lower_l2_tensor_collectives()(_build_program())
-
-    kernel = _get_func(result, _KERNEL_NAME)
-    assert kernel is not None
-    assert dict(kernel.attrs)[REQUIRE_CONTIGUOUS_OPERANDS_ATTR] is True
-
-
-def test_synthesized_kernel_returns_its_target_parameter():
-    """The kernel returns `target` so the call site stays a plain rebind."""
-    result = passes.lower_l2_tensor_collectives()(_build_program())
-
-    kernel = _get_func(result, _KERNEL_NAME)
-    assert kernel is not None
+    # Return the target parameter so callers can keep a plain rebind.
     assert isinstance(kernel.body, ir.ReturnStmt)
     assert len(kernel.body.value) == 1
     assert kernel.body.value[0] is kernel.params[1]

@@ -805,7 +805,6 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
 @pytest.mark.parametrize("core_type", ["aiv", "aic", "mixed"])
 @pytest.mark.parametrize("dispatch", ["direct", "spmd", "submit"])
-@pytest.mark.parametrize("complete_annotation", [False, True])
 @pytest.mark.parametrize(
     ("returned", "consumed"),
     [
@@ -819,14 +818,13 @@ def test_extern_include_dirs_rejects_missing_directory(tmp_path):
     ],
     ids=["unused-leading", "unused-middle", "unused-trailing", "all-live", "one-live", "subset", "reordered"],
 )
-def test_extern_return_buffer_identities(
-    tmp_path, ascend_backend, core_type, dispatch, returned, consumed, complete_annotation
-):
+def test_extern_return_buffer_identities(tmp_path, ascend_backend, core_type, dispatch, returned, consumed):
     """Unused results must not shift physical buffers at a later task (#3251).
 
-    Generate a real JIT module so each matrix entry exercises specialization,
-    outlining, the complete pass pipeline, and orchestration emission. All
-    output types are equal: only buffer identity can detect this regression.
+    Both annotation forms must specialize to the same IR before outlining,
+    so the full pass pipeline and orchestration emission need only run once
+    for each alias pattern, dispatch kind and core type. Equal output types
+    mean only buffer identity can detect this regression.
     """
     cpp = _write_kernel(tmp_path)
     source_arg = (
@@ -834,10 +832,6 @@ def test_extern_return_buffer_identities(
         if core_type == "mixed"
         else f"source={str(cpp)!r}"
     )
-    # Complete annotations must validate against the explicit return aliases,
-    # not force the signature-only all-output convention onto this declaration.
-    tensor_type = "pl.Tensor[[1, 32], pl.FP32]" if complete_annotation else "pl.Tensor"
-    result_type = tensor_type if len(returned) == 1 else f"tuple[{', '.join(tensor_type for _ in returned)}]"
     producer_call = f"{', '.join(returned)} = producer(first, second, third)"
     consumer_call = f"output = consumer({', '.join(consumed)}, output)"
     if dispatch == "direct":
@@ -851,9 +845,17 @@ def test_extern_return_buffer_identities(
             f'    with pl.spmd(1, name_hint="consume"{deps}):\n'
             f"        {consumer_call}"
         )
-    module_path = tmp_path / "extern_case.py"
-    module_path.write_text(
-        f"""import pypto.language as pl
+
+    def make_entry(complete_annotation):
+        # Complete annotations must validate against the explicit return aliases,
+        # not force the signature-only all-output convention onto this declaration.
+        tensor_type = "pl.Tensor[[1, 32], pl.FP32]" if complete_annotation else "pl.Tensor"
+        result_type = (
+            tensor_type if len(returned) == 1 else f"tuple[{', '.join(tensor_type for _ in returned)}]"
+        )
+        module_path = tmp_path / ("extern_complete.py" if complete_annotation else "extern_generic.py")
+        module_path.write_text(
+            f"""import pypto.language as pl
 
 @pl.jit.extern(core_type={core_type!r}, {source_arg})
 def producer(first: pl.Out[pl.Tensor], second: pl.Out[pl.Tensor], third: pl.Out[pl.Tensor]) -> {result_type}:
@@ -874,10 +876,14 @@ def entry(output: pl.Out[pl.Tensor[[1, 32], pl.FP32]]):
 {calls}
     return output
 """
-    )
-    module = _load_jit_module(module_path)
+        )
+        return _load_jit_module(module_path).entry
+
+    generic = make_entry(False)
+    complete = make_entry(True)
+    ir.assert_structural_equal(generic.specialize(), complete.specialize())
     generated = tmp_path / "generated"
-    module.entry.compile(config=RunConfig(backend_type=ascend_backend, save_kernels_dir=str(generated)))
+    complete.compile(config=RunConfig(backend_type=ascend_backend, save_kernels_dir=str(generated)))
     orchestration = (generated / "orchestration" / "entry.cpp").read_text()
     actual = re.findall(r"params_t\d+\.add_input\((\w+)\);", orchestration)
     assert actual == list(consumed), orchestration
@@ -965,9 +971,8 @@ def entry(first: pl.Out[pl.Tensor], second: pl.Out[pl.Tensor]):
 
 
 @pytest.mark.parametrize("core_type", ["aiv", "aic", "mixed"])
-@pytest.mark.parametrize("keyword_args", [False, True])
 @pytest.mark.parametrize("case", ["reordered", "readonly-scratch", "subset", "repeated"])
-def test_extern_return_metadata_reaches_incore_consumer(tmp_path, core_type, keyword_args, case):
+def test_extern_return_metadata_reaches_incore_consumer(tmp_path, core_type, case):
     """Returned aliases must carry their own shape/dtype into downstream specialization."""
     cpp = _write_kernel(tmp_path)
     source_arg = (
@@ -982,7 +987,6 @@ def test_extern_return_metadata_reaches_incore_consumer(tmp_path, core_type, key
         "repeated": ("second", "second"),
     }[case]
     second_annotation = "pl.Tensor" if case == "readonly-scratch" else "pl.Out[pl.Tensor]"
-    call_args = "second=second, first=first" if keyword_args else "first, second"
     targets = [f"result{i}" for i in range(len(returned))]
     consumers = "\n".join(
         f"    output{i} = consume{i}({target}, output{i})" for i, target in enumerate(targets)
@@ -1000,9 +1004,14 @@ def consume{i}(value: pl.Tensor, output: pl.Out[pl.Tensor]):
         for i in range(len(returned))
     )
     outputs = ", ".join(f"output{i}: pl.Out[pl.Tensor]" for i in range(len(returned)))
-    module_path = tmp_path / "extern_return_metadata.py"
-    module_path.write_text(
-        f"""import pypto.language as pl
+
+    def make_entry(keyword_args):
+        call_args = "second=second, first=first" if keyword_args else "first, second"
+        module_path = tmp_path / (
+            "extern_metadata_keyword.py" if keyword_args else "extern_metadata_positional.py"
+        )
+        module_path.write_text(
+            f"""import pypto.language as pl
 @pl.jit.extern(core_type={core_type!r}, {source_arg})
 def producer(first: pl.Out[pl.Tensor], second: {second_annotation}):
     return {", ".join(returned)}
@@ -1013,14 +1022,19 @@ def entry(first: pl.Out[pl.Tensor], second: {second_annotation}, {outputs}):
 {consumers}
     return {", ".join(f"output{i}" for i in range(len(returned)))}
 """
-    )
-    entry = _load_jit_module(module_path).entry
+        )
+        return _load_jit_module(module_path).entry
+
+    positional = make_entry(False)
+    keyword = make_entry(True)
     first, second = torch.empty(16, 32, dtype=torch.int8), torch.empty(32, 32)
     expected = {"first": ir.TensorType([16, 32], pl.INT8), "second": ir.TensorType([32, 32], pl.FP32)}
     buffers = {"first": first, "second": second}
     args = (first, second, *(torch.empty_like(buffers[name]) for name in returned))
-    program = pl.parse(_specialize(entry, *args))
-    assert isinstance(program, ir.Program)
+    program = positional.specialize(*args)
+    # Positional and reversed keyword calls must bind the same buffers. Once
+    # the resulting IR is equal, compiling both would repeat the pipeline.
+    ir.assert_structural_equal(program, keyword.specialize(*args))
     # A positional Out/InOut guess gives result0 the INT8 scratch buffer's
     # metadata. Equal-shaped outputs would hide this even when buffers are right.
     for i, name in enumerate(returned):
@@ -1028,7 +1042,7 @@ def entry(first: pl.Out[pl.Tensor], second: {second_annotation}, {outputs}):
         assert fn is not None
         ir.assert_structural_equal(fn.params[0].type, expected[name])
         ir.assert_structural_equal(fn.params[0].type, fn.params[1].type)
-    entry.compile(*args, config=RunConfig(save_kernels_dir=str(tmp_path / "generated")))
+    keyword.compile(*args, config=RunConfig(save_kernels_dir=str(tmp_path / "generated")))
 
 
 @pytest.mark.parametrize(

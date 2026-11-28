@@ -62,26 +62,15 @@ def _make_args():
     ]
 
 
-# Module-level memoization keeps the non-trivial full-pipeline lowering to one
-# run. Both tests assert on the same artifact-free post-pass program; lowering
-# again for each test would only duplicate the pass cost.
-_POST_PASS: list = []
-
-
-@pytest.fixture
-def post_pass():
-    """Lower the Qwen3 decode example once; share its post-pass program."""
-    if not _POST_PASS:
-        _POST_PASS.append(qwen3_decode.lower(*_make_args()))
-    return _POST_PASS[0]
-
-
 class TestQwen3JITLowering:
     """End-to-end lowering of the Qwen3 JIT example."""
 
-    def test_qwen3_decode_lower(self, post_pass):
+    def test_qwen3_decode_lower(self):
         """``lower()`` runs the full pipeline; the post-pass IR drops all
         Inline functions and outlines pl.at scopes into InCore-class kernels."""
+        # Do all assertions on one lowered model: pytest-xdist can assign
+        # separate tests to different workers, each repeating this expensive run.
+        post_pass = qwen3_decode.lower(*_make_args())
         names = sorted(f.name for f in post_pass.functions.values())
 
         # No FunctionType.Inline survives the InlineFunctions pass. Note that
@@ -136,6 +125,7 @@ class TestQwen3JITLowering:
         calls = Calls()
         entry = post_pass.get_function("qwen3_decode")
         assert entry is not None
+        assert entry.func_type == ir.FunctionType.Orchestration
         calls.visit_function(entry)
         assert calls.names.count("k_proj") == 2
         assert calls.names.count("gate_proj") == 2
@@ -148,8 +138,9 @@ class TestQwen3JITLowering:
         only the compile-success check would miss a workaround that silently
         reduced stage=4 to stage=2, so also pin the four reduction sites.
         """
-        # Scratch sharing is a Tile IR contract; the default Buffer IR path has
-        # its own storage model and remains covered by the shared fixture.
+
+        # Scratch sharing is a Tile IR contract. Keep whole-model lowering in
+        # this distinct legacy mode; the default model is lowered once above.
         with passes.PassContext([], enable_buffer_ir=False):
             post_pass = qwen3_decode.lower(*_make_args())
         function = post_pass.get_function("rmsnorm")
@@ -176,12 +167,6 @@ class TestQwen3JITLowering:
             "Sequential reductions must retain scratch reuse"
         )
         assert sum(allocation_bytes) <= 188416, "The original schedule must fit the 910 UB budget"
-
-    def test_qwen3_decode_post_pass_has_orchestration_entry(self, post_pass):
-        """The entry function lands as Orchestration after outlining."""
-        entry = post_pass.get_function("qwen3_decode")
-        assert entry is not None
-        assert entry.func_type == ir.FunctionType.Orchestration
 
 
 if __name__ == "__main__":

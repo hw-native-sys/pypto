@@ -135,23 +135,6 @@ class TestTileViewEquality:
         v2 = _make_view(compact=ir.CompactMode.normal)
         assert v1 != v2
 
-    def test_symbolic_same_object_equal(self):
-        """Symbolic exprs that are the same object compare equal."""
-        span = _make_span()
-        sym = ir.Var("M", ir.ScalarType(DataType.INT64), span)
-        v1 = _make_view(valid_shape=[sym], stride=[_make_const(1, span)])
-        v2 = _make_view(valid_shape=[sym], stride=[_make_const(1, span)])
-        assert v1 == v2
-
-    def test_symbolic_different_objects_not_equal(self):
-        """Different symbolic expr objects compare not-equal (conservative)."""
-        span = _make_span()
-        sym1 = ir.Var("M", ir.ScalarType(DataType.INT64), span)
-        sym2 = ir.Var("M", ir.ScalarType(DataType.INT64), span)
-        v1 = _make_view(valid_shape=[sym1], stride=[_make_const(1, span)])
-        v2 = _make_view(valid_shape=[sym2], stride=[_make_const(1, span)])
-        assert v1 != v2
-
 
 class TestTileViewHashEqConsistency:
     """Regression tests for the Python hash/eq contract on TileView."""

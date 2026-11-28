@@ -204,6 +204,12 @@ def test_gm_pipe_injection_handles_submit_launched_group():
 
 
 def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
+    """Preserve split mode and give the injected GM pipe buffer Out direction.
+
+    Expected declares the parameter as pl.Out, so structural equality also
+    checks the parameter direction.
+    """
+
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
@@ -816,117 +822,6 @@ def test_gm_pipe_buffer_per_submit_inside_manual_scope():
                 )
                 out__ssa_v1, _tid = pl.submit(self.group_func, a, out__ssa_v0, gm_pipe_buffer_0)
             return out__ssa_v1
-
-    After = _run_inject(Before)
-    ir.assert_structural_equal(After, Expected)
-
-
-def test_gm_pipe_buffer_param_direction_is_out():
-    """The gm_pipe_buffer parameter must have Out direction.
-
-    Verified structurally by declaring `gm_pipe_buffer: pl.Out[...]` in the
-    Expected functions, which makes assert_structural_equal check the
-    parameter direction.
-    """
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-        def vector_producer(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-        ):
-            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
-            pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
-            tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
-            pl.tpush_to_aic(tile_a, split=0)
-
-        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-        def cube_consumer(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-        ) -> pl.Tensor[[16, 16], pl.FP16]:
-            pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-            pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
-            received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
-            pl.tfree_to_aiv(received)
-            updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
-            return updated
-
-        @pl.function(type=pl.FunctionType.Group)
-        def group_func(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-        ) -> pl.Tensor[[16, 16], pl.FP16]:
-            updated = self.cube_consumer(a, out)
-            self.vector_producer(a, out)
-            return updated
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-        ) -> pl.Tensor[[16, 16], pl.FP16]:
-            updated = self.group_func(a, out)
-            return updated
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
-        def cube_consumer(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
-        ) -> pl.Tensor[[16, 16], pl.FP16]:
-            pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
-            pl.aic_initialize_pipe(pl.const(0, pl.INT32), pipe_buf, dir_mask=2, slot_size=512)
-            received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
-            pl.tfree_to_aiv(received)
-            updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
-            return updated
-
-        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
-        def vector_producer(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
-        ):
-            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
-            pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
-            tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
-            pl.tpush_to_aic(tile_a, split=0)
-
-        @pl.function(type=pl.FunctionType.Group)
-        def group_func(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
-        ) -> pl.Tensor[[16, 16], pl.FP16]:
-            updated = self.cube_consumer(a, out, gm_pipe_buffer)
-            self.vector_producer(a, out, gm_pipe_buffer)
-            return updated
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP16],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-        ) -> pl.Tensor[[16, 16], pl.FP16]:
-            gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
-                [1],
-                dtype=pl.FP32,
-                layout=pl.TensorLayout.ND,
-                manual_dep=True,
-            )
-            updated = self.group_func(a, out, gm_pipe_buffer_0)
-            return updated
 
     After = _run_inject(Before)
     ir.assert_structural_equal(After, Expected)

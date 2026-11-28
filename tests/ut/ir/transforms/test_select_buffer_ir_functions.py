@@ -87,8 +87,11 @@ def _kernel(program: ir.Program) -> ir.Function:
     return function
 
 
+# An omitted enable_buffer_ir argument and explicit True configure the same
+# PassContext. MixedRollout tests both spellings for every planner; the recipe
+# matrix only needs the default Buffer path and the distinct disabled path.
 @pytest.mark.parametrize("planner", _PLANNERS)
-@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("enabled", [None, False], ids=["default", "off"])
 @pytest.mark.parametrize("operation", [*_VECTOR, *_SCALAR, "full"])
 def test_default_recipes_select_emit_roundtrip_and_execute(planner, enabled, operation):
     program = _lower(_program(operation), planner, enabled)
@@ -122,7 +125,7 @@ def test_default_recipes_select_emit_roundtrip_and_execute(planner, enabled, ope
 
 
 @pytest.mark.parametrize("planner", _PLANNERS)
-@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("enabled", [None, False], ids=["default", "off"])
 @pytest.mark.parametrize("rhs_rows", [1, 16])
 def test_elementwise_selection_requires_matching_physical_shapes(planner, enabled, rhs_rows):
     program = pl.parse_program(f"""
@@ -322,7 +325,7 @@ class ControlFlow:
 
 @pytest.mark.parametrize("planner", _PLANNERS)
 @pytest.mark.parametrize("kind", ["for", "while"])
-@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("enabled", [None, False], ids=["default", "off"])
 def test_default_control_flow_preserves_swaps_live_inputs_and_gm_carries(planner, kind, enabled):
     if enabled is False:
         # Selection is disabled before planning. The legacy DSA-RP while path
@@ -332,9 +335,7 @@ def test_default_control_flow_preserves_swaps_live_inputs_and_gm_carries(planner
         assert _kernel(selected).attrs["buffer_ir_selected"] is False
         return
     program = _lower(_control_flow_program(kind), planner, enabled)
-    assert _kernel(program).ir_stage == (
-        ir.FunctionIRStage.Functional if enabled is False else ir.FunctionIRStage.Buffer
-    )
+    assert _kernel(program).ir_stage == ir.FunctionIRStage.Buffer
     namespace = {}
     exec(torch_codegen(program), namespace)  # noqa: S102
     a = torch.linspace(-1, 1, 512).reshape(16, 32)

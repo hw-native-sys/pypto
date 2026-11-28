@@ -48,30 +48,27 @@ def _gather(src_dtype: DataType, idx_dtype: DataType, tmp_dtype: DataType):
 class TestTileGatherIndexTypes:
     """Deducer type-contract tests for the index form."""
 
-    @pytest.mark.parametrize("src_dtype", [DataType.FP16, DataType.FP32, DataType.INT16, DataType.INT32])
-    def test_valid_src_dtype(self, src_dtype):
-        call = _gather(src_dtype, DataType.INT32, DataType.INT32)
-        assert isinstance(call.type, ir.TileType)
-        assert call.type.dtype == src_dtype  # dst dtype follows src
-
     @pytest.mark.parametrize(
         ("src_dtype", "idx_dtype"),
         [
+            (DataType.FP16, DataType.INT32),
             (DataType.FP32, DataType.INT32),
+            (DataType.INT16, DataType.INT32),
             (DataType.INT32, DataType.INT32),
             (DataType.FP16, DataType.INT16),  # INT16 indices require a 16-bit src.
             (DataType.INT16, DataType.INT16),
         ],
     )
-    def test_valid_index_dtype(self, src_dtype, idx_dtype):
+    def test_valid_src_and_index_dtype(self, src_dtype, idx_dtype):
         # INT32 indices are valid with any src; INT16 indices require a 16-bit src.
         call = _gather(src_dtype, idx_dtype, DataType.INT32)
         assert isinstance(call.type, ir.TileType)
         assert call.type.dtype == src_dtype  # dst dtype follows src
 
-    @pytest.mark.parametrize("tmp_dtype", [DataType.FP32, DataType.FP16, DataType.INT32, DataType.INT16])
+    @pytest.mark.parametrize("tmp_dtype", [DataType.FP32, DataType.FP16, DataType.INT16])
     def test_tmp_dtype_unconstrained(self, tmp_dtype):
         # tmp is not read by the A5 index form; any Vec tile dtype is accepted at IR level.
+        # INT32 tmp is covered by test_valid_src_and_index_dtype.
         call = _gather(DataType.FP32, DataType.INT32, tmp_dtype)
         assert isinstance(call.type, ir.TileType)
 

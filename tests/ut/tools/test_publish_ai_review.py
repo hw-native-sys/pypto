@@ -431,7 +431,7 @@ def test_nonpassing_review_never_approves(publisher, review_file, api, verdict, 
         '{"verdict":"pass","summary":"ok","findings":null}',
         '{"verdict":"approved","summary":"ok","findings":[]}',
         '{"verdict":"findings","summary":"ok","findings":[{"title":"bug"}]}',
-        "x" * 60001,
+        pytest.param("x" * 60001, id="oversized-artifact"),
     ],
 )
 def test_invalid_results_cannot_approve(publisher, review_file, api, contents):
@@ -493,7 +493,15 @@ def test_gemini_skips_stale_diff(publisher, api, review_file, change):
     assert not api["posted"] and not api["dismissed"]
 
 
-@pytest.mark.parametrize("response", [b" \n", b"x" * 60001, b"<" * 20000, b"\xff"])
+@pytest.mark.parametrize(
+    "response",
+    [
+        b" \n",
+        pytest.param(b"x" * 60001, id="oversized-feedback"),
+        pytest.param(b"<" * 20000, id="oversized-escaped-feedback"),
+        b"\xff",
+    ],
+)
 def test_gemini_rejects_invalid_feedback(publisher, api, tmp_path, response):
     feedback = tmp_path / "response.txt"
     feedback.write_bytes(response)

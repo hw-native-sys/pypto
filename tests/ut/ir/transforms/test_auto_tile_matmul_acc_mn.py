@@ -13,7 +13,7 @@ The canonical form has two source spellings and both must reach the same
 loop-level M/N tiling: the peeled ``if k0 == 0: matmul else: matmul_acc`` and
 the predicated single ``matmul_acc(acc, lhs, rhs, init_cond=(k0 == 0))``. Each
 peeled kernel below therefore has a predicated twin, and
-``test_peeled_and_predicated_retile_to_structurally_equal_output`` pins that the
+``test_canonical_split_k_tiles_both_m_and_n_with_boundaries`` pins that the
 two retiled programs differ only in that reduction statement.
 """
 
@@ -449,26 +449,20 @@ class _PeelToPredicate(ir.IRMutator):
         return ir.SeqStmts([*prefixes[0], ir.AssignStmt(phi, predicated, stmt.span)], stmt.span)
 
 
-def test_issue_2232_canonical_input_shape():
-    """Pin the real loop/if/matmul_acc shape seen by AutoTileMatmulL0."""
-    before = _lower_to_auto_tile_input(_jit_program(issue_2232_repro))
+def _assert_canonical_input_shape(before, predicated):
+    """Pin the real loop/matmul_acc shape seen by AutoTileMatmulL0."""
     printed = ir.python_print(before)
+    assert "pl.pipeline(" in printed
     assert "pl.tile.matmul_acc(" in printed
-    assert "pl.pipeline(" in printed
-    assert "if " in printed
-
-
-def test_predicated_canonical_input_shape():
-    """The predicated twin reaches AutoTile as one 4-operand MAD, no branch."""
-    before = _lower_to_auto_tile_input(_jit_program(issue_2232_repro_predicated))
-    printed = ir.python_print(before)
-    assert "pl.pipeline(" in printed
-    assert "if " not in printed
-    # acc, lhs, rhs, init_cond -- the predicate is the fourth operand.
-    match = re.search(r"pl\.tile\.matmul_acc\(([^)]*)\)", printed)
-    assert match, printed
-    assert len(match.group(1).split(", ")) == 4, printed
-    assert "== 0)" in printed
+    if not predicated:
+        assert "if " in printed
+    else:
+        assert "if " not in printed
+        # acc, lhs, rhs, init_cond -- the predicate is the fourth operand.
+        match = re.search(r"pl\.tile\.matmul_acc\(([^)]*)\)", printed)
+        assert match, printed
+        assert len(match.group(1).split(", ")) == 4, printed
+        assert "== 0)" in printed
 
 
 def _assert_int8_l0_k_alignment(program):
@@ -497,185 +491,84 @@ def _assert_int8_l0_k_alignment(program):
     assert operands.count > 0
 
 
+def _retile(before):
+    with passes.PassContext([ir.make_roundtrip_instrument()]):
+        return passes.auto_tile_matmul_l0()(before)
+
+
+def _assert_matching_output_grids(peeled, predicated):
+    """Every store carries its Acc shape, valid shape, offsets and output link."""
+    peeled_stores = _collect_store_calls(peeled)
+    predicated_stores = _collect_store_calls(predicated)
+    assert len(peeled_stores) >= 2
+    assert len(peeled_stores) == len(predicated_stores)
+    for peeled_store, predicated_store in zip(peeled_stores, predicated_stores):
+        ir.assert_structural_equal(peeled_store, predicated_store, True)
+
+
 def test_issue_2232_loop_level_mn_tiling():
-    """The full [16, 1152] accumulator disappears. AutoTile clones the source
-    split-K loop once per output-N tile, narrows the GM loads, completes all
-    eight K blocks, and only then stores that output tile."""
-    before = _lower_to_auto_tile_input(_jit_program(issue_2232_repro))
-    with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
+    """Both spellings narrow loads and finish all eight K blocks before storing.
 
-    printed = ir.python_print(after)
-    assert "pl.Tile[[16, 1152], pl.INT32" not in printed
-    assert "[128, 1152], [128, 1152]" not in printed
+    Use the same retiled program for the per-spelling shape and grid parity
+    checks rather than repeating the full lowering prefix and AutoTile.
+    """
     choice = _canonical_choice(M, N, K_TILE, K_TOTAL // K_TILE, int8=True)
     count = _canonical_grid_size(M, N, choice)
-    assert printed.count("in pl.pipeline(8, stage=2") == count
-    assert printed.count("pl.tile.store(") == count
-    assert "n0__ssa_v0 + " in printed
-    # The enclosing-loop fold emits the selected inner-K blocking directly.
-    assert "target_memory=pl.Mem.Right" in printed
-    assert "pl.tile.matmul_acc(" in printed
-    _assert_int8_l0_k_alignment(after)
-
-
-def test_predicated_issue_2232_loop_level_mn_tiling():
-    """The predicated spelling is not a tiling cliff: same grid, same loads,
-    same stores as the peeled spelling, and no branch in the result."""
-    before = _lower_to_auto_tile_input(_jit_program(issue_2232_repro_predicated))
-    with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
-
-    printed = ir.python_print(after)
-    assert "pl.Tile[[16, 1152], pl.INT32" not in printed
-    assert "[128, 1152], [128, 1152]" not in printed
-    choice = _canonical_choice(M, N, K_TILE, K_TOTAL // K_TILE, int8=True)
-    count = _canonical_grid_size(M, N, choice)
-    assert printed.count("in pl.pipeline(8, stage=2") == count
-    assert printed.count("pl.tile.store(") == count
-    assert "n0__ssa_v0 + " in printed
-    assert "target_memory=pl.Mem.Right" in printed
-    assert "pl.tile.matmul_acc(" in printed
-    assert "if " not in printed
-    _assert_int8_l0_k_alignment(after)
+    outputs = []
+    for kernel, predicated in ((issue_2232_repro, False), (issue_2232_repro_predicated, True)):
+        before = _lower_to_auto_tile_input(_jit_program(kernel))
+        _assert_canonical_input_shape(before, predicated)
+        after = _retile(before)
+        outputs.append(after)
+        printed = ir.python_print(after)
+        assert "pl.Tile[[16, 1152], pl.INT32" not in printed
+        assert "[128, 1152], [128, 1152]" not in printed
+        assert printed.count("in pl.pipeline(8, stage=2") == count
+        assert printed.count("pl.tile.store(") == count
+        assert "n0__ssa_v0 + " in printed
+        # The enclosing-loop fold emits the selected inner-K blocking directly.
+        assert "target_memory=pl.Mem.Right" in printed
+        assert "pl.tile.matmul_acc(" in printed
+        if predicated:
+            assert "if " not in printed
+        _assert_int8_l0_k_alignment(after)
+    _assert_matching_output_grids(*outputs)
 
 
 def test_canonical_split_k_tiles_both_m_and_n_with_boundaries():
-    """The enclosing-loop rewrite is a general 2D output grid, not an N-only
-    special case for issue #2232. Every generated output tile reruns both source
-    K blocks; no full-shape Acc or operand load survives."""
-    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_mn))
-    with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
-
-    printed = ir.python_print(after)
-    assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc]" not in printed
-    assert "[272, 128], [272, 128]" not in printed
-    assert "[128, 144], [128, 144]" not in printed
-    source_k_loops = printed.count("in pl.pipeline(2, stage=2")
-    output_stores = printed.count("pl.tile.store(")
-    assert source_k_loops >= 4
-    assert output_stores == source_k_loops
-    assert "[144, 0]" in printed  # M boundary tile
-    assert "[0, 128]" in printed  # N boundary tile
-    # The logical 16-column N tail occupies a legal 32-column INT8 Mat box;
-    # that same physical/logical split propagates through the Acc chain.
-    assert "[128, 32], [128, 16], target_memory=pl.Mem.Mat" in printed
-    assert "pl.Tile[[128, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[128, 16])]" in printed
-    # Stores keep the logical output offsets and rely on valid_shape to avoid
-    # transferring padded columns.
-    assert "pl.tile.store(acc__rv_v2_mn3, [144, 128]" in printed
-
-
-def test_predicated_canonical_split_k_tiles_both_m_and_n_with_boundaries():
-    """The 2D output grid, the box-padded N tail and the store offsets are the
-    same for the predicated spelling."""
-    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_mn_predicated))
-    with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
-
-    printed = ir.python_print(after)
-    assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc]" not in printed
-    assert "[272, 128], [272, 128]" not in printed
-    assert "[128, 144], [128, 144]" not in printed
-    source_k_loops = printed.count("in pl.pipeline(2, stage=2")
-    assert source_k_loops >= 4
-    assert printed.count("pl.tile.store(") == source_k_loops
-    assert "[144, 0]" in printed  # M boundary tile
-    assert "[0, 128]" in printed  # N boundary tile
-    assert "[128, 32], [128, 16], target_memory=pl.Mem.Mat" in printed
-    assert "pl.Tile[[128, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[128, 16])]" in printed
-    assert "pl.tile.store(acc__rv_v2_mn3, [144, 128]" in printed
-    assert "if " not in printed
-
-
-def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
-    """A box-padded 16-column output tail remains logically 16 columns when
-    the selected K schedule is emitted. In particular, the inner loop's Acc
-    initializer must not widen its valid N extent back to the physical 32."""
-    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k))
-    with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
-
-    printed = ir.python_print(after)
-    choice = _canonical_choice(WIDE_M, WIDE_N, COMPOSE_K_TILE, 2, int8=True)
-    count = _canonical_grid_size(WIDE_M, WIDE_N, choice)
-    assert printed.count("in pl.pipeline(2, stage=2") == count
-    assert printed.count("pl.tile.store(") == count
-    assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
-    assert (
-        f"[{choice.k}, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[{choice.k}, 16], "
-        "compact=pl.CompactMode.normal)"
-    ) in printed
-    tail_m = WIDE_M % choice.m or choice.m
-    assert (
-        f"pl.Tile[[{tail_m}, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[{tail_m}, 16])]" in printed
-    )
-    assert "pl.tile.set_validshape(" in printed
-    assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
-
-
-def test_predicated_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
-    """Emitting the selected K schedule in the predicated fold keeps the
-    16-column logical tail, exactly as the peeled spelling does."""
-    before = _lower_to_auto_tile_input(_jit_program(canonical_split_k_n_boundary_retiles_k_predicated))
-    with passes.PassContext([ir.make_roundtrip_instrument()]):
-        after = passes.auto_tile_matmul_l0()(before)
-
-    printed = ir.python_print(after)
-    choice = _canonical_choice(WIDE_M, WIDE_N, COMPOSE_K_TILE, 2, int8=True)
-    count = _canonical_grid_size(WIDE_M, WIDE_N, choice)
-    assert printed.count("in pl.pipeline(2, stage=2") == count
-    assert printed.count("pl.tile.store(") == count
-    assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
-    assert (
-        f"[{choice.k}, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[{choice.k}, 16], "
-        "compact=pl.CompactMode.normal)"
-    ) in printed
-    tail_m = WIDE_M % choice.m or choice.m
-    assert (
-        f"pl.Tile[[{tail_m}, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[{tail_m}, 16])]" in printed
-    )
-    assert "pl.tile.set_validshape(" in printed
-    assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
-
-
-def test_peeled_and_predicated_retile_to_structurally_equal_output():
-    """The two spellings differ only in the reduction statement they carry.
-
-    The retiler clones whichever body it matched, so the peeled output keeps its
-    ``if`` / phi and the predicated output keeps its single 4-operand MAD -- that
-    difference is expected and is asserted below. Everything the fold actually
-    decides (the output grid, each narrowed load's offsets / shape /
-    ``valid_shape``, every Acc initializer, the loop trip counts, the store
-    chain) must be identical, which is what collapsing the peel back into the
-    predicated form and comparing structurally proves.
-
-    ``canonical_split_k_mn`` is the kernel where the comparison can be made
-    whole-body: its selected per-tile K fits one L0 block, so the identical
-    operand extracts in both branches can be hoisted for normalization.
-    Where an inner K pipeline is needed the spellings stop being collapsible
-    -- the peel becomes *two* inner K-loops behind a branch while the predicate
-    becomes one -- and
-    ``test_peeled_and_predicated_emit_the_same_output_grid`` covers the grid
-    parity for those instead.
-    """
+    """Both spellings emit the same M/N grid, including the box-padded N tail."""
     outputs = []
-    for kernel in (canonical_split_k_mn, canonical_split_k_mn_predicated):
-        before = _lower_to_auto_tile_input(_jit_program(kernel))
-        with passes.PassContext([ir.make_roundtrip_instrument()]):
-            outputs.append(passes.auto_tile_matmul_l0()(before))
+    for kernel, predicated in ((canonical_split_k_mn, False), (canonical_split_k_mn_predicated, True)):
+        after = _retile(_lower_to_auto_tile_input(_jit_program(kernel)))
+        outputs.append(after)
+        printed = ir.python_print(after)
+        assert "pl.Tile[[272, 144], pl.INT32, pl.Mem.Acc]" not in printed
+        assert "[272, 128], [272, 128]" not in printed
+        assert "[128, 144], [128, 144]" not in printed
+        source_k_loops = printed.count("in pl.pipeline(2, stage=2")
+        assert source_k_loops >= 4
+        assert printed.count("pl.tile.store(") == source_k_loops
+        assert "[144, 0]" in printed  # M boundary tile
+        assert "[0, 128]" in printed  # N boundary tile
+        # The logical 16-column N tail occupies a legal 32-column INT8 Mat box;
+        # that physical/logical split propagates through the Acc chain.
+        assert "[128, 32], [128, 16], target_memory=pl.Mem.Mat" in printed
+        assert "pl.Tile[[128, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[128, 16])]" in printed
+        assert "pl.tile.store(acc__rv_v2_mn3, [144, 128]" in printed
+        assert ("if " in printed) is (not predicated)
+
     after_peeled, after_predicated = outputs
+    _assert_matching_output_grids(after_peeled, after_predicated)
 
-    assert "if " in ir.python_print(after_peeled)
-    assert "if " not in ir.python_print(after_predicated)
-
+    # The retiler clones whichever body it matched. This shape's per-tile K fits
+    # one L0 block, so folding the peel into a predicated MAD proves that every
+    # other decision (loads, valid shapes, Acc initializers and loop counts) is
+    # structurally equal. Inner-K schedules with distinct branch shapes instead
+    # use only the store-sequence comparison.
     normalized = _PeelToPredicate().visit_program(after_peeled)
     assert "if " not in ir.python_print(normalized)
-    # AutoTile only rewrites the InCore body; the enclosing SPMD / orchestration
-    # wrappers differ solely in the callee name the two kernels were declared
-    # with. Compare bodies and let auto-mapping pair up the (necessarily
-    # distinct) Var objects.
+    # The enclosing SPMD / orchestration wrappers differ only by callee name;
+    # compare InCore bodies and use auto-mapping for distinct Var objects.
     peeled_bodies = _incore_bodies(normalized)
     predicated_bodies = _incore_bodies(after_predicated)
     assert len(peeled_bodies) == 1
@@ -683,35 +576,29 @@ def test_peeled_and_predicated_retile_to_structurally_equal_output():
     ir.assert_structural_equal(peeled_bodies[0], predicated_bodies[0], True)
 
 
-@pytest.mark.parametrize(
-    ("peeled", "predicated"),
-    [
-        (issue_2232_repro, issue_2232_repro_predicated),
-        (canonical_split_k_mn, canonical_split_k_mn_predicated),
-        (canonical_split_k_n_boundary_retiles_k, canonical_split_k_n_boundary_retiles_k_predicated),
-    ],
-)
-def test_peeled_and_predicated_emit_the_same_output_grid(peeled, predicated):
-    """Neither spelling is a tiling cliff: same grid, tile by tile.
-
-    Every ``tile.store`` the fold emits carries the whole per-tile decision --
-    which Acc tile is drained (its physical shape and ``valid_shape`` come from
-    the compared Var's type), at which output offset, and onto which link of the
-    output chain. Comparing the store sequences structurally therefore pins that
-    both spellings picked the same output grid, without requiring the reduction
-    bodies to be collapsible onto each other.
-    """
-    grids = []
-    for kernel in (peeled, predicated):
-        before = _lower_to_auto_tile_input(_jit_program(kernel))
-        with passes.PassContext([ir.make_roundtrip_instrument()]):
-            grids.append(_collect_store_calls(passes.auto_tile_matmul_l0()(before)))
-    peeled_stores, predicated_stores = grids
-
-    assert len(peeled_stores) >= 2
-    assert len(peeled_stores) == len(predicated_stores)
-    for peeled_store, predicated_store in zip(peeled_stores, predicated_stores):
-        ir.assert_structural_equal(peeled_store, predicated_store, True)
+def test_padded_n_boundary_retains_valid_shape_through_inner_k_rewrite():
+    """Both selected inner-K schedules must retain a padded output's logical N=16."""
+    choice = _canonical_choice(WIDE_M, WIDE_N, COMPOSE_K_TILE, 2, int8=True)
+    count = _canonical_grid_size(WIDE_M, WIDE_N, choice)
+    tail_m = WIDE_M % choice.m or choice.m
+    outputs = []
+    for kernel in (canonical_split_k_n_boundary_retiles_k, canonical_split_k_n_boundary_retiles_k_predicated):
+        after = _retile(_lower_to_auto_tile_input(_jit_program(kernel)))
+        outputs.append(after)
+        printed = ir.python_print(after)
+        assert printed.count("in pl.pipeline(2, stage=2") == count
+        assert printed.count("pl.tile.store(") == count
+        assert "[384, 32], [384, 16], target_memory=pl.Mem.Mat" in printed
+        assert (
+            f"[{choice.k}, 32], pl.INT8, pl.Mem.Right, pl.TileView(valid_shape=[{choice.k}, 16], "
+            "compact=pl.CompactMode.normal)"
+        ) in printed
+        assert (
+            f"pl.Tile[[{tail_m}, 32], pl.INT32, pl.Mem.Acc, pl.TileView(valid_shape=[{tail_m}, 16])]"
+        ) in printed
+        assert "pl.tile.set_validshape(" in printed
+        assert "pl.tile.store(acc__rv_v2_mn2, [0, 128]" in printed
+    _assert_matching_output_grids(*outputs)
 
 
 def test_padding_only_output_columns_are_not_grid_work():
@@ -1463,14 +1350,9 @@ class _CanonicalMadOperands(ir.IRVisitor):
         super().visit_call(op)
 
 
-@pytest.mark.parametrize(
-    "planner,dbc",
-    [
-        (passes.MemoryPlanner.PYPTO, False),
-        (passes.MemoryPlanner.PYPTO, True),
-        (passes.MemoryPlanner.DSA_RP, False),
-    ],
-)
+# The stored legacy dbC switch no longer drives AutoTile's automatic pipeline
+# recognizer. Its on/off contract is tested separately in test_auto_tile_matmul_l0.
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
 @pytest.mark.parametrize(
     "M,N,K,R,int8",
     [
@@ -1483,17 +1365,13 @@ class _CanonicalMadOperands(ir.IRVisitor):
         (272, 144, 384, 2, True),  # INT8 boundary: physical N=32, valid N=16.
     ],
 )
-def test_canonical_selected_k_survives_boundaries_and_native_codegen(
-    M, N, K, R, int8, planner, dbc, tmp_path
-):
+def test_canonical_selected_k_survives_boundaries_and_native_codegen(M, N, K, R, int8, planner, tmp_path):
     """Preserve selected K with PyPTO-owned placement, not PTOAS-managed allocation."""
     _backend.reset_for_testing()
     _backend.set_backend_type(BackendType.Ascend910)
     expected = _canonical_choice(M, N, K, R, int8=int8)
     before = _canonical_selected_k_input(M, N, K, R, int8=int8)
-    with passes.PassContext(
-        [ir.make_roundtrip_instrument()], memory_planner=planner, enable_pypto_l0c_double_buffer=dbc
-    ):
+    with passes.PassContext([ir.make_roundtrip_instrument()], memory_planner=planner):
         after = passes.auto_tile_matmul_l0()(before)
         operands = _CanonicalMadOperands()
         operands.visit_program(after)

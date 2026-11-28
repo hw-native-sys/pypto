@@ -26,7 +26,7 @@ from .storage_test_utils import without_call_memrefs
 
 
 def test_allocate_memory_addr_simple():
-    """Simple function: Vec tiles get 32-byte aligned addresses at offsets 0 and 16384."""
+    """Vec tiles get 32-byte aligned offsets 0 and 16384; allocs precede tile ops."""
 
     @pl.program
     class Before:
@@ -68,7 +68,7 @@ def test_allocate_memory_addr_simple():
 
 
 def test_allocate_memory_addr_multiple_tiles():
-    """Three tiles each get their own MemRef at 32-byte aligned offsets 0, 16384, 32768."""
+    """Three distinct allocs/MemRefs at 32-byte aligned offsets 0, 16384, 32768."""
 
     @pl.program
     class Before:
@@ -295,140 +295,6 @@ def test_allocate_memory_addr_dsa_rp_accepts_singleton_return_body():
         after = passes.allocate_memory_addr()(initialized)
 
     ir.assert_structural_equal(after, initialized)
-
-
-def test_allocate_memory_addr_allocs_are_prepended_to_body():
-    """Alloc statements are prepended as direct children of the top-level SeqStmts before tile ops."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            input_a: pl.Tensor[[64, 64], pl.FP32],
-            output: pl.Tensor[[64, 64], pl.FP32],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
-            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
-            return result
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
-            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            # Allocs are prepended before all tile ops.
-            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
-            )
-            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
-                tile_a, tile_a
-            )
-            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                tile_b, [0, 0], output
-            )
-            return result
-
-    After = passes.init_mem_ref()(Before)
-    After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
-
-
-def test_allocate_memory_addr_raw_pointer_uniqueness():
-    """Each unique MemRef gets its own alloc with distinct addresses (no reuse)."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            input_a: pl.Tensor[[64, 64], pl.FP32],
-            output: pl.Tensor[[64, 64], pl.FP32],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
-            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            tile_c: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_b, tile_b)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_c, [0, 0], output)
-            return result
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
-            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            # Three distinct allocs for three distinct MemRefs, at three distinct offsets.
-            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-            mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
-            )
-            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
-                tile_a, tile_a
-            )
-            tile_c: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 32768, 16384), pl.Mem.Vec] = pl.tile.add(
-                tile_b, tile_b
-            )
-            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                tile_c, [0, 0], output
-            )
-            return result
-
-    After = passes.init_mem_ref()(Before)
-    After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
-
-
-def test_allocated_memory_addr_verifier_passes_after_add_alloc():
-    """After init_mem_ref + allocate_memory_addr, non-DDR memrefs have valid (non-negative) addresses."""
-
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            input_a: pl.Tensor[[64, 64], pl.FP32],
-            output: pl.Tensor[[64, 64], pl.FP32],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64], target_memory=pl.Mem.Vec)
-            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
-            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
-            return result
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def main(
-            self,
-            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
-            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            # Non-DDR memrefs are allocated at non-negative byte offsets (0, 16384).
-            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
-            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
-                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec
-            )
-            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 16384, 16384), pl.Mem.Vec] = pl.tile.add(
-                tile_a, tile_a
-            )
-            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
-                tile_b, [0, 0], output
-            )
-            return result
-
-    After = passes.init_mem_ref()(Before)
-    After = passes.allocate_memory_addr()(After)
-    ir.assert_structural_equal(without_call_memrefs(After), without_call_memrefs(Expected))
 
 
 def test_memrefs_before_allocate_have_unallocated_addr():

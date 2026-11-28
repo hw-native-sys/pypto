@@ -843,6 +843,9 @@ class TestMxMatmulCodegen:
         "compile_with_ptoas", [False, pytest.param(True, marks=pytest.mark.ptoas_compile)]
     )
     def test_matmul_mx_acc_ins_equals_outs(self, tmp_path, compile_with_ptoas):
+        if compile_with_ptoas and find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
+
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)
@@ -885,8 +888,6 @@ class TestMxMatmulCodegen:
             # PTOAS #1691: v0.70 rejects the second binding after the first MX
             # consumer. Compile with the installed release so a toolchain bump
             # cannot pass solely on textual IR checks or an unreleased repair.
-            if find_ptoas_binary() is None:
-                pytest.skip("PTOAS is not available")
             cpp = pto_backend._compile_pto_module(mlir, "main", str(tmp_path))
             # Base and accumulating forms use two overloads of TMATMUL_MX.
             assert cpp.count("TMATMUL_MX(") == 2
@@ -982,6 +983,8 @@ class TestMxMatmulCodegen:
         is the form the ``matmul_mx`` family is documented to accept and the only one
         whose Bias staging PTOAS lowers.
         """
+        if compile_with_ptoas and find_ptoas_binary() is None:
+            pytest.skip("PTOAS is not available")
 
         @pl.program
         class Program:

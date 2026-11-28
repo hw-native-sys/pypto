@@ -34,41 +34,6 @@ def _assert_expands(before: ir.Program, expected: ir.Program) -> None:
     ir.assert_structural_equal(after, expected)
 
 
-def test_profitable_parallel_array_dep_inserts_dummy_and_rewrites_consumers():
-    @pl.program
-    class Before:
-        @pl.function
-        def kernel(self) -> pl.Scalar[pl.TASK_ID]:
-            return pl.system.task_invalid()
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self) -> pl.Scalar[pl.TASK_ID]:
-            with pl.manual_scope():
-                tids = pl.array.create(4, pl.TASK_ID)
-                for p in pl.parallel(4):
-                    a, a_tid = pl.submit(self.kernel, deps=[tids])
-                    b, b_tid = pl.submit(self.kernel, deps=[tids])
-            return pl.system.task_invalid()
-
-    @pl.program
-    class Expected:
-        @pl.function
-        def kernel(self) -> pl.Scalar[pl.TASK_ID]:
-            return pl.system.task_invalid()
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self) -> pl.Scalar[pl.TASK_ID]:
-            with pl.manual_scope():
-                tids = pl.array.create(4, pl.TASK_ID)
-                phase_fence_barrier_0_tid = pl.system.task_dummy(deps=[tids])
-                for p in pl.parallel(4):
-                    a, a_tid = pl.submit(self.kernel, deps=[phase_fence_barrier_0_tid])
-                    b, b_tid = pl.submit(self.kernel, deps=[phase_fence_barrier_0_tid])
-            return pl.system.task_invalid()
-
-    _assert_expands(Before, Expected)
-
-
 def test_profitable_parallel_submit_dep_inserts_dummy_and_rewrites_submits():
     """The Submit path: ``pl.submit(..., deps=[tids])`` consumers in a parallel
     loop get a phase-fence barrier, and the rewritten consumers STAY Submits

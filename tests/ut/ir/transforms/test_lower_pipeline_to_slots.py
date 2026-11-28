@@ -240,9 +240,14 @@ class TestGating:
 class TestBinding:
     """The slot geometry written onto the tile's TileType."""
 
-    def test_slot_count_matches_the_stage_count(self):
+    def test_slot_count_pinning_and_load_only_binding(self):
         after = _run_to_slots(SingleLoad, passes.MemoryPlanner.PTOAS)
-        assert _slotted_memrefs(after)["t"].slot_count_ == 2
+        slots = _slotted_memrefs(after)
+        assert slots["t"].slot_count_ == 2
+        # Pin the declaration so InitMemRef treats it as the author's allocation.
+        assert slots["t"].is_pinned_
+        # Only load buffers need per-stage privacy; slotting all compute tiles overflows.
+        assert "e" not in slots
 
     def test_slot_index_is_the_induction_variable_modulo_the_stage_count(self):
         """ptoas matches the index's affine form, so it must be literally ``i % 2``."""
@@ -260,15 +265,6 @@ class TestBinding:
         divisor = index.right
         assert isinstance(divisor, ir.ConstInt), f"the modulus must be a literal, got {divisor}"
         assert divisor.value == 2
-
-    def test_declaration_is_pinned_so_init_memref_treats_it_as_the_authors(self):
-        after = _run_to_slots(SingleLoad, passes.MemoryPlanner.PTOAS)
-        assert _slotted_memrefs(after)["t"].is_pinned_
-
-    def test_compute_tiles_do_not_take_slots(self):
-        """Only load buffers need per-stage privacy; slotting everything overflows."""
-        after = _run_to_slots(SingleLoad, passes.MemoryPlanner.PTOAS)
-        assert "e" not in _slotted_memrefs(after)
 
     def test_load_addressed_through_a_loop_carried_iter_arg_takes_a_slot(self):
         """``off`` is a loop-carried IterArg, so this load reads different data every

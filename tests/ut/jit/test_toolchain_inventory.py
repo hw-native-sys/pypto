@@ -507,6 +507,8 @@ def _fake_ccache(wrapper: Path, **settings: str) -> Path:
 
 
 def test_a_wrapper_at_its_defaults_redirects_nothing(tmp_path):
+    # compiler_check governs cache validity, not which compiler runs, and
+    # it is non-empty by default.
     assert _toolchain._wrapper_redirects(_fake_ccache(tmp_path / "ccache")) == []
 
 
@@ -517,12 +519,6 @@ def test_a_configured_redirect_is_reported_with_its_origin(tmp_path, setting):
     reported = _toolchain._wrapper_redirects(wrapper)
 
     assert reported == [f"{setting}=/somewhere/else from (environment)"]
-
-
-def test_a_setting_that_does_not_redirect_is_ignored(tmp_path):
-    # compiler_check governs the wrapper's own cache validity, not which
-    # compiler runs, and it is non-empty by default.
-    assert _toolchain._wrapper_redirects(_fake_ccache(tmp_path / "ccache")) == []
 
 
 def test_an_unreadable_wrapper_configuration_is_reported(tmp_path):

@@ -4905,19 +4905,14 @@ class TestTileMoveAccAddressInvariant:
     rejects any same-address move instead of masking an upstream mismatch.
     """
 
-    def _generate_mlir(self, program_cls) -> str:
-        """Generate MLIR for all InCore functions, joined by blank lines.
+    def _generate_mlir(self, optimized: ir.Program) -> str:
+        """Generate MLIR for all lowered InCore functions, joined by blank lines.
 
         Programs that lower to split AIC/AIV kernels (e.g. ``split=UP_DOWN``)
         produce multiple InCore functions; the bad acc→acc ``pto.tmov`` may
         appear on the AIC side only.  Codegen each InCore function and
         concatenate their MLIR so regression assertions cover every variant.
         """
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
-
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized = pm.run_passes(program_cls)
         codegen_instance = codegen.PTOCodegen()
         funcs = list(optimized.functions.values())
         assert funcs, "Program has no functions"
@@ -4977,7 +4972,10 @@ class TestTileMoveAccAddressInvariant:
                 vec = pl.move(acc2, target_memory=pl.MemorySpace.Vec)
                 return pl.store(vec, [0, 0], dst)
 
-        mlir = self._generate_mlir(Prog)
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(Prog)
+        mlir = self._generate_mlir(optimized)
         assert not self._has_acc_to_acc_tmov(mlir), (
             f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1310):\n{mlir}"
         )
@@ -5077,7 +5075,7 @@ class TestTileMoveAccAddressInvariant:
             f"got {len(incore)} InCore function(s)"
         )
 
-        mlir = self._generate_mlir(PipelineGateUpProg)
+        mlir = self._generate_mlir(optimized)
         assert not self._has_acc_to_acc_tmov(mlir), (
             f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1352):\n{mlir}"
         )
@@ -7147,10 +7145,15 @@ class TestA5MixedFp8MatmulCodegen:
 
     @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _A5_PAIRS)
     @pytest.mark.parametrize(
-        "form,pto_op", [("base", "pto.tmatmul "), ("acc", "pto.tmatmul.acc"), ("bias", "pto.tmatmul.bias")]
+        "form,pto_op,isa_macro",
+        [
+            ("base", "pto.tmatmul ", "TMATMUL("),
+            ("acc", "pto.tmatmul.acc", "TMATMUL_ACC("),
+            ("bias", "pto.tmatmul.bias", "TMATMUL_BIAS("),
+        ],
     )
     def test_mixed_fp8_operand_dtypes_reach_the_instruction(
-        self, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op
+        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op, isa_macro
     ):
         mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
         line = next(line for line in mlir.splitlines() if pto_op in line)
@@ -7160,20 +7163,11 @@ class TestA5MixedFp8MatmulCodegen:
         assert f"loc=right, dtype={rhs_text}" in line
         assert "loc=acc, dtype=f32" in line
 
-    @pytest.mark.parametrize("lhs_dtype,rhs_dtype,lhs_text,rhs_text", _A5_PAIRS)
-    @pytest.mark.parametrize(
-        "form,isa_macro",
-        [("base", "TMATMUL("), ("acc", "TMATMUL_ACC("), ("bias", "TMATMUL_BIAS(")],
-    )
-    def test_mixed_fp8_matmul_compiles_with_native_ptoas(
-        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, isa_macro
-    ):
-        """The real assembler, not just our own expectation of it, accepts the pair."""
-        mlir = self._generate_mlir(self._matmul_program(lhs_dtype, rhs_dtype, form))
-        if find_ptoas_binary() is None:
-            pytest.skip("PTOAS is not available")
-        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
-        assert isa_macro in cpp
+        # Validate the same MLIR with the real assembler when it is available.
+        # No second lowering is needed, and the IR assertions run without PTOAS.
+        if find_ptoas_binary() is not None:
+            cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+            assert isa_macro in cpp
 
     @pytest.mark.parametrize("form", ["base", "acc", "bias"])
     def test_mixed_fp8_matmul_is_rejected_on_a2a3(self, form):
@@ -7308,7 +7302,7 @@ class TestA5GemvCodegen:
     @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype", "lhs_text", "rhs_text"), _FP8_PAIRS)
     @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)
     def test_fp8_operand_dtypes_reach_the_instruction(
-        self, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op, isa_macro
+        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op, isa_macro
     ):
         mlir = self._generate_mlir(self._gemv_program(lhs_dtype, rhs_dtype, form))
         line = next(line for line in mlir.splitlines() if pto_op in line)
@@ -7318,17 +7312,10 @@ class TestA5GemvCodegen:
         assert f"loc=right, dtype={rhs_text}" in line
         assert "loc=acc, dtype=f32" in line
 
-    @pytest.mark.parametrize(("lhs_dtype", "rhs_dtype", "lhs_text", "rhs_text"), _FP8_PAIRS)
-    @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)
-    def test_fp8_gemv_compiles_with_native_ptoas(
-        self, tmp_path, lhs_dtype, rhs_dtype, lhs_text, rhs_text, form, pto_op, isa_macro
-    ):
-        """The real assembler, not just our own expectation of it, accepts the pair."""
-        mlir = self._generate_mlir(self._gemv_program(lhs_dtype, rhs_dtype, form))
-        if find_ptoas_binary() is None:
-            pytest.skip("PTOAS is not available")
-        cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
-        assert isa_macro in cpp
+        # Reuse the emitted module for the optional native compiler assertion.
+        if find_ptoas_binary() is not None:
+            cpp = pto_backend._compile_pto_module(mlir, "kernel", str(tmp_path))
+            assert isa_macro in cpp
 
     @pytest.mark.parametrize(("dtype", "out_dtype", "dtype_text"), _WIDE_PAIRS)
     @pytest.mark.parametrize(("form", "pto_op", "isa_macro"), _FORMS)

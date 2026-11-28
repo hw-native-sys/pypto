@@ -111,16 +111,11 @@ def test_alloc_tensor_rollback_on_copy_failure():
     assert h.live == {}
 
 
-def test_alloc_tensor_tracks_in_owned_set():
+def test_tensor_allocation_tracks_then_free_untracks():
     h = FakeHandle()
     t = h.alloc_tensor((4,), torch.float32)
     # Tracking is keyed by (worker_id, data_ptr); default worker_id is 0.
     assert (0, t.data_ptr) in h._owned_tensors
-
-
-def test_free_tensor_untracks_and_frees():
-    h = FakeHandle()
-    t = h.alloc_tensor((4,), torch.float32)
     h.free_tensor(t)
     assert (0, t.data_ptr) not in h._owned_tensors
     assert h.freed == [t.data_ptr]
@@ -169,13 +164,6 @@ def test_prepare_init_override_is_honored():
     init = torch.ones(4, dtype=torch.float32)
     h.alloc_tensor((4,), torch.float32, init=init)
     assert calls == [init]  # override invoked; no defensive copy made
-
-
-def test_free_tensor_forwards_data_ptr():
-    h = FakeHandle()
-    t = h.alloc_tensor((4,), torch.float32)
-    h.free_tensor(t)
-    assert h.freed == [t.data_ptr]
 
 
 def test_nonzero_worker_id_allocates_tracks_and_frees_against_that_worker():

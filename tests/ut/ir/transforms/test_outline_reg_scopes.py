@@ -149,8 +149,9 @@ def test_unused_store_result_still_calls_void_helper():
 
 
 def test_pipeline_places_call_on_aiv_and_reuses_return_storage():
-    with passes.PassContext([]):
-        result = PassManager.get_strategy().run_passes(program(COPY))
+    # Keep the normal UT verification context: the helper boundary must be
+    # verifiable as well as correct in storage planning and code generation.
+    result = PassManager.get_strategy().run_passes(program(COPY))
     caller = result.get_function("kernel")
     assert caller is not None
     assert caller.func_type == ir.FunctionType.AIV
@@ -542,11 +543,6 @@ def test_helper_call_cannot_run_on_aic():
     invalid = ir.Program([aic, *helpers(outlined)], "InvalidPlacement", outlined.span)
     with pytest.raises(ValueError, match="VF calls require"):
         passes.outline_reg_scopes()(invalid)
-
-
-def test_pipeline_keeps_verifiable_helper_boundaries():
-    result = PassManager.get_strategy().run_passes(program(COPY))
-    assert len(helpers(result)) == 1
 
 
 def test_earlier_store_result_survives_later_capture_rebinding():

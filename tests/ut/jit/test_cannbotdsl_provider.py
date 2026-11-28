@@ -2135,11 +2135,8 @@ int main() {
 
 
 @pytest.mark.parametrize("core_type", ["aic", "aiv", "mixed"])
-@pytest.mark.parametrize("bad_launch", ["none", "blocks", "sync", "null"])
 @pytest.mark.parametrize("reuse_ids", [False, True])
-def test_submitter_calls_tmr_with_checked_single_block_bindings(
-    compiler, tmp_path, bad_launch, core_type, reuse_ids
-):
+def test_submitter_calls_tmr_with_checked_single_block_bindings(compiler, tmp_path, core_type, reuse_ids):
     from pypto.backend.cannbotdsl_runtime import build_submitter  # noqa: PLC0415
 
     _aiv_runtime_manifest(compiler, core_type)
@@ -2160,12 +2157,8 @@ def test_submitter_calls_tmr_with_checked_single_block_bindings(
         else "-1"
     )
     expected_aiv1 = expected_aiv if core_type == "mixed" else "-1"
-    invalid_launch = {
-        "none": "",
-        "blocks": "bindings[2]->launch_spec.set_block_num(2);",
-        "sync": "bindings[2]->launch_spec.set_require_sync_start(true);",
-        "null": "bindings[2] = nullptr;",
-    }[bad_launch]
+    # The launch requests differ only in runtime arguments, not the generated
+    # native submitter. Exercise all four with one host compiler invocation.
     body = f"""
     static unsigned dispatches = 0;
     RuntimeOps ops{{}};
@@ -2183,13 +2176,23 @@ def test_submitter_calls_tmr_with_checked_single_block_bindings(
     }};
     RuntimeContext runtime{{&ops, ScopeMode::AUTO}};
     test_runtime = &runtime;
-    if ({str(bad_launch != "none").lower()}) {{
-        {invalid_launch}
-        try {{ {artifact.symbol}(bindings); return 1; }} catch (const char*) {{}}
-        return dispatches == 0 ? 0 : 2;
-    }}
+    auto reject = [&]() {{
+        try {{ {artifact.symbol}(bindings); }} catch (const char*) {{ return dispatches == 0; }}
+        return false;
+    }};
+    auto* original = bindings[2];
+    const auto original_launch = original->launch_spec;
+    original->launch_spec.set_block_num(2);
+    if (!reject()) return 1;
+    original->launch_spec = original_launch;
+    original->launch_spec.set_require_sync_start(true);
+    if (!reject()) return 2;
+    original->launch_spec = original_launch;
+    bindings[2] = nullptr;
+    if (!reject()) return 3;
+    bindings[2] = original;
     auto ids = {artifact.symbol}(bindings);
-    return dispatches == 3 && ids[2] == TaskId::make(0, 102) ? 0 : 3;
+    return dispatches == 3 && ids[2] == TaskId::make(0, 102) ? 0 : 4;
 """
     _run_ordered_submitter(
         artifact,

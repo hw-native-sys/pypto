@@ -284,7 +284,6 @@ class TestOrchestration:
         result = _generate_orch_result(ConfigProgram)
 
         assert "kernel_add" in {r.code_name for r in result.kernel_registrations}
-        assert "kernel_add" in {r.code_name for r in result.kernel_registrations}
 
         # The kernel's ArgDirection signature is exported so kernel_config.py can
         # build a non-empty CoreCallable signature (issue #1458 — required for
@@ -1659,42 +1658,8 @@ class TestOrchestrationOutputDeclaration:
                 return d
 
         result = _generate_orch_result(GoodProgram)
-        # a, b are read-only inputs; d is the written output.
-        assert list(result.orchestration_signature) == ["IN", "IN", "OUT"]
-
-    def test_read_only_input_not_flagged(self) -> None:
-        # A read-only param is fine as plain pl.Tensor even when consumed by a
-        # kernel — only Out/InOut kernel args trigger the write check.
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
-
-        @pl.program
-        class ReadOnlyProgram:
-            @pl.function(type=pl.FunctionType.AIV)
-            def kernel_add(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                b: pl.Tensor[[16, 16], pl.FP32],
-                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
-                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
-                return out
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orch_ro(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                b: pl.Tensor[[16, 16], pl.FP32],
-                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                d = self.kernel_add(a, b, d)
-                return d
-
-        # No exception: a, b (plain pl.Tensor, only read) are not flagged.
-        result = _generate_orch_result(ReadOnlyProgram)
+        # a, b are read-only inputs (plain pl.Tensor); only the written
+        # kernel argument d must be declared Out/InOut.
         assert list(result.orchestration_signature) == ["IN", "IN", "OUT"]
 
 

@@ -188,17 +188,5 @@ def test_outline_incore_works_with_normal_program():
     assert After is not None
 
 
-def test_scope_outliner_ignores_hierarchy_kind():
-    """ScopeOutliner (used by OutlineIncoreScopes) only targets its configured
-    ScopeKind and naturally ignores Hierarchy scopes via the ScopeKind check."""
-    # The ScopeOutliner matches on target_scope_kind_ (InCore or Cluster).
-    # ScopeKind::Hierarchy (value 3) != InCore (0) != Cluster (2), so
-    # the outliner's VisitStmt_ will skip it via: if (scope_kind_ != target_) return.
-    # We verify this property at the enum level since we can't inject a Hierarchy
-    # scope via the DSL parser yet (pl.at() parsing is Step 04).
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.InCore
-    assert ir.ScopeKind.Hierarchy != ir.ScopeKind.Cluster
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -332,7 +332,10 @@ class TestAutoVerificationPipeline:
         yield
 
     def test_valid_program_passes_verification_no_context(self):
-        """A valid program passes verification (no PassContext)."""
+        """A valid program passes verification without a PassContext.
+
+        Both passes produce the TypeChecked property.
+        """
         assert passes.PassContext.current() is None
         pipeline = passes.PassPipeline()
         pipeline.add_pass(passes.convert_to_ssa())
@@ -362,21 +365,6 @@ class TestAutoVerificationPipeline:
             program = _make_ssa_violating_program()
             result = pipeline.run(program)
             assert result is not None
-
-    def test_full_pipeline_skips_already_verified_properties(self):
-        """TypeChecked is produced by both ConvertToSSA and FlattenCallExpr,
-        but already-verified properties are not re-checked."""
-        assert passes.PassContext.current() is None
-
-        pipeline = passes.PassPipeline()
-        pipeline.add_pass(passes.convert_to_ssa())
-        pipeline.add_pass(passes.flatten_call_expr())
-
-        program = _make_non_ssa_program()
-        # Should succeed — TypeChecked verified after ConvertToSSA,
-        # not re-verified after FlattenCallExpr
-        result = pipeline.run(program)
-        assert result is not None
 
 
 class TestVerifyProperties:
@@ -460,8 +448,8 @@ def _make_unroll_accumulator_program():
 class TestRoundtripInstrument:
     """Test complete-program checks and RoundtripInstrument error reporting."""
 
-    def test_parse_failure_no_ir_dump(self):
-        """RoundtripInstrument error does not include full IR dump when parse fails."""
+    def test_parse_failure_reports_pass_without_ir_dump(self):
+        """RoundtripInstrument reports the pass and parse error without a full IR dump."""
         from unittest import mock  # noqa: PLC0415
 
         from pypto.ir.instruments import make_roundtrip_instrument  # noqa: PLC0415
@@ -478,23 +466,6 @@ class TestRoundtripInstrument:
 
         assert "--- Printed IR ---" not in str(exc_info.value)
         assert "mock parse error" in str(exc_info.value)
-
-    def test_parse_failure_includes_pass_name(self):
-        """RoundtripInstrument error includes the name of the failing pass."""
-        from unittest import mock  # noqa: PLC0415
-
-        from pypto.ir.instruments import make_roundtrip_instrument  # noqa: PLC0415
-
-        instrument = make_roundtrip_instrument()
-
-        with mock.patch(
-            "pypto.language.parser.text_parser.parse",
-            side_effect=RuntimeError("mock parse error"),
-        ):
-            with passes.PassContext([instrument]):
-                with pytest.raises(RuntimeError) as exc_info:
-                    passes.convert_to_ssa()(_make_non_ssa_program())
-
         assert "ConvertToSSA" in str(exc_info.value)
 
     def test_unroll_ssa_checks_complete_text_roundtrip(self):

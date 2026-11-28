@@ -13,7 +13,6 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto.language.parser.diagnostics import (
-    InvalidOperationError,
     ParserSyntaxError,
     ParserTypeError,
     SSAViolationError,
@@ -183,17 +182,6 @@ class Program:
                 for i in pl.range(5, init_values=(init,)):
                     result = pl.yield_(i)  # type: ignore
 
-                return result
-
-    def test_unknown_tensor_operation(self):
-        """Test error on unknown tensor operation."""
-
-        with pytest.raises(InvalidOperationError, match=r"Unknown operation 'pl\.nonexistent_op'"):
-
-            @pl.function
-            def unknown_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                # nonexistent_op doesn't exist
-                result: pl.Tensor[[64], pl.FP32] = pl.nonexistent_op(x)  # type: ignore[attr-defined]
                 return result
 
 

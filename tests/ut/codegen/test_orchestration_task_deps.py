@@ -1115,9 +1115,10 @@ def test_spmd_submit_group_emits_mixed_kernels_and_launch_spec():
     assert "params_t0.launch_spec.set_require_sync_start(true);" in code, code
 
 
-def test_plain_submit_emits_no_launch_spec():
-    """Regression: a plain ``pl.submit`` (no SPMD launch spec) must not emit
-    any launch_spec calls — the spmd_submit path is fully opt-in.
+def test_plain_submit_emits_no_optional_launch_hints():
+    """A plain submit emits neither SPMD launch spec nor early-resolve hint.
+
+    Both features are opt-in.
     """
 
     @pl.program
@@ -1140,6 +1141,7 @@ def test_plain_submit_emits_no_launch_spec():
 
     code = _generate_orch_full_pipeline(P)
     assert "launch_spec" not in code, code
+    assert "set_allow_early_resolve" not in code, code
 
 
 def test_submit_allow_early_resolve_emits_hint():
@@ -1210,33 +1212,6 @@ def test_submit_async_transfer_allow_early_resolve_emits_hint():
     code = _generate_orch_full_pipeline(P, allow_relaxed_verification=True)
     assert "params_t0.set_allow_early_resolve(true);" in code, code
     assert code.count("set_allow_early_resolve(true)") == 1, code
-
-
-def test_plain_submit_emits_no_allow_early_resolve():
-    """Regression: a plain ``pl.submit`` (no hint) must not emit any
-    ``set_allow_early_resolve`` call — the feature is fully opt-in.
-    """
-
-    @pl.program
-    class P:
-        @pl.function(type=pl.FunctionType.InCore)
-        def k(
-            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
-        ) -> pl.Tensor[[128], pl.FP32]:
-            t = pl.load(x, [0], [128])
-            out = pl.store(t, [0], out)
-            return out
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
-        ) -> pl.Tensor[[128], pl.FP32]:
-            with pl.manual_scope():
-                out, _ = pl.submit(self.k, x, out)
-            return out
-
-    code = _generate_orch_full_pipeline(P)
-    assert "set_allow_early_resolve" not in code, code
 
 
 def test_submit_timing_slot_emits_device_marker():

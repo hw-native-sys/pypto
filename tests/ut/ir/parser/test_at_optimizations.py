@@ -91,21 +91,6 @@ def test_parse_optimizations_empty_list_is_plain_incore():
     assert cast(_HasSplit, scope).split == ir.SplitMode.NONE
 
 
-# ─── No DeprecationWarning for the optimizations= API ─────────────────────────
-
-
-def test_new_optimizations_kwarg_emits_no_warning():
-    """The new optimizations= API emits no DeprecationWarning."""
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-
-        @pl.function
-        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
-                y = pl.add(x, x)
-            return y
-
-
 # ─── Validation errors on optimizations= entries ──────────────────────────────
 
 

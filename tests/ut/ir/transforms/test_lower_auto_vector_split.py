@@ -261,7 +261,9 @@ def test_explicit_region_survives_lowering_and_is_consumed_by_expansion():
 
 
 def test_explicit_region_body_is_lowered():
-    """The region retains its authored lane index, load shape and store address."""
+    """The region retains its authored lane index, load shape and store address.
+
+    No extra subblock binding is needed beyond the authored lane ID."""
     span = ir.Span.unknown()
     data = ir.Var("data", _tensor([128, 128]), span)
     out_0 = ir.Var("out_0", _tensor([128, 128]), span)
@@ -364,29 +366,6 @@ def test_none_region_admits_explicit_boundary_unchanged():
     g_type = g.type
     assert isinstance(g_type, ir.TileType)
     assert g_type.shape == [128, 128]
-
-
-def test_region_preserves_authored_lane_index():
-    """A region needs no extra subblock binding beyond its authored lane ID."""
-    span = ir.Span.unknown()
-    data = ir.Var("data", _tensor([128, 128]), span)
-    out_0 = ir.Var("out_0", _tensor([128, 128]), span)
-    region, out_store = _vec_load_region(span, ir.SplitMode.UP_DOWN, data, out_0)
-    program = _explicit_region_program(
-        [region, ir.ReturnStmt([out_store], span)],
-        [(data, _IN), (out_0, _OUT)],
-        [out_0.type],
-    )
-
-    e_data = ir.Var("data", _tensor([128, 128]), span)
-    e_out = ir.Var("out_0", _tensor([128, 128]), span)
-    stmts, e_out_store = _lowered_vec_load_region(span, ir.SplitMode.UP_DOWN, e_data, e_out)
-    expected = _expected_region_program(
-        [*stmts, ir.ReturnStmt([e_out_store], span)],
-        [(e_data, _IN), (e_out, _OUT)],
-        [e_out.type],
-    )
-    ir.assert_structural_equal(_lower(program), expected)
 
 
 def test_region_and_surrounding_memory_shapes_are_preserved():
