@@ -17,7 +17,8 @@ global ``CTRL[48]`` (float) / ``CTRL[59]`` (cast) bits instead.
 These tests poison ``CTRL[60]``, ``CTRL[48]``, and ``CTRL[59]`` immediately
 before ``kernel_entry``'s A5 vector reset and verify that both ``saturate=True``
 and ``saturate=False`` follow the instruction-level flag across all supported
-narrowing conversions.
+narrowing conversions. The tile-cast test starts with CTRL[60] cleared to
+emulate a preceding register conversion and verify restoration of USE_GLOBAL.
 """
 
 from dataclasses import replace
@@ -26,7 +27,8 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import CacheConfig
-from pypto.backend import pto_backend
+from pypto.backend import BackendType, pto_backend
+from pypto.runtime import ExecutionMode
 
 LANES = 64
 
@@ -41,31 +43,28 @@ _POISON_PATTERNS = [
 ]
 
 
-def _install_ctrl_poison(monkeypatch: pytest.MonkeyPatch, ctrl48: int, ctrl59: int) -> None:
-    """Inject inherited SPR.CTRL[60/48/59] state right before the A5 vector reset."""
+def _poison_before_ctrl_write(monkeypatch: pytest.MonkeyPatch, write: str, poison: str) -> None:
+    """Inject the inherited state inside the same A5 device guard as the entry write."""
     generate_wrapper = pto_backend._generate_kernel_wrapper
-    op48 = "sbitset1" if ctrl48 else "sbitset0"
-    op59 = "sbitset1" if ctrl59 else "sbitset0"
 
     def poison_inherited_ctrl(func, ptoas_code, **kwargs):
         source = generate_wrapper(func, ptoas_code, **kwargs)
-        marker = "    set_atomic_none();\n"
-        reset = "    set_ctrl(sbitset0(get_ctrl(), 60));\n"
-        assert marker in source
-        assert reset in source
-        poison = (
-            "#if defined(__DAV_VEC__) && defined(PTO_NPU_ARCH_A5) && "
-            "!defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
-            "    set_ctrl(sbitset1(get_ctrl(), 60));\n"
-            f"    set_ctrl({op48}(get_ctrl(), 48));\n"
-            f"    set_ctrl({op59}(get_ctrl(), 59));\n"
-            "#endif\n"
-        )
-        poisoned = source.replace(marker, marker + poison, 1)
-        assert poisoned.index(poison) < poisoned.index(reset)
-        return poisoned
+        assert source.count(write) == 1
+        return source.replace(write, poison + write, 1)
 
     monkeypatch.setattr(pto_backend, "_generate_kernel_wrapper", poison_inherited_ctrl)
+
+
+def _install_ctrl_poison(monkeypatch: pytest.MonkeyPatch, ctrl48: int, ctrl59: int) -> None:
+    op48 = "sbitset1" if ctrl48 else "sbitset0"
+    op59 = "sbitset1" if ctrl59 else "sbitset0"
+    _poison_before_ctrl_write(
+        monkeypatch,
+        "    set_ctrl(sbitset0(get_ctrl(), 60));\n",
+        "    set_ctrl(sbitset1(get_ctrl(), 60));\n"
+        f"    set_ctrl({op48}(get_ctrl(), 48));\n"
+        f"    set_ctrl({op59}(get_ctrl(), 59));\n",
+    )
 
 
 def _repeat_to_lanes(values: list[float]) -> torch.Tensor:
@@ -74,7 +73,12 @@ def _repeat_to_lanes(values: list[float]) -> torch.Tensor:
 
 
 def _fresh_config(test_config):
-    return replace(test_config, cache_config=CacheConfig(enabled=False))
+    return replace(
+        test_config,
+        arch=BackendType.Ascend950,
+        execution_mode=ExecutionMode.ONBOARD,
+        cache_config=CacheConfig(enabled=False),
+    )
 
 
 @pytest.mark.platforms("a5")
@@ -280,15 +284,55 @@ def test_reg_convert_fp32_to_int32_clears_inherited_ctrl(test_config, monkeypatc
 
     if saturate:
         expected_cycle = [-2147483648, 2147483647, -2147483648, 1000, -1000, 0, 42, -42]
-        expected = torch.tensor((expected_cycle * (LANES // len(expected_cycle)))[:LANES], dtype=torch.int32)
-        torch.testing.assert_close(out.reshape(-1), expected, rtol=0, atol=0)
     else:
-        got = out.reshape(-1)
-        expected_in_range = {2: -2147483648, 3: 1000, 4: -1000, 5: 0, 6: 42, 7: -42}
-        for idx in range(LANES):
-            slot = idx % len(values)
-            if slot in expected_in_range:
-                assert int(got[idx].item()) == expected_in_range[slot]
+        # With #sat=0 the two overflow slots wrap modulo 2**32.
+        expected_cycle = [1294967296, -1294967296, -2147483648, 1000, -1000, 0, 42, -42]
+    expected = torch.tensor(expected_cycle, dtype=torch.int32).repeat(LANES // len(expected_cycle))
+    torch.testing.assert_close(out.reshape(-1), expected, rtol=0, atol=0)
+
+
+@pytest.mark.platforms("a5")
+@pytest.mark.parametrize("saturation_mode", ["on", "off"])
+def test_bf16_to_fp16_tile_cast_restores_ctrl60_after_reg_convert(test_config, monkeypatch, saturation_mode):
+    _poison_before_ctrl_write(
+        monkeypatch,
+        "    set_ctrl(sbitset1(get_ctrl(), 60));\n",
+        "    set_ctrl(sbitset0(get_ctrl(), 60));\n",
+    )
+
+    @pl.jit.incore
+    def cast_kernel(
+        src: pl.Tensor[[1, LANES], pl.BF16],
+        out: pl.Out[pl.Tensor[[1, LANES], pl.FP16]],
+    ) -> pl.Tensor[[1, LANES], pl.FP16]:
+        tile = pl.load(src, [0, 0], [1, LANES], target_memory=pl.Mem.Vec)
+        converted = pl.cast(tile, pl.FP16, saturation_mode=saturation_mode)
+        pl.store(converted, [0, 0], out)
+        return out
+
+    @pl.jit
+    def entry(
+        src: pl.Tensor[[1, LANES], pl.BF16],
+        out: pl.Out[pl.Tensor[[1, LANES], pl.FP16]],
+    ) -> pl.Tensor[[1, LANES], pl.FP16]:
+        return cast_kernel(src, out)
+
+    config = _fresh_config(test_config)
+    if config.codegen_only:
+        entry.compile(config=config)
+        return
+
+    values = [-70000.0, 70000.0, -65504.0, 65504.0, -1.5, 0.0, 1.5, 1.0e10]
+    src = _repeat_to_lanes(values).to(torch.bfloat16)
+    out = torch.zeros((1, LANES), dtype=torch.float16)
+    compiled = entry.compile(src, out, config=config)
+    compiled(src, out, config=config)
+
+    if saturation_mode == "on":
+        expected = torch.clamp(src.float(), -65504.0, 65504.0).to(torch.float16)
+    else:
+        expected = src.to(torch.float16)
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

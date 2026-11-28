@@ -937,6 +937,7 @@ _AIV_FIFO_ENDPOINT_OPS = frozenset(
     }
 )
 _SDMA_WORKSPACE_OPS = frozenset({_ir_core.get_op("prefetch.make_context").name})
+_REG_SATURATION_OPS = frozenset({_ir_core.get_op("reg.convert").name})
 _DEFERRED_COMPLETION_OPS = frozenset({_ir_core.get_op("pld.system.defer_wait").name})
 _URMA_PUT_ASYNC_OP = _ir_core.get_op("pld.tensor.put_async").name
 _URMA_GET_ASYNC_OP = _ir_core.get_op("pld.tensor.get_async").name
@@ -971,6 +972,12 @@ def _function_uses_ops(func: _ir_core.Function, op_names: frozenset[str]) -> boo
     finder = _OpFinder()
     finder.visit_stmt(func.body)
     return finder.found
+
+
+def _uses_reg_saturation(func: _ir_core.Function, program: _ir_core.Program | None = None) -> bool:
+    """Return whether the entry or a reachable device helper uses register-level conversion."""
+    funcs = [func] if program is None else _with_device_helpers([func], program)
+    return any(_function_uses_ops(f, _REG_SATURATION_OPS) for f in funcs)
 
 
 def _uses_dynamic_subblock_id(func: _ir_core.Function) -> bool:
@@ -1452,6 +1459,7 @@ def _generate_kernel_wrapper(
     *,
     group_uses_spmd: bool = False,
     module_urma_adapter: str | None = None,
+    uses_reg_saturation: bool | None = None,
 ) -> str:
     """Generate a complete kernel wrapper file for one InCore function.
 
@@ -1461,6 +1469,9 @@ def _generate_kernel_wrapper(
     3. ``kernel_entry`` wrapper with arg unpacking and forward call
     """
     func_uses_spmd = _uses_spmd_block_ops(func)
+    func_uses_reg_saturation = (
+        _uses_reg_saturation(func) if uses_reg_saturation is None else uses_reg_saturation
+    )
     uses_spmd = group_uses_spmd or func_uses_spmd
     func_uses_subblock = _uses_dynamic_subblock_id(func)
     func_uses_sdma = _uses_sdma_workspace(func)
@@ -1562,6 +1573,21 @@ def _generate_kernel_wrapper(
         call_args_list = call_args_list + ["__pypto_spmd_subblock_idx"]
     call_args = ", ".join(call_args_list)
 
+    if func_uses_reg_saturation:
+        saturation_setup = (
+            "    // Start A5 vector tasks that use register-level VCVT in USE_API\n"
+            "    // saturation mode (CTRL[60] = 0), so per-instruction #sat flags are\n"
+            "    // not overridden by inherited CTRL state.\n"
+            "    set_ctrl(sbitset0(get_ctrl(), 60));\n"
+        )
+    else:
+        saturation_setup = (
+            "    // Restore A5 USE_GLOBAL saturation mode (CTRL[60] = 1) so a prior\n"
+            "    // reg.convert kernel cannot break PTO-ISA BF16->FP16 TCVT saturation\n"
+            "    // (see hw-native-sys/pto-isa#461).\n"
+            "    set_ctrl(sbitset1(get_ctrl(), 60));\n"
+        )
+
     wrapper_func = (
         "// --- Kernel entry point ---\n"
         'extern "C" __aicore__ __attribute__((always_inline)) '
@@ -1577,9 +1603,7 @@ def _generate_kernel_wrapper(
         "#endif\n\n"
         "#if defined(__DAV_VEC__) && defined(PTO_NPU_ARCH_A5) && "
         "!defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
-        "    // Start A5 vector tasks in USE_API saturation mode (CTRL[60] = 0), so\n"
-        "    // per-instruction #sat flags are not overridden by inherited CTRL state.\n"
-        "    set_ctrl(sbitset0(get_ctrl(), 60));\n"
+        f"{saturation_setup}"
         "#endif\n\n"
         f"{spmd_args_setup}"
         f"{subblock_arg_setup}"
@@ -2036,6 +2060,8 @@ def _emit_single_function_output(
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    *,
+    uses_reg_saturation: bool | None = None,
 ) -> None:
     """Emit output files for one InCore function."""
     suffix = "pto" if skip_ptoas else "cpp"
@@ -2060,7 +2086,9 @@ def _emit_single_function_output(
             object_bytes = object_file.read()
         _emit_vpto_object(result_files, _get_kernel_output_path(func, "o"), object_bytes, output_dir)
     else:
-        result_files[kernel_rel] = _generate_kernel_wrapper(func, ptoas_cpp)
+        result_files[kernel_rel] = _generate_kernel_wrapper(
+            func, ptoas_cpp, uses_reg_saturation=uses_reg_saturation
+        )
 
 
 def _requests_buffer_id_sync(func: _ir_core.Function) -> bool:
@@ -2090,6 +2118,8 @@ def _emit_group_output(
     skip_ptoas: bool,
     memory_planner: _passes.MemoryPlanner = _passes.MemoryPlanner.PYPTO,
     dump_ptoas_passes: bool = False,
+    *,
+    entry_uses_reg_saturation: frozenset[str] | None = None,
 ) -> None:
     """Emit output files for one grouped MLIR module."""
     memory_planner = _group_memory_planner(members, memory_planner)
@@ -2128,7 +2158,13 @@ def _emit_group_output(
     module_urma_adapter = _generate_urma_transfer_adapter(*(f for f in members if _uses_urma_transfer(f)))
     for func in members:
         result_files[_get_kernel_output_path(func, "cpp")] = _generate_kernel_wrapper(
-            func, ptoas_cpp, group_uses_spmd=group_uses_spmd, module_urma_adapter=module_urma_adapter
+            func,
+            ptoas_cpp,
+            group_uses_spmd=group_uses_spmd,
+            module_urma_adapter=module_urma_adapter,
+            uses_reg_saturation=None
+            if entry_uses_reg_saturation is None
+            else func.name in entry_uses_reg_saturation,
         )
 
 
@@ -2177,6 +2213,7 @@ class _CodegenUnit:
     # Keys are emitted function names, not the group/compilation-unit name.
     # The two AIV lanes share one entry and therefore the same helper objects.
     entry_helpers: dict[str, list[str]] = field(default_factory=lambda: dict[str, list[str]]())
+    entry_uses_reg_saturation: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -2257,6 +2294,7 @@ def _emit_unit(
                 skip_ptoas,
                 memory_planner,
                 dump_ptoas_passes,
+                entry_uses_reg_saturation=unit.entry_uses_reg_saturation,
             )
         else:
             _emit_single_function_output(
@@ -2267,6 +2305,7 @@ def _emit_unit(
                 skip_ptoas,
                 memory_planner,
                 dump_ptoas_passes,
+                uses_reg_saturation=unit.funcs[0].name in unit.entry_uses_reg_saturation,
             )
         ptoas_record.end = time.perf_counter()
         return _EmitResult(name=unit.name, files=local_files, ptoas_record=ptoas_record)
@@ -2936,6 +2975,9 @@ def _generate_single_chip(
                     stage_record=stage,
                     helpers=helpers,
                     entry_helpers=entry_helpers,
+                    entry_uses_reg_saturation=frozenset(
+                        f.name for f in members if _uses_reg_saturation(f, transformed_program)
+                    ),
                 )
             )
         except Exception as e:
@@ -2980,6 +3022,9 @@ def _generate_single_chip(
                     stage_record=stage,
                     helpers=helpers,
                     entry_helpers=entry_helpers,
+                    entry_uses_reg_saturation=frozenset({func.name})
+                    if _uses_reg_saturation(func, transformed_program)
+                    else frozenset(),
                 )
             )
         except Exception as e:
