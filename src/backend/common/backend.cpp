@@ -523,6 +523,7 @@ std::optional<ir::PipeType> InferTransferPipe(const Backend& backend, ir::Memory
        destination == ir::MemorySpace::Vec)) {
     return Pipe::FIX;
   }
+  if (source == ir::MemorySpace::Mat && destination == ir::MemorySpace::Scaling) return Pipe::FIX;
   if (source == ir::MemorySpace::Mat && IsL0Memory(destination)) return Pipe::MTE1;
   // A5's memory graph contains Vec->Mat; A2/A3's does not. PTOAS lowers
   // the A5 V2C insertion route on MTE3.

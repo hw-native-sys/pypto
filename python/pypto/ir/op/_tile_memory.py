@@ -343,6 +343,66 @@ def store(
     return _ir_core.create_op_call("tile.store", args, kwargs, actual_span)
 
 
+def store_fp(
+    tile: Expr,
+    offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
+    output_tensor: Expr,
+    scale: Expr,
+    span: Span | None = None,
+    *,
+    pre_relu: bool | Expr = False,
+) -> Call:
+    """Store an A5 Acc tile to a rank-2 ND tensor using FIXPIPE channel parameters.
+
+    Args:
+        tile: FP32 or INT32 accumulator tile.
+        offsets: Two offsets in the destination tensor.
+        output_tensor: Destination ND tensor.
+        scale: Contiguous ``[1, N]`` tile of packed UINT64 or INT64 FIXPIPE
+            words in ``Mem.Scaling``. Each valid Acc column needs one word.
+            The physical width is a multiple of 16 and no greater than 512.
+        span: Optional source location.
+        pre_relu: Apply ReLU to the accumulator before conversion.
+
+    Returns:
+        Call expression returning the updated destination tensor.
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs = _fixpipe_epilogue_kwargs("tile.store_fp", None, pre_relu)
+    return _ir_core.create_op_call(
+        "tile.store_fp",
+        [tile, _to_make_tuple(offsets, actual_span), output_tensor, scale],
+        kwargs,
+        actual_span,
+    )
+
+
+def move_fp(
+    tile: Expr,
+    scale: Expr,
+    *,
+    dtype: DataType,
+    pre_relu: bool | Expr = False,
+    span: Span | None = None,
+) -> Call:
+    """Move an A5 Acc tile to NZ Mat using FIXPIPE channel parameters.
+
+    Args:
+        tile: FP32 or INT32 accumulator tile.
+        scale: Contiguous ``[1, N]`` tile of packed UINT64 or INT64 FIXPIPE
+            words in ``Mem.Scaling``. Each valid Acc column needs one word.
+        dtype: Destination element type supported by A5 vector writeback.
+        pre_relu: Apply ReLU to the accumulator before conversion.
+        span: Optional source location.
+
+    Returns:
+        Call expression returning the converted NZ Mat tile.
+    """
+    kwargs = _fixpipe_epilogue_kwargs("tile.move_fp", None, pre_relu)
+    kwargs["dtype"] = dtype
+    return _ir_core.create_op_call("tile.move_fp", [tile, scale], kwargs, _get_span_or_capture(span))
+
+
 def assemble(
     target: Expr,
     source: Expr,

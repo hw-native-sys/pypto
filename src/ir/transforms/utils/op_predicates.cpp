@@ -132,7 +132,7 @@ bool IsPublishingWrite(const CallPtr& call) {
   }
   // A local store whose destination tensor is window-bound: a peer can
   // remote_load it, so it carries the same data-before-signal obligation.
-  if (IsOp(call, "tile.store") && call->args_.size() > 2 && call->args_[2] &&
+  if ((IsOp(call, "tile.store") || IsOp(call, "tile.store_fp")) && call->args_.size() > 2 && call->args_[2] &&
       As<DistributedTensorType>(call->args_[2]->GetType())) {
     return true;
   }

@@ -84,6 +84,53 @@ def test_window_store_then_notify():
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
+def test_window_store_fp_then_notify():
+    # Per-channel FIXPIPE writeback is also a local publishing write.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            lhs: pl.Tensor[[32, 64], pl.INT8],
+            rhs: pl.Tensor[[64, 32], pl.INT8],
+            scale: pl.Tensor[[1, 32], pl.UINT64],
+            win: pld.DistributedTensor[[32, 32], pl.FP16],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            a = pl.tile.load(lhs, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+            b = pl.tile.load(rhs, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(pl.tile.move(a, pl.Mem.Left), pl.tile.move(b, pl.Mem.Right))
+            fp_mat = pl.tile.load(scale, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+            fp = pl.tile.move(fp_mat, pl.Mem.Scaling)
+            pl.tile.store_fp(c, [0, 0], win, fp)
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            lhs: pl.Tensor[[32, 64], pl.INT8],
+            rhs: pl.Tensor[[64, 32], pl.INT8],
+            scale: pl.Tensor[[1, 32], pl.UINT64],
+            win: pld.DistributedTensor[[32, 32], pl.FP16],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            a = pl.tile.load(lhs, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+            b = pl.tile.load(rhs, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+            c = pl.tile.matmul(pl.tile.move(a, pl.Mem.Left), pl.tile.move(b, pl.Mem.Right))
+            fp_mat = pl.tile.load(scale, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+            fp = pl.tile.move(fp_mat, pl.Mem.Scaling)
+            pl.tile.store_fp(c, [0, 0], win, fp)
+            pl.system.cacheinvalid(win, [32, 32], [0, 0])
+            pl.system.fence()
+            pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
 def test_scalar_write_to_window_then_notify():
     # ConvertTensorToTileOps deliberately keeps `tensor.write` unconverted when its
     # destination is a DistributedTensor (codegen lowers it to `pto.store`),

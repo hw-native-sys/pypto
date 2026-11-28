@@ -371,6 +371,17 @@ lhs/rhs 广播后的 batch 形状完全一致；matmul 的 (M, N) 必须与 acc 
 `tensor.matmul` / `tensor.matmul_acc` 在任一操作数 rank > 2 时分派到该批量路径；后续由
 `FlattenTileNdTo2D` 将其展开为逐 batch 的 2D 操作。
 
+### 按列 FIXPIPE 写回（Ascend950）
+
+`pl.tile.store_fp(acc, offsets, output_tensor, scale)` 将按列量化融合到
+Acc→GM 的 ND 写回。`pl.tile.move_fp(acc, scale, dtype=...)` 将转换结果写到
+NZ Mat tile，供后续 Cube 运算消费。两个操作均可通过 `pre_relu=True` 在转换前
+对累加器应用 ReLU。
+
+先将一行打包的 INT64 或 UINT64 量化参数加载到 Mat，再移动到
+`pl.Mem.Scaling`。物理列数必须是 16 的倍数，且每个有效 Acc 列需要一个有效的
+参数字。4 KiB 的 FIXPIPE 缓冲区独立于 MX scale 缓冲区，由 PyPTO 内存规划器分配。
+
 ### MX block-scale matmul（Ascend950）
 
 MX 使用独立的 `LeftScale` / `RightScale` 内存空间与 `FP8E8M0` scale

@@ -332,5 +332,58 @@ def test_acc_to_mat_scaled_relu(case_run):
     case_run.assert_passed()
 
 
+@pl.jit
+def vector_scale_writebacks(
+    lhs: pl.Tensor[[32, 64], pl.INT8],
+    rhs: pl.Tensor[[64, 32], pl.INT8],
+    channel_words: pl.Tensor[[1, 32], pl.INT64],
+    identity: pl.Tensor[[32, 32], pl.FP16],
+    gm_out: pl.Out[pl.Tensor[[32, 32], pl.FP16]],
+    mat_out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        lhs_mat = pl.tile.load(lhs, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+        rhs_mat = pl.tile.load(rhs, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+        acc = pl.tile.matmul(pl.tile.move(lhs_mat, pl.Mem.Left), pl.tile.move(rhs_mat, pl.Mem.Right))
+        fp_mat = pl.tile.load(channel_words, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+        scale = pl.tile.move(fp_mat, pl.Mem.Scaling)
+        pl.tile.store_fp(acc, [0, 0], gm_out, scale)
+        local = pl.tile.move_fp(acc, scale, dtype=pl.FP16)
+        eye = pl.tile.load(identity, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+        copied = pl.tile.matmul(pl.tile.move(local, pl.Mem.Left), pl.tile.move(eye, pl.Mem.Right))
+        pl.tile.store(copied, [0, 0], mat_out)
+    return gm_out, mat_out
+
+
+def _vector_scale_case():
+    gen = torch.Generator().manual_seed(0)
+    lhs = torch.randint(-4, 5, (32, 64), dtype=torch.int8, generator=gen)
+    rhs = torch.randint(-4, 5, (64, 32), dtype=torch.int8, generator=gen)
+    factors = ((torch.arange(32, dtype=torch.float32) % 7 + 1) / 16).reshape(1, 32)
+    words = factors.view(torch.int32).to(torch.int64)
+    expected = ((lhs.int() @ rhs.int()).float() * factors).half()
+
+    return st.case(
+        vector_scale_writebacks,
+        lhs,
+        rhs,
+        words,
+        torch.eye(32, dtype=torch.float16),
+        torch.zeros(32, 32, dtype=torch.float16),
+        torch.zeros(32, 32, dtype=torch.float32),
+        name="vector_scale_writebacks",
+        golden=lambda _: {"gm_out": expected, "mat_out": expected.float()},
+        atol=0,
+        rtol=0,
+    )
+
+
+@pytest.mark.platforms("a5")
+@st.cases(_vector_scale_case())
+def test_vector_scale_fixpipe(case_run):
+    """Each channel has a distinct DEQF16 multiplier on both output paths."""
+    case_run.assert_passed()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

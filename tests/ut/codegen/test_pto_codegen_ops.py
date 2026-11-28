@@ -16,10 +16,12 @@ and verifies the generated orchestration code.
 """
 
 import re
+import subprocess
 import warnings
 
 import pypto
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
@@ -3783,6 +3785,67 @@ class TestFixpipeEpilogueCodegen:
             for func in optimized.functions.values()
             if ir.is_incore_type(func.func_type)
         )
+
+    def test_a5_vector_fixpipe_assembles(self, tmp_path):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 64], pl.INT8],
+                rhs: pl.Tensor[[64, 32], pl.INT8],
+                scale: pl.Tensor[[1, 32], pl.UINT64],
+                identity: pl.Tensor[[32, 32], pl.FP16],
+                gm: pl.Out[pl.Tensor[[32, 32], pl.FP16]],
+                out_mat: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ):
+                fp_mat = pl.tile.load(scale, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+                fp = pl.tile.move(fp_mat, pl.Mem.Scaling)
+                a = pl.tile.load(lhs, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(pl.tile.move(a, pl.Mem.Left), pl.tile.move(b, pl.Mem.Right))
+                gm = pl.tile.store_fp(c, [0, 0], gm, fp, pre_relu=True)
+                c_mat = pl.tile.move_fp(c, fp, dtype=pl.FP16, pre_relu=True)
+                eye = pl.tile.load(identity, [0, 0], [32, 32], target_memory=pl.Mem.Mat)
+                copied = pl.tile.matmul(pl.tile.move(c_mat, pl.Mem.Left), pl.tile.move(eye, pl.Mem.Right))
+                out_mat = pl.tile.store(copied, [0, 0], out_mat)
+                return gm, out_mat
+
+        mlir = self._generate_mlir_all_incore(Prog, backend_type=BackendType.Ascend950)
+        assert re.search(r"pto\.tstore ins\(.* fp %.*loc=scaling.*reluPreMode", mlir), mlir
+        assert re.search(r"pto\.tmov ins\(.*loc=acc.*, %.*loc=scaling.*loc=mat.*reluPreMode", mlir), mlir
+        src = tmp_path / "vector_fixpipe.pto"
+        dst = tmp_path / "vector_fixpipe.cpp"
+        src.write_text(mlir)
+        ptoas = find_ptoas_binary()
+        if not ptoas:
+            pytest.skip("PTOAS is required for the vector FIXPIPE assembly check")
+        subprocess.run([ptoas, "--pto-arch=a5", "--pto-level=level3", str(src), "-o", str(dst)], check=True)
+        cpp = dst.read_text()
+        assert "TSTORE_FP" in cpp
+        assert "TMOV_FP" in cpp
+        assert "TileType::Scaling" in cpp
+
+    def test_a5_vector_fixpipe_distributed_store(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[32, 64], pl.INT8],
+                rhs: pl.Tensor[[64, 32], pl.INT8],
+                scale: pl.Tensor[[1, 32], pl.UINT64],
+                out: pl.InOut[pld.DistributedTensor[[32, 32], pl.FP16]],
+            ):
+                fp_mat = pl.tile.load(scale, [0, 0], [1, 32], target_memory=pl.Mem.Mat)
+                fp = pl.tile.move(fp_mat, pl.Mem.Scaling)
+                a = pl.tile.load(lhs, [0, 0], [32, 64], target_memory=pl.Mem.Mat)
+                b = pl.tile.load(rhs, [0, 0], [64, 32], target_memory=pl.Mem.Mat)
+                c = pl.tile.matmul(pl.tile.move(a, pl.Mem.Left), pl.tile.move(b, pl.Mem.Right))
+                return pl.tile.store_fp(c, [0, 0], out, fp)
+
+        mlir = self._generate_mlir_all_incore(Prog, backend_type=BackendType.Ascend950)
+        assert re.search(r"pto\.tstore ins\(.* fp %.*loc=scaling", mlir), mlir
 
     @pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
     def test_acc_to_mat_assemble_emits_pre_quant_clause_and_relu_attr(self, backend_type):

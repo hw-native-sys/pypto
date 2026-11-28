@@ -42,6 +42,7 @@
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/phase.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -197,7 +198,6 @@ static const std::unordered_set<std::string_view>& LayoutAwareOps() {
       "tile.matmul_mx_bias",
       "tile.matmul_bias",
       "tile.concat",
-      "tile.move_fp",
       "tile.gather",
   };
   return kLayoutAwareOps;
@@ -1124,7 +1124,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Data movement/layout operations
     {"tile.concat",          "pto.tconcat",          2},
     // tile.move has custom codegen (PTOAS same-handle elision and baked-address validation)
-    {"tile.move_fp",         "pto.tmov.fp",          2},
     // tile.transpose has custom codegen (MakeTileTransposeCodegenPTO): pto.ttrans needs
     // ins(%src, %tmp : tile_type, tile_type) where %tmp is a scratch workspace tile, NOT
     // the axis-index integers that tile.transpose(src, axis0, axis1) carries in the IR.
@@ -1313,6 +1312,29 @@ void RegisterElementwiseOps(Backend& backend, const std::unordered_set<std::stri
     codegen.Emit("pto.tmov " + GenerateInsOutsClause(op, codegen));
     return std::string("");
   });
+
+  if (ShouldRegister(exclude_ops, "tile.move_fp")) {
+    backend.RegisterOp("tile.move_fp")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+          auto& codegen = AsPto(codegen_base);
+          CHECK_SPAN(codegen.EmitTileAddr(), op->span_)
+              << "tile.move_fp requires a PyPTO memory planner to enforce the 4 KiB FIXPIPE limit";
+          const auto& src = op->args_[0];
+          const auto& fp = op->args_[1];
+          const auto src_ssa = codegen.GetExprAsCode(src);
+          const auto fp_ssa = codegen.GetExprAsCode(fp);
+          std::string line = "pto.tmov ins(" + src_ssa + " : " + codegen.GetExprTypeAnnotation(src) + ", " +
+                             fp_ssa + " : " + codegen.GetExprTypeAnnotation(fp) + ") outs(" +
+                             codegen.GetCurrentResultTarget() + " : " +
+                             codegen.GetCurrentResultTileBufTypeString() + ")";
+          if (op->GetKwarg<bool>("pre_relu", false)) {
+            line += " {reluPreMode = #pto<relu_pre_mode normal_relu>}";
+          }
+          codegen.Emit(line);
+          return std::string("");
+        })
+        .f_infer_pipe([](const ir::CallPtr&) { return ir::PipeType::FIX; });
+  }
 
   reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileTransposeCodegenPTO(op, codegen);
