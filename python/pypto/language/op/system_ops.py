@@ -341,7 +341,7 @@ def syncall(
 
 
 @overload
-def cacheinvalid(*, span: Span | None = None) -> Call: ...
+def cacheinvalid(*, comm_acquire: bool = False, span: Span | None = None) -> Call: ...
 @overload
 def cacheinvalid(
     tensor: Tensor,
@@ -355,6 +355,7 @@ def cacheinvalid(
     shapes: Sequence[int | Scalar] | None = None,
     offsets: Sequence[int | Scalar] | None = None,
     *,
+    comm_acquire: bool = False,
     span: Span | None = None,
 ) -> Call:
     """Invalidate one addressed cache line, or the whole GM address space.
@@ -374,6 +375,8 @@ def cacheinvalid(
         tensor: Target tensor whose view base addresses the cache line; omit for whole-GM.
         shapes: Per-dimension region sizes; length must equal the tensor rank.
         offsets: Per-dimension start offsets; length must equal the tensor rank.
+        comm_acquire: Whole-GM form only. Marks a wait's payload acquire for
+            omission when the assembler proves no scalar GM cache maintenance is needed.
         span: Optional source span for debugging (auto-captured if not provided).
     """
     if tensor is None:
@@ -382,7 +385,9 @@ def cacheinvalid(
                 "system.cacheinvalid whole-GM form takes no shapes/offsets; "
                 "pass (tensor, shapes, offsets) for the region form"
             )
-        return _ir_ops.cacheinvalid(span=span)
+        return _ir_ops.cacheinvalid(comm_acquire=comm_acquire, span=span)
+    if comm_acquire:
+        raise ValueError("system.cacheinvalid comm_acquire requires the whole-GM form")
     if shapes is None or offsets is None:
         raise ValueError(
             "system.cacheinvalid region form requires both shapes and offsets "

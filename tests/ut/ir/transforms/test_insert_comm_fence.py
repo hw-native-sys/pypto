@@ -556,7 +556,7 @@ def test_wait_then_read_inserts_whole_gm_cacheinvalid():
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
         ):
             pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
-            pl.system.cacheinvalid()
+            pl.system.cacheinvalid(comm_acquire=True)
             val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
             pl.write(out, [0, 0], val)
 
@@ -591,7 +591,7 @@ def test_notify_wait_read_handshake():
         ):
             pld.system.notify(target=signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.Set)
             pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
-            pl.system.cacheinvalid()
+            pl.system.cacheinvalid(comm_acquire=True)
             val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
             pl.write(out, [0, 0], val)
 
@@ -632,7 +632,7 @@ def test_pure_wait_loop_gets_single_whole_gm_cacheinvalid():
             for src in pl.range(nranks):
                 if src != me:
                     pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
-            pl.system.cacheinvalid()
+            pl.system.cacheinvalid(comm_acquire=True)
             val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
             pl.write(out, [0, 0], val)
 
@@ -665,7 +665,7 @@ def test_consecutive_waits_share_one_whole_gm_cacheinvalid():
         ):
             pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
             pld.system.wait(signal=signal, offsets=[0, 1], expected=1, cmp=pld.WaitCmp.Ge)
-            pl.system.cacheinvalid()
+            pl.system.cacheinvalid(comm_acquire=True)
             val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
             pl.write(out, [0, 0], val)
 
@@ -702,7 +702,7 @@ def test_bare_pure_wait_loop_batches_to_single_invalidate():
             for src in pl.range(nranks):
                 if src != me:
                     pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
-            pl.system.cacheinvalid()
+            pl.system.cacheinvalid(comm_acquire=True)
 
     ir.assert_structural_equal(_apply(Before), Expected)
 
@@ -739,7 +739,7 @@ def test_control_expression_read_prevents_batching():
             for src in pl.range(nranks):
                 if pl.read(signal, [0, src]) != 0:
                     pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
-                    pl.system.cacheinvalid()
+                    pl.system.cacheinvalid(comm_acquire=True)
             val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
             pl.write(out, [0, 0], val)
 
@@ -845,7 +845,7 @@ def test_if_with_wait_and_empty_else_is_still_pure():
                     pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
                 else:
                     pass
-            pl.system.cacheinvalid()
+            pl.system.cacheinvalid(comm_acquire=True)
             val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
             pl.write(out, [0, 0], val)
 

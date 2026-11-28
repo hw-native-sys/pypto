@@ -478,6 +478,10 @@ static std::string MakeRemoteStoreCodegenPTO(const CallPtr& op, codegen::Codegen
   }
   codegen.Emit(tstore_line.str());
 
+  // Complete the direct tile store before cache maintenance or buffer reuse.
+  // The later GM fence publishes the data before a scalar notification.
+  codegen.Emit("pto.barrier <PIPE_ALL>");
+
   // Data-before-signal (ptoas memory-consistency): clean+invalidate the
   // peer-addressed lines this store dirtied. The peer offset
   // (`local_ptr + delems(peer)`) is only known here and is not yet expressible in

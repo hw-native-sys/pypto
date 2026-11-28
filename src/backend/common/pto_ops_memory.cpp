@@ -1287,7 +1287,9 @@ void RegisterMemoryOps(Backend& backend, const std::unordered_set<std::string>& 
     auto& codegen = AsPto(codegen_base);
     // No-arg form: invalidate the whole GM address space.
     if (op->args_.empty()) {
-      codegen.Emit("pto.cmo.cacheinvalid all #pto.address_space<gm>");
+      std::string cmo = "pto.cmo.cacheinvalid all #pto.address_space<gm>";
+      if (op->GetKwarg<bool>("comm_acquire", false)) cmo += " {pto.comm_acquire}";
+      codegen.Emit(cmo);
       return std::string("");
     }
     INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)

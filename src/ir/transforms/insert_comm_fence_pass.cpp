@@ -14,10 +14,8 @@
  * @brief Insert the ptoas data-before-signal memory markers around cross-rank
  *        publish (`pld.system.notify`) and consume (`pld.system.wait`) points.
  *
- * The latest PTOAS enforces a two-sided contract in its `pto-memory-consistency`
- * pass and pushes the markers onto the compiler. Verified empirically on ptoas
- * 0.50, the contract reduces to exactly two purely-local rules — the *notify*
- * itself needs nothing:
+ * Emit explicit data-before-signal fences and cache maintenance for the
+ * publish and consume sides of the protocol:
  *
  *   - Publish side: each publishing GM write requires a `pto.cmo.cacheinvalid`
  *     of the written region **immediately followed by** a
@@ -46,7 +44,9 @@
  *     fence, however, is always an explicit `system.fence` op inserted here — the
  *     codegen must not embed it. (TODO: a first-class IR representation of the
  *     peer-region cacheinvalid would let the pass own the whole marker.)
- *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid`. Batched:
+ *   - after each **wait**: a no-arg (whole-GM) `system.cacheinvalid` marked as a
+ *     communication acquire. PTOAS may omit a marked CMO if scalar GM cache
+ *     maintenance is unnecessary. Batched:
  *     a *pure wait-loop* (a for/while whose body contains only waits through
  *     seq/if nesting, with memory-inert control expressions) and a run of
  *     consecutive waits each share ONE whole-GM cacheinvalid after the loop/run
@@ -266,6 +266,11 @@ StmtPtr MakeNoArgOp(const char* op_name, const Span& span) {
 // Whole-GM cacheinvalid: the no-argument form of `system.cacheinvalid`.
 StmtPtr MakeCacheInvalidAll(const Span& span) { return MakeNoArgOp("system.cacheinvalid", span); }
 
+StmtPtr MakeCommAcquire(const Span& span) {
+  auto call = OpRegistry::GetInstance().Create("system.cacheinvalid", {}, {{"comm_acquire", true}}, span);
+  return std::make_shared<EvalStmt>(call, span);
+}
+
 // Structural traversal: emit `cacheinvalid; fence` after every publishing write
 // and `cacheinvalid()` after every wait. No control-flow state is needed — both
 // rules are purely local — so if/for/while bodies are visited normally; the only
@@ -331,14 +336,14 @@ class InsertCommMarkers : public IRMutator {
       // one after the run (no memory access between the waits in either case).
       if (pure_wait_loop) {
         if (!(i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]))) {
-          out.push_back(MakeCacheInvalidAll(child->span_));
+          out.push_back(MakeCommAcquire(child->span_));
           changed = true;
         }
       } else if (eff == Effect::kWait && !in_pure_wait_loop_) {
         const bool next_is_wait = i + 1 < stmts.size() && GetEffect(stmts[i + 1]) == Effect::kWait;
         const bool already = i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]);
         if (!next_is_wait && !already) {
-          out.push_back(MakeCacheInvalidAll(child->span_));
+          out.push_back(MakeCommAcquire(child->span_));
           changed = true;
         }
       }
@@ -393,10 +398,10 @@ class InsertCommMarkers : public IRMutator {
       out.push_back(MakeCacheInvalidAll(body->span_));
       out.push_back(MakeNoArgOp("system.fence", body->span_));
     }
-    if (eff == Effect::kWait && !saved_pwl) out.push_back(MakeCacheInvalidAll(body->span_));
+    if (eff == Effect::kWait && !saved_pwl) out.push_back(MakeCommAcquire(body->span_));
     // A bare body that is itself a pure wait-loop (e.g. a single-loop function
     // or if/for body): one whole-GM cacheinvalid after the loop.
-    if (!saved_pwl && pure_wait_loop) out.push_back(MakeCacheInvalidAll(body->span_));
+    if (!saved_pwl && pure_wait_loop) out.push_back(MakeCommAcquire(body->span_));
     if (out.size() == 1) return visited;
     return SeqStmts::Flatten(std::move(out), body->span_);
   }

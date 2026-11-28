@@ -121,6 +121,11 @@ pipe 上而没有任何东西为它们排序。
 经由 staging tile 流式传输，并带有 `chunk_rows` / `chunk_cols` / `pipeline` 开关，
 因此不受片上容量限制。`remote_store` 则以单次写搬运你已经放在片上的数据。
 
+对于 `6 × 4096` FP32 之类已在 UB 中算出的 tile，`pld.tile.remote_store`
+会直接生成写入 peer window 的 `TSTORE`。PyPTO 等待该写入完成，再对 peer 地址执行
+缓存维护，并生成 GM release fence。写入后用 `pld.system.notify` 发信号，接收端等待
+对应的信号后再读取数据。
+
 ## 边界情况（Edge cases）
 
 > **致命陷阱——排序 barrier 之前的 RMA。** `remote_load` 读取 *window* 内存，

@@ -1204,39 +1204,41 @@ def test_notify_emits_comm_tnotify_with_attr():
 
 
 def test_remote_store_cacheinvalid_fence_before_releasing_notify():
-    """A remote_store followed by a notify lowers to a peer-region
-    ``pto.cmo.cacheinvalid`` + GM ``pto.fence.barrier_all`` (emitted by the
-    remote_store codegen at the peer address), in that order, before the
-    ``pto.comm.tnotify`` that releases it (data-before-signal)."""
+    """Publish the 96 KiB source tile directly and drain it before signalling."""
 
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            inp: pl.Tensor[[1, 32], pl.FP32],
-            dst: pld.DistributedTensor[[1, 32], pl.FP32],
+            inp: pl.Tensor[[6, 4096], pl.FP32],
+            dst: pld.DistributedTensor[[6, 4096], pl.FP32],
             signal: pld.DistributedTensor[[16, 16], pl.INT32],
             peer: pl.Scalar[pl.INT32],
         ):
-            local = pl.load(inp, [0, 0], [1, 32])
+            local = pl.load(inp, [0, 0], [6, 4096])
             pld.tile.remote_store(local, target=dst, peer=peer, offsets=[0, 0])
             pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.Set)
+            pld.system.wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
 
     mlir = _generate_mlir(P)
     lines = mlir.splitlines()
-    store_idx = next(i for i, line in enumerate(lines) if "pto.tstore" in line)
+    stores = [i for i, line in enumerate(lines) if "pto.tstore" in line]
+    assert len(stores) == 1
+    (store_idx,) = stores
+    assert "pto.comm.tput" not in mlir
+    assert "!pto.partition_tensor_view<6x4096xf32>" in lines[store_idx]
+    drain_idx = next(i for i, line in enumerate(lines) if "pto.barrier <PIPE_ALL>" in line)
     cinv_idx = next(i for i, line in enumerate(lines) if "pto.cmo.cacheinvalid" in line)
     fence_idx = next(i for i, line in enumerate(lines) if "pto.fence.barrier_all" in line)
     tnotify_idx = next(i for i, line in enumerate(lines) if "pto.comm.tnotify(" in line)
-    # Order: publishing store -> cacheinvalid -> GM fence -> tnotify.
-    assert store_idx < cinv_idx < fence_idx < tnotify_idx, (
-        f"expected store({store_idx}) < cacheinvalid({cinv_idx}) < fence({fence_idx}) "
-        f"< tnotify({tnotify_idx})"
-    )
+    assert store_idx < drain_idx < cinv_idx < fence_idx < tnotify_idx
     assert "#pto.fence_scope<gm>" in lines[fence_idx], lines[fence_idx]
-    # Whole-tensor cacheinvalid: the region form addresses the dst via a partition view.
+    # The peer-addressed CMO is a release operation; only the wait's CMO is marked.
     assert "single_cache_line" in lines[cinv_idx], lines[cinv_idx]
+    wait_idx = next(i for i, line in enumerate(lines) if "pto.comm.twait(" in line)
+    acquire_idx = next(i for i, line in enumerate(lines) if "{pto.comm_acquire}" in line)
+    assert tnotify_idx < wait_idx < acquire_idx
 
 
 def test_wait_emits_comm_twait_with_attr():

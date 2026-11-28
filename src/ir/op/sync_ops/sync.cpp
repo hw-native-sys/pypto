@@ -278,13 +278,15 @@ REGISTER_OP("system.cacheinvalid")
     .add_argument("tensor", "Region form: target tensor whose view base addresses the cache line")
     .add_argument("shapes", "Region form: per-dimension view sizes (does not request a cache-line range)")
     .add_argument("offsets", "Region form: per-dimension start offsets (N-D tuple matching tensor rank)")
+    .set_attr<bool>("comm_acquire")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) -> TypePtr {
-      CHECK(kwargs.empty()) << "system.cacheinvalid takes no kwargs";
       CHECK(args.empty() || args.size() == 3)
           << "system.cacheinvalid requires either no arguments or (tensor, shapes, offsets), but got "
           << args.size();
       if (!args.empty()) {
+        CHECK(!GetKwargOr<bool>(kwargs, "comm_acquire", false))
+            << "system.cacheinvalid comm_acquire requires the whole-GM form";
         auto tensor_type = AsTensorTypeLike(args[0]->GetType());
         CHECK(tensor_type) << "system.cacheinvalid region form requires a tensor as its first argument";
         CHECK_SPAN(!tensor_type->tensor_view_ || !IsMxTensorLayout(tensor_type->tensor_view_->layout),

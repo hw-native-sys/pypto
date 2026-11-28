@@ -447,6 +447,15 @@ computation, written once into the coordinate instead.
 The extents being folded must be static — a dynamic one cannot be multiplied
 into the batch — which the diagnostic names.
 
+An INT8 expert bank packed as independent `256 × 512` NZ panels can be
+declared as `pl.Tensor[[E, R // 256, C // 512, 256, 512], pl.INT8, pl.NZ]`.
+Pack the host bytes in expert, row-panel, column-panel, column-fractal,
+row-fractal, inner-row, inner-column order. Load one panel by fixing the first
+three indices and using the two trailing dimensions as the matmul operand.
+For a given panel PTOAS receives shape `[1, 16, 16, 16, 32]` and strides
+`[131072, 8192, 512, 32, 1]`. This declaration describes the prepacked
+allocation and generates no weight repacking in the kernel.
+
 A dynamic batch is supported for logical rank-3 `[B, R, C]` parameters. Their
 `DeviceTensor.shape` or `StackedDeviceTensor.full_shape` must also have rank 3:
 the entry reads `B` from the first logical extent. Rank-2 or rank-4+ arguments
