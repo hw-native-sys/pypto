@@ -209,6 +209,16 @@ def test_reject_nonvec_and_noncontiguous_and_uninitialized():
         call("store", [tile(32), integer(0), vec(), mask()])
 
 
+_COMPARE_DTYPES = {
+    DataType.FP16,
+    DataType.FP32,
+    DataType.INT32,
+    DataType.UINT8,
+    DataType.UINT16,
+    DataType.UINT32,
+}
+
+
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -246,9 +256,7 @@ def test_dtype_matrix(name, dtype):
         }
         or (name == "mul" and dtype in (DataType.INT8, DataType.UINT8))
         or (name == "div" and dtype not in (DataType.FP16, DataType.FP32))
-        or (
-            name == "compare" and dtype not in (DataType.FP16, DataType.FP32, DataType.INT32, DataType.UINT32)
-        )
+        or (name == "compare" and dtype not in _COMPARE_DTYPES)
         or (name == "select" and dtype == DataType.BF16)
     )
 
@@ -422,7 +430,7 @@ _COMPUTE_DTYPES = {
     "minimums": _ORDINARY_DTYPES,
     "shift_lefts": _INTEGER_DTYPES,
     "shift_rights": _INTEGER_DTYPES,
-    "compares": _FLOAT_DTYPES | {DataType.INT32, DataType.UINT32},
+    "compares": _COMPARE_DTYPES,
     "gather_lanes": _ORDINARY_DTYPES,
     "reduce_sum": _WIDE_DTYPES,
     "reduce_max": _WIDE_DTYPES,
