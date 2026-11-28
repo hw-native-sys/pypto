@@ -94,6 +94,50 @@ std::pair<int, int> DetectRowBroadcast(const std::vector<ExprPtr>& args) {
   return {-1, -1};
 }
 
+ConversionResult ConvertTensorMul(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                  const Span& span) {
+  const auto lhs = As<TileType>(args[0]->GetType());
+  const auto rhs = As<TileType>(args[1]->GetType());
+  INTERNAL_CHECK_SPAN(lhs && rhs, span) << "tensor.mul requires tile operands after memory promotion";
+  auto& reg = OpRegistry::GetInstance();
+  if (PhysicalShapesEqual(lhs->shape_, rhs->shape_)) {
+    return ConversionResult{reg.Create("tile.mul", args, kwargs, span)};
+  }
+
+  // An expand instruction repeats one physical row or column. Both operands
+  // must already agree on the other axis (in particular, exclude outer products).
+  std::optional<size_t> broadcast_axis;
+  if (lhs->shape_.size() == 2 && rhs->shape_.size() == 2) {
+    for (size_t axis = 0; axis < 2; ++axis) {
+      if (DimensionsEqual(lhs->shape_[1 - axis], rhs->shape_[1 - axis]) &&
+          (IsConstOne(lhs->shape_[axis]) || IsConstOne(rhs->shape_[axis]))) {
+        broadcast_axis = axis;
+        break;
+      }
+    }
+  }
+  CHECK_SPAN(broadcast_axis.has_value(), span)
+      << "tensor.mul cannot lower broadcast from " << FormatShape(lhs->shape_) << " and "
+      << FormatShape(rhs->shape_) << ": expected equal shapes or a rank-2 single-axis broadcast";
+
+  // Multiplication commutes, but the hardware always reads the vector from src1.
+  const size_t axis = *broadcast_axis;
+  const size_t vector_idx = IsConstOne(lhs->shape_[axis]) ? 0 : 1;
+  const size_t matrix_idx = 1 - vector_idx;
+  const auto& vector = vector_idx == 0 ? lhs : rhs;
+  const auto matrix_valid = GetValidShape(matrix_idx == 0 ? lhs : rhs);
+  const auto vector_valid = GetValidShape(vector);
+  CHECK_SPAN(
+      ProveValidExtentEqual(vector_valid[axis], vector->shape_[axis]) == ProofResult::kTrue &&
+          ProveValidExtentLessEqual(matrix_valid[1 - axis], vector_valid[1 - axis]) == ProofResult::kTrue,
+      span)
+      << "tensor.mul broadcast vector must cover the matrix valid region, got matrix valid_shape "
+      << FormatShape(matrix_valid) << " and vector valid_shape " << FormatShape(vector_valid);
+  return ConversionResult{reg.Create(axis == 0 ? "tile.col_expand_mul" : "tile.row_expand_mul",
+                                     {args[matrix_idx], args[vector_idx]}, span)};
+}
+
 // Allocate a Vec scratch tile shaped like ``model``, append its binding to
 // ``prologue``, and return the Var to pass as the op's scratch operand.
 //
@@ -538,7 +582,7 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
 
   RegisterCustom("tensor.add", MakeBroadcastBinaryConv("tile.add", "tile.row_expand_add"));
   RegisterCustom("tensor.sub", MakeBroadcastBinaryConv("tile.sub", "tile.row_expand_sub"));
-  RegisterCustom("tensor.mul", MakeBroadcastBinaryConv("tile.mul", "tile.row_expand_mul"));
+  RegisterCustom("tensor.mul", ConvertTensorMul);
   RegisterCustom("tensor.div", MakeBroadcastBinaryConv("tile.div", "tile.row_expand_div", true));
   // tensor.maximum/minimum dispatch by rhs type:
   //   tensor rhs → tile.maximum/minimum
