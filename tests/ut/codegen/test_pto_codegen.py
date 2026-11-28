@@ -2487,6 +2487,26 @@ class TestGenerateKernelWrapper:
         assert entry.index(reset) < entry.index("my_kernel(a, out, s);")
         assert "set_ctrl(sbitset1" not in entry
 
+    def test_clears_inherited_saturation_override_on_a5_device_vec_before_forwarding(self):
+        func = _make_func("my_kernel", [("a", "tensor"), ("s", "scalar"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        entry = wrapper[wrapper.index("void kernel_entry(__gm__ int64_t* args)") :]
+        reset = "set_ctrl(sbitset0(get_ctrl(), 60));"
+
+        assert entry.count(reset) == 1
+        assert (
+            "#if defined(__DAV_VEC__) && defined(PTO_NPU_ARCH_A5) && "
+            "!defined(__CPU_SIM) && !defined(__COSTMODEL)\n"
+            "    // Start A5 vector tasks in USE_API saturation mode (CTRL[60] = 0), so\n"
+            "    // per-instruction #sat flags are not overridden by inherited CTRL state.\n"
+            f"    {reset}\n"
+            "#endif"
+        ) in entry
+        assert entry.index("set_atomic_none();") < entry.index(reset)
+        assert entry.index(reset) < entry.index("// Unpack tensor: a")
+        assert entry.index(reset) < entry.index("my_kernel(a, out, s);")
+        assert "set_ctrl(sbitset1" not in entry
+
     def test_defer_wait_wrapper_forwards_raw_args_through_checked_adapter(self):
         @pl.program
         class DeferredWrapperProgram:
