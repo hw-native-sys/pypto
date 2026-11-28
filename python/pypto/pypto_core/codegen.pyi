@@ -12,6 +12,9 @@
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import CoreType, Expr, Function, Program, Var
 
+def _shmem_comm_layout() -> tuple[int, int, int, int, int, int, int, int]:
+    """Return size, rank capacity, field offsets, and communication buffer alignment."""
+
 def data_type_to_mlir(dtype: DataType) -> str:
     """Return the PTO MLIR spelling of an element data type."""
 

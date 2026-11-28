@@ -36,6 +36,12 @@ def entry_function(program: ir.Program) -> ir.Function:
     raise ValueError("Kernel contract requires exactly one single-chip entry")
 
 
+def distributed_parameter_indices(entry: ir.Function) -> tuple[int, ...]:
+    return tuple(
+        index for index, param in enumerate(entry.params) if isinstance(param.type, ir.DistributedTensorType)
+    )
+
+
 def return_aliases(program: ir.Program, entry: ir.Function) -> tuple[int, ...] | None:
     # Return aliases describe the logical caller signature, before lowering.
     indices = ir.returned_param_indices(entry, program)
@@ -119,7 +125,7 @@ def validate_lowered_signature(logical: Sequence[ParamInfo], lowered: Sequence[P
 
 
 def analyze_contract(
-    program: ir.Program, contract: object
+    program: ir.Program, contract: object, *, explicit_comm_contexts: bool = False
 ) -> tuple[list[ParamInfo] | None, tuple[int, ...] | None]:
     from pypto._artifact_contract import ArtifactExecutionMode  # noqa: PLC0415
 
@@ -128,7 +134,15 @@ def analyze_contract(
     if type(contract) is not ArtifactExecutionMode:
         raise TypeError(f"Expected ArtifactExecutionMode, got {contract!r}")
     if contract is ArtifactExecutionMode.KERNEL:
-        logical, _, _ = _extract_func_param_infos(entry_function(program))
+        entry = entry_function(program)
+        if any(isinstance(param.type, ir.CommCtxType) for param in entry.params):
+            raise ValueError("Kernel communication contexts must be generated for distributed tensors")
+        if not explicit_comm_contexts and distributed_parameter_indices(entry):
+            raise ValueError(
+                "Distributed KERNEL tensors require explicit communication contexts. "
+                "Use a direct JIT call with tensors from ShmemWindow.as_torch_tensor()."
+            )
+        logical, _, _ = _extract_func_param_infos(entry)
         return logical, validate_kernel_program(program, logical)
     try:
         entry = entry_function(program)

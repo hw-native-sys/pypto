@@ -25,7 +25,10 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
 from pypto.runtime.kernel.arguments import BorrowedArguments
 from pypto.runtime.kernel.context import KernelState
+from pypto.runtime.shmem_gloo import COMM_CONTEXT_SIZE, COMM_CTX_SLOT, ShmemWindow, align_up
 from pypto.torch import interop, launch
+
+from examples.distributed.gloo_shmem_utils import run_eager_kernel
 
 
 @pytest.fixture
@@ -118,6 +121,91 @@ def test_repeated_retirement_releases_worker_imports(eager_env, prepared):
         assert first.done() and len(worker.imports) == 2
         env.runs[-1].complete = True
         assert second.done() and not worker.imports
+    env.state.close()
+
+
+@pytest.fixture
+def shmem_arguments(eager_env, prepared):
+    artifact, _, _ = prepared
+    metadata = artifact.metadata
+    assert metadata is not None
+    # An ordinary UINT64 and a generated context share the wire dtype.
+    parameters = (
+        metadata.parameters[0],
+        replace(metadata.parameters[1], dtype=DataType.UINT64),
+        metadata.parameters[2],
+        ParamInfo("x_ctx", ParamDirection.In, None, DataType.UINT64),
+    )
+    artifact.metadata = replace(
+        metadata, parameters=parameters, lowered_parameters=parameters, comm_context_bindings=((3, 0),)
+    )
+    offset = align_up(COMM_CONTEXT_SIZE)
+    backing = eager_env.tensor((offset + 1024,), torch.uint8)
+    address = backing.data_ptr()
+    window = ShmemWindow(
+        tensor=backing,
+        handle=object(),
+        window_bytes=backing.nbytes,
+        local_base=address,
+        peer_bases=[address],
+        offsets={COMM_CTX_SLOT: 0, "data": offset},
+        device_ctx_tensor=None,
+        device_ctx_ptr=address,
+    )
+    view = window.as_torch_tensor("data", (16, 16), torch.float32)
+    return [artifact, view, window]
+
+
+@pytest.mark.parametrize(
+    "invalid, message",
+    [
+        ("integer", "Expected 3 kernel arguments"),
+        ("private", "requires a view from ShmemWindow"),
+        ("other_window", "must be a contiguous data view"),
+        ("reserved", "must be a contiguous data view"),
+        ("legacy_metadata", "requires explicit communication-context metadata"),
+    ],
+)
+def test_shmem_rejects_invalid_context_and_storage(eager_env, shmem_arguments, invalid, message):
+    artifact, data, window = shmem_arguments
+    if invalid == "private":
+        data = eager_env.tensor()
+    elif invalid == "other_window":
+        data.__dict__["_pypto_shmem_window"] = replace(window, tensor=window.tensor.clone())
+    elif invalid == "reserved":
+        data = window.tensor[:1024].view(torch.float32).reshape(16, 16)
+        data.__dict__["_pypto_shmem_window"] = window
+    elif invalid == "legacy_metadata":
+        artifact.metadata = replace(artifact.metadata, comm_context_bindings=None)
+    injected = (1,) if invalid == "integer" else ()
+    with pytest.raises((TypeError, ValueError), match=message):
+        run_eager_kernel(artifact, data, 17, eager_env.tensor(), *injected)
+    assert not eager_env.state._submissions and not eager_env.runs
+    eager_env.state.close()
+
+
+def test_external_mapping_owner_lives_until_retirement(eager_env, shmem_arguments):
+    env = eager_env
+    # Empty the fixture reference so the ticket is the only window owner.
+    artifact, data, window = shmem_arguments
+    shmem_arguments.clear()
+    reference = weakref.ref(window)
+    pointer = window.device_ctx_ptr
+    run_eager_kernel(artifact, data, 17, env.tensor())
+    ticket = env.state._submissions[0]
+    del data, window
+    gc.collect()
+    assert reference() is not None
+    env.run_queue()
+    assert not ticket.done()
+    args = next(e[2] for e in env.events if isinstance(e, tuple))
+    assert [scalar.value for scalar in args.scalars] == [17, pointer]
+    gc.collect()
+    assert reference() is not None
+    env.runs[0].complete = True
+    assert ticket.done()
+    gc.collect()
+    assert reference() is None
     env.state.close()
 
 

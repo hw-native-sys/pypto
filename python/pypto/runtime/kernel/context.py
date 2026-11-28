@@ -175,7 +175,16 @@ class _ProcessKernelState:
             if artifact.runtime_name != config.runtime:
                 raise ValueError("Kernel artifact runtime does not match the Worker configuration")
             callable_ = artifact.chip_callable
-            handle = worker.prepare(callable_)
+            # Simpler mutates its callable registry only after earlier eager
+            # runs retire. Serialize fresh registration with submission. The
+            # hit path above remains asynchronous and live graph owners survive.
+            with self._submission_lock:
+                try:
+                    self._wait_submissions(allow_live_captures=True)
+                except BaseException as exc:
+                    self._fail_admission(exc)
+                    raise
+                handle = worker.prepare(callable_)
             registration = KernelRegistration(
                 identity, self.pid, self.generation, handle, self, callable_, artifact
             )

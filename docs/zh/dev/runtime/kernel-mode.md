@@ -440,3 +440,82 @@ python -m pytest tests/st/runtime/kernel/test_torch_eager.py --platform=a2a3 --d
 这些依赖或指定 `--codegen-only` 时跳过。另有两个 codegen 冒烟用例，分别为两种
 runtime 完整编译测试 kernel，但不验证设备执行。执行用例被跳过时，CI 通过不能
 证明 eager 数值执行正确。
+
+## SHMEM 图与 Qwen3 TP 工作负载
+
+`pypto.torch.init()` 后，通过通常的 `@pl.jit` 接口调用进程内 SHMEM 内核。
+每个 `pld.DistributedTensor` 参数使用 `ShmemWindow.as_torch_tensor()` 返回的连续视图。
+例如 `tput_chip(x, src, dst)` 只传声明中的参数。编译器记录每个生成的 `CommContext`
+对应的张量。运行时校验视图所属窗口，填充上下文槽，并保留窗口直到异步任务或图回放退役。
+默认 WORLD 组使用 Gloo，NPU 后端在 WORLD 内集合分配对称内存。
+
+可用 `examples/distributed/08_gloo_shmem_collectives.py --prepare-only` 在 CPU 上准备 JIT
+缓存。双 rank 设备运行使用同一套 PTOAS、CANN 和 SHMEM 环境及同一产物目录。图和模型基准也支持预构建产物，参数同样
+使用张量视图。早于通信上下文绑定元数据的产物需要重新编译。
+
+同步设备任务、销毁引用窗口的图并排空提交票据后，可移除窗口及其视图的引用。底层分配由
+Torch 对称内存后端管理。
+
+`tests/st/runtime/kernel/test_gloo_shmem_capture.py` 录制包含本地内核与 SHMEM
+通信的真实 Torch 图，覆盖 2／4／8 rank 的 TSTORE、TPUT、allreduce、变化输入回放、
+设备屏障和图资源回收。在设备分配外执行
+`tests/st/runtime/kernel/capture_kernels.py --artifacts <directory>`；
+HBG 使用 `--runtime host_build_graph` 和独立目录。分配设备后，通过 torchrun
+执行，设置 `PYPTO_SHMEM_EAGER_ARTIFACTS=<directory>`，分别测试
+`TASK_QUEUE_ENABLE=0` 和 `1`。
+
+`examples/models/qwen3_tp` 使用已有 KERNEL worker 实现固定形状的 Qwen3-14B
+预填充（prefill）和解码（decode），没有 PROGRAM worker 或 PROGRAM 上下文借用。
+Gloo 引导 SHMEM 窗口建立；每次归约依次发布数据、执行可复用设备屏障、求和远端数据、
+执行第二次屏障后再复用。eager 与 capture 使用同一序列。权重采用 BF16 存储、
+FP32 中间计算和显式舍入边界，不宣称与 Hugging Face eager BF16 逐位一致。
+
+申请设备前准备编译产物及各 rank 权重：
+
+```bash
+WORLD_SIZE=2 TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -m examples.models.qwen3_tp.prepare   --artifacts build/qwen-kernel/artifacts --weights build/qwen-kernel/weights   --model /path/to/Qwen3-14B
+```
+
+在已分配设备上，从仓库根目录以模块方式启动基准测试。
+
+```bash
+torchrun --standalone --nproc-per-node=2 --module tests.benchmarks.qwen3_kernel \
+  --mode eager --artifacts build/qwen-kernel/artifacts --weights build/qwen-kernel/weights \
+  --prompt-ids prompt.json --output result.json
+```
+
+使用 `--mode capture` 测量图回放。默认预热一次后测量五次请求，
+每次贪心生成八个 token。输入文件为非空 token ID JSON 数组，最多 32 个 token；
+batch 为 1，总缓存长度最多 128。
+
+runner 将 attention 的准备、scores、softmax、context 和 cast 合为每层一次提交，
+保留原来的五个设备任务及调用方中间缓冲区。每 rank 每次前向调用数由 763 降为 603。
+使用 `--unfused-attention` 运行分开提交的对照，或在 eager 模式使用 `--paired-attention`
+在同一进程交替测量两种配置。配对测试分别预热，并在计时外检查所有 logits 逐位一致。
+
+TP2 HBG eager 还将 attention 与其归约合并提交，FFN 与其归约也合并提交。Decode
+先单独提交 KV 写入，后续 attention 再读取只读缓存切片。使用
+`--paired-layer-grouping --warmups 3` 在同一进程对比半层分组和仅合并 attention 的路径。
+`--profile-host` 使用 cProfile 记录每种配置的一次测量请求，诊断耗时包含 profiler 开销。
+
+capture 按 `(position, token_count)` 缓存图，固定张量地址和标量绑定；后续请求
+更新输入内容后重放。该有限范围示例不是通用动态位置推理服务。关闭 worker 前重置所有图。
+
+两种模式均设置 `ring_task_window=16`、`ring_heap=1048576` 字节及
+`ring_dep_pool=64`。capture 的各入口最多提交五个任务，模型使用调用方提供的中间张量。
+准备阶段默认选择 HBG，在有序调用之间共享堆暂存空间。可通过
+`--runtime tensormap_and_ringbuffer` 选择 TMR 进行 eager 执行；但缓存完整模型的全部图时，
+即使缩小 ring，TMR 保留的逐调用 runtime pool 仍可能耗尽设备内存。
+新图录制后，各 rank 先通过 Gloo 集合，再进行首次回放，避免较早完成的 rank 在设备屏障
+中等待仍在录制的对端而超时。缓存图的后续回放没有这一 Host 集合。回放只同步设备完成，
+不逐项回收仍存活图的 ticket；这些 ticket 在最终重置图后统一回收。
+
+使用同模型、TP 数、输入和输出长度，与 `tests/benchmarks/qwen3_native_vllm.py`
+比较。后者使用已安装 vLLM 的默认图配置；`--enforce-eager` 选择 eager 基线。
+使用原生 `VLLM_BATCH_INVARIANT` 设置时，输出也会记录该设置。
+结果应记录所选配置及依赖版本。
+主要比较包含生成与采样的预热后请求墙钟耗时；阶段计时的引擎边界不同，应分别标注。
+初始化和图录制不计入预热后的测量。vLLM 初始化中的内部编译仍在分配设备的任务内执行；
+PyPTO 产物则提前准备。独立 runner 在贪心采样前将 logits 拷贝至 CPU；vLLM
+使用自己的调度、采样与 KV 缓存实现。保留原始样本及 token，并在 CPU 上运行
+`tests/st/distributed/test_qwen3_tp_reference.py` 验证 logits 后，再将计时视为有效模型结果。

@@ -75,6 +75,64 @@ def npu(monkeypatch):
     return module
 
 
+def test_raw_nd_view_skips_only_native_format_query(npu):
+    raw, ordinary = _tensor(), _tensor()
+    frame = interop.CallSignature([_param(), _param("y")]).describe_call(
+        (raw, ordinary), _raw_nd_tensors=(raw,)
+    )
+    assert frame.tensors[0].metadata.format == 2
+    assert npu.get_npu_format.call_count == 1
+    assert npu.get_npu_format.call_args.args[0] is ordinary
+    with pytest.raises(ValueError, match="expects shape"):
+        interop.CallSignature([_param(shape=(1, 6))]).describe_call((raw,), _raw_nd_tensors=(raw,))
+    with pytest.raises(ValueError, match="declares NZ"):
+        interop.CallSignature([replace(_param(), layout="NZ")]).describe_call((raw,), _raw_nd_tensors=(raw,))
+
+
+def test_kernel_infers_contexts_and_keeps_window_owner(npu):
+    from pypto.runtime.shmem_gloo import (  # noqa: PLC0415
+        COMM_CONTEXT_SIZE,
+        COMM_CTX_SLOT,
+        ShmemWindow,
+        carve_window_layout,
+    )
+
+    offsets, nbytes = carve_window_layout((COMM_CONTEXT_SIZE, 24, 24))
+    base = _tensor((nbytes,), torch.uint8)
+    owner = ShmemWindow(
+        base,
+        object(),
+        nbytes,
+        base.data_ptr(),
+        [base.data_ptr()],
+        dict(zip((COMM_CTX_SLOT, "src", "dst"), offsets, strict=True)),
+        base[:COMM_CONTEXT_SIZE],
+        base.data_ptr(),
+    )
+    src = owner.as_torch_tensor("src", (2, 3), torch.float32)
+    dst = owner.as_torch_tensor("dst", (2, 3), torch.float32)
+    params = (
+        _param("src"),
+        _param("dst", direction=ParamDirection.Out),
+        _param("src_ctx", None, DataType.UINT64),
+        _param("dst_ctx", None, DataType.UINT64),
+    )
+    options = dict(platform="a2a3", device_index=0, distributed_indices=(0, 1), append_contexts=True)
+    frame = interop._describe_kernel_call(params, (1,), (src, dst), **options)
+    assert [arg.value for arg in frame.scalars] == [base.data_ptr(), base.data_ptr()]
+    assert frame.alias_result() is dst and frame.owners == (owner,)
+    npu.get_npu_format.assert_not_called()
+
+    with pytest.raises(TypeError, match="requires a view"):
+        interop._describe_kernel_call(params, (1,), (_tensor(), dst), **options)
+    with pytest.raises(TypeError, match="Expected 2 kernel arguments"):
+        interop._describe_kernel_call(params, (1,), (src, dst, base.data_ptr()), **options)
+
+    # Normal local kernels can read a SHMEM view without adding a context slot.
+    local = interop._describe_kernel_call(params[:1], (), (src,), platform="a2a3", device_index=0)
+    assert not local.scalars and local.owners == (owner,)
+
+
 def test_each_call_snapshots_values_and_current_stream(npu):
     """Changed scalar/address/stream values never mutate an earlier call frame."""
     signature = interop.CallSignature(

@@ -20,10 +20,14 @@ def invoke_jit(jit: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     # of optional Torch/native execution dependencies.
     state = get_process_kernel_state()
     bound = state.require_config()
-    from pypto.ir._compile_contract import analyze_contract  # noqa: PLC0415
+    from pypto.ir._compile_contract import (  # noqa: PLC0415
+        analyze_contract,
+        distributed_parameter_indices,
+        entry_function,
+    )
     from pypto.runtime import CompileOptions  # noqa: PLC0415
     from pypto.torch import launch  # noqa: PLC0415
-    from pypto.torch.interop import CallSignature  # noqa: PLC0415
+    from pypto.torch.interop import _describe_kernel_call  # noqa: PLC0415
 
     options = kwargs.get("config")
     if options is None:
@@ -37,9 +41,16 @@ def invoke_jit(jit: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     def preflight(program: Any, ordered: list[Any]) -> None:
         # On a miss, validate the parsed logical signature before passes/codegen.
         # On a hit the same validation reads the artifact's persisted metadata.
-        params, aliases = analyze_contract(program, ArtifactExecutionMode.KERNEL)
+        params, aliases = analyze_contract(program, ArtifactExecutionMode.KERNEL, explicit_comm_contexts=True)
         assert params is not None and aliases is not None
-        frame = CallSignature(params, return_aliases=aliases, platform=bound.platform).describe_call(ordered)
+        frame = _describe_kernel_call(
+            params,
+            aliases,
+            ordered,
+            platform=bound.platform,
+            device_index=bound.device_id,
+            distributed_indices=distributed_parameter_indices(entry_function(program)),
+        )
         launch.check_frame(frame, bound)
 
     artifact, ordered, _ = jit._resolve_compiled(
@@ -55,8 +66,14 @@ def invoke_jit(jit: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
     if metadata is None:
         raise ValueError("Kernel artifact has no validated parameter metadata; recompile it")
     assert metadata.return_aliases is not None
-    frame = CallSignature(
-        metadata.parameters, return_aliases=metadata.return_aliases, platform=bound.platform
-    ).describe_call(ordered)
+    frame = _describe_kernel_call(
+        metadata.parameters,
+        metadata.return_aliases,
+        ordered,
+        platform=bound.platform,
+        device_index=bound.device_id,
+        distributed_indices=tuple(index for _, index in metadata.comm_context_bindings or ()),
+        append_contexts=True,
+    )
     launch.check_frame(frame, bound)
     return launch.invoke(artifact, frame, bound)
