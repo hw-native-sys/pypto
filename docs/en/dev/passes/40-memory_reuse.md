@@ -212,6 +212,9 @@ Scaling buffers retain their asynchronous TPUSH lifetime.
 When a branch returns two tiles in swapped slots, the compiler uses a temporary to preserve both values.
 If a branch yields a tile and its slice, assigning the slice to another name before the yield
 preserves its offset and valid shape. Both results can share a single transfer.
+For overlapping branch results with known byte offsets, the pass sorts the destination ranges
+and sweeps them once. Even when every result overlaps every other result, the number of
+destination comparisons grows linearly with the number of results.
 Tiles that land on the allocation by inheritance rather than by binding — views, in-place
 results, bare SSA aliases — are excluded: they are the same data as their source, so
 overlapping with it is expected.

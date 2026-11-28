@@ -479,15 +479,14 @@ class YieldFixupMutator : public StorageBoundaryMutator {
                        [](const CarryCopy& lhs, const CarryCopy& rhs) {
                          return lhs.src_memref->size_ > rhs.src_memref->size_;
                        });
+      const auto overlaps = targets_index.BranchOverlapWitnesses(else_copies, targets.size());
       std::set<size_t> repeated;
       std::map<size_t, BranchTransfer> transfers;
       for (auto& copy : else_copies) {
-        if (repeated.count(copy.index)) continue;
         const auto root = BranchViewRoot(copy.source);
         const auto view = branch_views_.find(copy.source.get());
         const auto cover = view == branch_views_.end() ? copy.source : view->second.cover;
-        targets_index.ForEachOverlapping(copy.dst_memref, [&](size_t other) {
-          if (other == copy.index) return;
+        for (size_t other : overlaps[copy.index]) {
           const auto sibling = BranchValue(else_yield->value_.at(other));
           const auto source = GetTypeMemRef(else_yield->value_[other]->GetType());
           const bool same_windows = source && SamePhysicalWindow(*source, copy.src_memref) &&
@@ -505,19 +504,20 @@ class YieldFixupMutator : public StorageBoundaryMutator {
           CHECK_SPAN(same_windows || can_rebuild || aligned, if_stmt->span_)
               << "Branch results '" << new_return_vars[copy.index]->name_hint_ << "' and '"
               << new_return_vars[other]->name_hint_ << "' require overlapping destination slots";
+          if (repeated.count(copy.index) || repeated.count(other)) continue;
           const bool distinct_views = sibling != copy.source;
           CallPtr sibling_slice;
           if (distinct_views && !can_rebuild && aligned &&
               CompareBaseAddress(targets[other], copy.dst_memref) == AddressRelation::kSame) {
             sibling_slice = SliceFromCoveringSibling(cover, sibling);
           }
-          if (distinct_views ? (!can_rebuild && !sibling_slice) : !same_windows) return;
+          if (distinct_views ? (!can_rebuild && !sibling_slice) : !same_windows) continue;
           auto it = transfers.try_emplace(copy.index, BranchTransfer{copy.source, {copy.index}, {}}).first;
           if (distinct_views) it->second.source = cover;
           if (sibling_slice) it->second.sibling_slices.emplace(sibling.get(), sibling_slice);
           it->second.positions.push_back(other);
           repeated.insert(other);
-        });
+        }
         if (auto it = transfers.find(copy.index); it != transfers.end() && it->second.source != copy.source) {
           // A narrow view may be yielded first. Transfer the full backing tile before rebuilding its views.
           copy.source = it->second.source;
@@ -889,8 +889,11 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       }
       for (auto& [base, entries] : positioned_) {
         static_cast<void>(base);
-        std::sort(entries.begin(), entries.end(),
-                  [](const Entry& a, const Entry& b) { return a.begin < b.begin; });
+        std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+          if (a.begin != b.begin) return a.begin < b.begin;
+          if (a.end != b.end) return a.end > b.end;
+          return a.index < b.index;
+        });
         auto& maxima = prefix_end_[base];
         for (const auto& entry : entries) {
           maxima.push_back(maxima.empty() ? entry.end : std::max(maxima.back(), entry.end));
@@ -940,6 +943,51 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       for (; it != entries.end() && it->begin < end; ++it) {
         if (it->end > begin) fn(it->index);
       }
+    }
+
+    // In increasing start order, the previous interval ending furthest right covers
+    // every byte the next interval shares with earlier results. Checking that witness
+    // extends agreement on those bytes to the whole component. Keep the furthest writer
+    // as well: two stationary results need no check, but a write must agree with both.
+    // At a shared start, the widest result gets the first chance to supply a sibling view.
+    [[nodiscard]] std::vector<std::vector<size_t>> BranchOverlapWitnesses(
+        const std::vector<CarryCopy>& copies, size_t count) const {
+      std::vector<size_t> rank(count, copies.size());
+      for (size_t i = 0; i < copies.size(); ++i) rank[copies[i].index] = i;
+      std::vector<std::vector<size_t>> overlaps(count);
+      auto record = [&](size_t a, size_t b) {
+        if (rank[b] < rank[a]) std::swap(a, b);
+        if (a != b && rank[a] < copies.size()) overlaps[a].push_back(b);
+      };
+      for (const auto& [base, entries] : positioned_) {
+        const Entry* frontier = nullptr;
+        const Entry* writer = nullptr;
+        const Entry* same_start = nullptr;
+        for (const auto& entry : entries) {
+          if (entry.end <= entry.begin) continue;
+          if (!same_start || entry.begin != same_start->begin) same_start = &entry;
+          if (same_start != &entry) record(same_start->index, entry.index);
+          if (frontier && frontier != same_start && frontier->end > entry.begin) {
+            record(frontier->index, entry.index);
+          }
+          if (writer && writer != frontier && writer != same_start && writer->end > entry.begin) {
+            record(writer->index, entry.index);
+          }
+          if (!frontier || entry.end > frontier->end) frontier = &entry;
+          if (rank[entry.index] < copies.size() && (!writer || entry.end > writer->end)) writer = &entry;
+        }
+      }
+      // An unknown offset can touch the whole allocation. Anchor its component on a
+      // writer when available, and still check the concrete intervals among themselves.
+      for (const auto& [base, loose] : unpositioned_) {
+        const auto anchor = *std::min_element(loose.begin(), loose.end(),
+                                              [&](size_t a, size_t b) { return rank[a] < rank[b]; });
+        for (size_t i : loose) record(anchor, i);
+        if (auto it = positioned_.find(base); it != positioned_.end()) {
+          for (const auto& entry : it->second) record(anchor, entry.index);
+        }
+      }
+      return overlaps;
     }
 
     /// Every pair of indexed ranges that overlaps, as (lower index, higher index).

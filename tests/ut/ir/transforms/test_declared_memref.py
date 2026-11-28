@@ -105,6 +105,38 @@ def _run_full_pipeline(program: ir.Program, last_pass: str) -> ir.Program:
     return program
 
 
+def _branch_slice_program(windows: list[tuple[int, int, int]]) -> ir.Program:
+    """Yield slices described by (width, then offset, else offset) from two slots."""
+    cols = max(max(then_col, else_col) + width for width, then_col, else_col in windows)
+    names = ", ".join(f"r{i}" for i in range(len(windows)))
+    lines = [
+        "import pypto.language as pl",
+        'buf = pl.MemRef("buf", slots=2)',
+        "@pl.program",
+        "class BranchSlices:",
+        "    @pl.function(type=pl.FunctionType.InCore)",
+        f"    def main(self, x: pl.Tensor[[2, {cols}], pl.FP32], flag: pl.Scalar[pl.INT32],",
+        f"             out: pl.Out[pl.Tensor[[{len(windows)}, {cols}], pl.FP32]])"
+        f" -> pl.Tensor[[{len(windows)}, {cols}], pl.FP32]:",
+    ]
+    for slot, (arm, condition) in enumerate((("a", "if flag > 0:"), ("b", "else:"))):
+        lines.extend(
+            (
+                f"        {condition}",
+                f"            {arm}: pl.Tile[[1, {cols}], pl.FP32, buf[{slot}], pl.Mem.Vec]"
+                f" = pl.load(x, [{slot}, 0], [1, {cols}])",
+            )
+        )
+        for i, (width, then_col, else_col) in enumerate(windows):
+            offset = (then_col, else_col)[slot]
+            lines.append(f"            {arm}{i} = pl.tile.slice({arm}, [1, {width}], [0, {offset}])")
+        views = ", ".join(f"{arm}{i}" for i in range(len(windows)))
+        lines.append(f"            {names} = pl.yield_({views})")
+    lines.extend(f"        out = pl.store(r{i}, [{i}, 0], out)" for i in range(len(windows)))
+    lines.append("        return out")
+    return pl.parse_program("\n".join(lines))
+
+
 def _run_dsa_rp_pipeline(program: ir.Program) -> ir.Program:
     """Run the allocation passes with DSA-RP owning placement."""
     with passes.PassContext(
@@ -1061,6 +1093,42 @@ class TestSlots:
         # Transferring the 64-column parent would also write bytes outside both results.
         assert window(move.var) == (16 * 4, 32 * 4)
         assert [window(var) for var in result.value] == [(16 * 4, 16 * 4), (16 * 4, 32 * 4)]
+
+    @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP])
+    @pytest.mark.parametrize(
+        ("windows", "expected_moves"),
+        [
+            pytest.param([(256, i * 8, i * 8) for i in range(32)], 32, id="dense"),
+            # A longer, earlier range must not hide the two siblings that can share a transfer.
+            pytest.param([(96, 8, 8), (32, 24, 24), (16, 24, 24)], 2, id="same-origin-siblings"),
+            # The last slice misses its immediate predecessor but conflicts with the first one.
+            pytest.param([(128, 0, 0), (8, 8, 8), (16, 48, 64)], None, id="hidden-conflict"),
+        ],
+    )
+    def test_shifted_branch_slice_overlaps(self, planner, windows, expected_moves, ascend_backend):
+        program = _branch_slice_program(windows)
+        with passes.PassContext([], memory_planner=planner, enable_buffer_ir=False):
+            if expected_moves is None:
+                with pytest.raises(ValueError, match="require overlapping destination slots"):
+                    _run_full_pipeline(program, "AllocateMemoryAddr")
+                return
+            after = _run_full_pipeline(program, "AllocateMemoryAddr")
+        func = after.get_function("main")
+        assert func is not None
+        branch = next(s for s in ir.flatten_to_stmts(func.body) if isinstance(s, ir.IfStmt))
+        assert branch.else_body is not None
+        stmts = ir.flatten_to_stmts(branch.else_body)
+        moves = [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == ir.get_op("tile.move").name
+        ]
+        assert len(moves) == expected_moves
+        for var, (width, col, _) in zip(branch.return_vars, windows, strict=True):
+            assert isinstance(var.type, ir.TileType) and var.type.memref is not None
+            assert (_const_offset(var.type.memref), var.type.memref.size_) == (col * 4, width * 4)
 
     def test_slot_size_is_the_largest_tile_on_any_slot(self):
         """Slots are uniform, so one slot must hold the biggest bound tile.
