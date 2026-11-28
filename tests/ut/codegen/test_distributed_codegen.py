@@ -10,7 +10,10 @@
 """Unit tests for distributed Python code generation."""
 
 import re
+import sys
 import time
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pypto.language as pl
 import pytest
@@ -20,6 +23,61 @@ from pypto import codegen, ir, passes
 
 class TestDistributedCodegen:
     """Test distributed Python codegen on outlined hierarchy programs."""
+
+    @pytest.mark.parametrize("prepared", [True, False], ids=["prepared", "fallback"])
+    def test_prepare_rank_column_before_chip_loop(self, monkeypatch, prepared):
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip(self, x: pl.Tensor[[4], pl.FP32]) -> pl.Tensor[[4], pl.FP32]:
+                return x
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host(self, x: pl.Tensor[[2, 4], pl.FP32]):
+                for __rank_column_row in pl.range(2):
+                    row = pl.tensor.slice(x, [1, 4], [__rank_column_row, 0], drop_dims=[0])
+                    self.chip(row)
+
+        code = codegen.DistributedCodegen().generate(Input)
+        interface = Mock()
+        monkeypatch.setitem(sys.modules, "simpler.task_interface", interface)
+        namespace = {}
+        exec(code, namespace)
+
+        source = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+        views = source.unbind()
+        wires = (object(), object())
+        prepare = Mock(return_value=(views, wires) if prepared else None)
+        namespace["prepare_rank_column"] = prepare
+        tensors = {"x": source}
+        namespace["add_chip_tensor_arg"] = lambda args, worker, value, *rest: args.append(value)
+        interface.TaskArgs.side_effect = list
+        dispatches = []
+
+        def submit(callable_id, args, config, *, worker):
+            dispatches.append((tensors["row"], *args))
+
+        orch = SimpleNamespace(_worker=object(), submit_next_level=submit)
+        namespace["host"](
+            orch,
+            None,
+            SimpleNamespace(output_prefix=None),
+            tensors=tensors,
+            callables={"chip": 1},
+            sub_ids={},
+            _keep=[],
+            world_size=2,
+        )
+        prepare.assert_called_once()
+        assert len(dispatches) == 2
+        for rank, (view, arg) in enumerate(dispatches):
+            assert view.data_ptr() == source[rank].data_ptr()
+            torch.testing.assert_close(view, source[rank])
+            if prepared:
+                assert view is views[rank]
+                assert arg is wires[rank]
+            else:
+                assert arg is view
 
     def test_chip_sub_worker_and_orchestrator(self):
         """HOST orchestrator calling CHIP orchestrator → CHIP worker dispatches via _submit_chip."""

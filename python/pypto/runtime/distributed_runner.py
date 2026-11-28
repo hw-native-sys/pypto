@@ -29,12 +29,14 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import numpy as np
 import torch
 
+from . import tensor_arg
 from .comm_domain import CommDomain, DomainBufferSpec, DomainState, DomainTensor, allocate_external_domain
 from .device_tensor import DeviceTensor, StackedDeviceTensor
 from .distributed_args import entry_window_requirements, pack_window_args
@@ -44,6 +46,7 @@ from .window_sources import normalize_window_sources
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from simpler.buffer import Tensor as WireTensor
     from simpler.task_interface import TaskArgs
 
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
@@ -459,10 +462,61 @@ class _ChipCallables(dict[str, Any]):
     def __init__(self) -> None:
         super().__init__()
         self.host_tensor_indices: dict[str, frozenset[int]] = {}
+        self.rank_columns: dict[str, tuple[Any, ...]] = {}
+
+    @cached_property
+    def buffer_module(self) -> Any:
+        return importlib.import_module("simpler.buffer")
 
     def add(self, name: str, value: Any, config: dict[str, Any]) -> None:
         self[name] = value
         self.host_tensor_indices[name] = frozenset(config.get("host_tensor_indices", ()))
+
+
+def prepare_rank_column(
+    callables: dict[str, Any], worker: Any, key: str, source: Any, shape: tuple[int, ...]
+) -> tuple[Sequence[Any], Sequence[Any]] | None:
+    """Return (rank views, chip arguments), or None to use ordinary slicing.
+
+    The views remain visible to the HOST program. Dispatch can use the same
+    objects or prepacked descriptors for registered CPU storage. Each cache
+    entry retains the worker, source (keeping its storage alive), registration
+    handle, layout, and descriptors. Reuse requires the same worker, source,
+    handle object, and layout: a new registration can have the same byte size
+    but its descriptors must refer to the new handle.
+    """
+    if type(source) is StackedDeviceTensor and source.full_shape == shape:
+        return source.shards, source.shards
+    if (
+        type(source) is not torch.Tensor
+        or source.device.type != "cpu"
+        or source.layout != torch.strided
+        or source.requires_grad
+        or source.is_quantized
+        or source.is_nested
+        or source.shape != shape
+        or not source.is_contiguous()
+        or source.numel() == 0
+    ):
+        return None
+
+    views = source.unbind(0)
+    registry = getattr(worker, "_fork_tensor_handles", None)
+    if not isinstance(callables, _ChipCallables) or registry is None:
+        return views, views
+    storage = source.untyped_storage()
+    base = storage.data_ptr()
+    handle = registry.get(base)
+    if handle is None or handle.nbytes != storage.nbytes():
+        # The ordinary first dispatch registers the backing storage.
+        return views, views
+    layout = (shape, source.stride(), source.storage_offset(), source.dtype)
+    old = callables.rank_columns.get(key)
+    if old and old[0] is worker and old[1] is source and old[2] is handle and old[3] == layout:
+        return views, old[4]
+    wires = tuple(tensor_arg.make_tensor_arg(worker, view) for view in views)
+    callables.rank_columns[key] = worker, source, handle, layout, wires
+    return views, wires
 
 
 def add_chip_tensor_arg(
@@ -475,24 +529,22 @@ def add_chip_tensor_arg(
     index: int,
 ) -> None:
     """Pack a chip argument using the callee's emitted host-control contract."""
-    from .tensor_arg import make_tensor_arg  # noqa: PLC0415
-
-    host_slots = callables.host_tensor_indices.get(name, ()) if isinstance(callables, _ChipCallables) else ()
-    if index in host_slots:
-        from simpler.buffer import TensorTransfer  # noqa: PLC0415
+    if isinstance(callables, _ChipCallables) and index in callables.host_tensor_indices.get(name, ()):
+        buffer = callables.buffer_module
 
         is_host = isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu"
         if not is_host and _is_simpler_tensor(tensor):
-            from simpler.buffer import AddressSpace, Tensor  # noqa: PLC0415
-
-            is_host = isinstance(tensor, Tensor) and tensor.buffer.address_space == AddressSpace.HOST
+            wire_type: type[WireTensor] = buffer.Tensor
+            is_host = (
+                isinstance(tensor, wire_type) and tensor.buffer.address_space == buffer.AddressSpace.HOST
+            )
         if not is_host:
             raise ValueError(
                 f"Chip {name!r} host control tensor slot {index} requires a CPU tensor or a HOST Tensor"
             )
-        args.add_tensor(make_tensor_arg(worker, tensor), tag, transfer=TensorTransfer.NONE)
+        args.add_tensor(tensor_arg.make_tensor_arg(worker, tensor), tag, transfer=buffer.TensorTransfer.NONE)
     else:
-        args.add_tensor(make_tensor_arg(worker, tensor), tag)
+        args.add_tensor(tensor_arg.make_tensor_arg(worker, tensor), tag)
 
 
 def _assemble_chip_callables(

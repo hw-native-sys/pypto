@@ -306,6 +306,9 @@ class DistributedCodegen : public CodegenBase {
 
   // Per-function state
   ir::FunctionPtr current_func_;
+  // Packed alternatives for the single chip dispatch in a whole-rank slice loop.
+  std::unordered_map<std::string, std::string> rank_wire_args_;
+  std::unordered_set<std::string> local_names_;
   std::string current_target_var_;
   std::string current_expr_value_;
   std::set<std::string> window_source_keys_;

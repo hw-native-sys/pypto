@@ -38,7 +38,7 @@ from pypto.ir import DistributedConfig
 from pypto.ir.compiled_program import _ParamInfo
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
-from pypto.runtime import DeviceTensor, StackedDeviceTensor
+from pypto.runtime import DeviceTensor, StackedDeviceTensor, tensor_arg
 from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_BEGIN,
     _L3_SWIMLANE_GRAPH_END,
@@ -50,6 +50,7 @@ from pypto.runtime.distributed_runner import (
     DistributedWorker,
     ReadOnlyHostTensor,
     _assemble_chip_callables,
+    _ChipCallables,
     _clear_dfx_dispatch_dirs,
     _collect_l3_swimlane,
     _construct_worker,
@@ -59,9 +60,40 @@ from pypto.runtime.distributed_runner import (
     _submit_chip,
     _submit_dispatch,
     add_chip_tensor_arg,
+    prepare_rank_column,
     validate_host_domain_runtime,
 )
 from pypto.runtime.runner import RunConfig
+
+
+def test_rank_column_tracks_registered_storage(monkeypatch):
+    source = torch.arange(8).reshape(2, 4)
+    storage = source.untyped_storage()
+    registry = {}
+    worker = SimpleNamespace(_fork_tensor_handles=registry)
+    callables = _ChipCallables()
+    pack = MagicMock(side_effect=lambda *_: object())
+    monkeypatch.setattr(tensor_arg, "make_tensor_arg", pack)
+
+    def prepare():
+        column = prepare_rank_column(callables, worker, "host.x", source, (2, 4))
+        assert column is not None
+        return column
+
+    views, wires = prepare()
+    assert views is wires
+    assert pack.call_count == 0
+    registry[storage.data_ptr()] = SimpleNamespace(nbytes=storage.nbytes())
+    views, wires = prepare()
+    assert pack.call_count == 2
+    views[1].fill_(7)
+    assert source[1].tolist() == [7] * 4
+    assert prepare()[1] is wires
+    registry[storage.data_ptr()] = SimpleNamespace(nbytes=storage.nbytes())
+    assert prepare()[1] is not wires
+    assert pack.call_count == 4
+    assert prepare_rank_column(callables, worker, "host.x", source, (2, 3)) is None
+    assert prepare_rank_column(callables, worker, "host.x", source.T, (4, 2)) is None
 
 
 def _param(name: str, shape: list[int], direction: ParamDirection = ParamDirection.In) -> _ParamInfo:
