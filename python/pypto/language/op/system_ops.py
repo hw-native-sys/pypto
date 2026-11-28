@@ -420,6 +420,7 @@ def tpush_to_aiv(
     id: int | None = None,
     dst: Tile | None = None,
     offset: Sequence[IntLike] | None = None,
+    aiv_subblockid: int | None = None,
     st_phase: STPhase = STPhase.Unspecified,
     span: Span | None = None,
 ) -> Call:
@@ -434,27 +435,33 @@ def tpush_to_aiv(
     a compact FP32 Acc row tail with full columns at half its positive even
     valid row count. Each AIV reads half the rows from its physical half-slot.
 
-    With ``dst``, A5 instead pushes a fragment directly into a caller-addressed
-    ND FP32 Vec mailbox in both peer AIV UB spaces. ``split=1`` sends half the
-    FP32 Acc rows to each lane; ``offset`` addresses its local destination and
-    preserves the full mailbox row pitch. No FIFO, credit, token or ready/free
-    event is created. The author supplies the same peer addresses and manages
-    explicit synchronization, then calls ``tile.mark_remote_written`` on the
-    received view before register reads. Offsets must be in bounds at runtime;
-    no scalar clamp is inserted.
+    With ``dst``, A5 writes directly to a caller-addressed ND Vec mailbox in
+    peer UB. ``split=1`` sends half the FP32 Acc rows to each AIV in FP32.
+    ``offset`` addresses the local destination and preserves the mailbox row
+    pitch. For ``split=0``, FixPipe converts the entire FP32 Acc to a same-shaped
+    BF16 mailbox on the AIV selected by ``aiv_subblockid``. This mode requires
+    a zero offset and a 32-byte-aligned destination row pitch. For a mailbox
+    slice, its base address must also be provably 32-byte aligned.
+
+    Direct mode uses caller-managed peer addresses and synchronization. After
+    waiting for the write, the consumer calls ``tile.mark_remote_written`` on
+    the received view before register reads. Offsets must be in bounds at runtime.
 
     Args:
         tile: Tile to send. In FIFO mode its Cube-side buffer stays live
             until the consumer frees the slot.
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
-            axes over an odd extent). Direct mode currently supports only 1.
+            axes over an odd extent). Direct mode supports 1 for FP32 and
+            0 for single-lane BF16.
         lane_stride: FIFO partition stride for a ragged boundary or existing box partition.
         id: Optional frontend FIFO pipe id. Omit to use PTOAS default id 0.
         dst: Explicit direct peer Vec mailbox; incompatible with id/lane_stride.
         offset: Local destination [row, col] in direct mode, default [0, 0].
+        aiv_subblockid: Compile-time Python integer (0 or 1) selecting the
+            destination AIV for a direct BF16 write with split=0.
         st_phase: Direct FIXPIPE writeback phase. With ``STPhase.Final``, the exact
-            Final accumulator must be drained to a complete [M/2, N] destination
-            at offset [0, 0], checking and clearing its hardware unit flag.
+            Final accumulator is drained to a complete destination at offset
+            [0, 0], checking and clearing its hardware unit flag.
         span: Optional source span.
     """
     return _ir_ops.tpush_to_aiv(
@@ -464,6 +471,7 @@ def tpush_to_aiv(
         id=id,
         dst=dst.unwrap() if dst is not None else None,
         offset=None if offset is None else [x.unwrap() if isinstance(x, Scalar) else x for x in offset],
+        aiv_subblockid=aiv_subblockid,
         st_phase=st_phase,
         span=span,
     )

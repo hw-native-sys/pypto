@@ -260,6 +260,7 @@ print(pto_code)
 | `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview` (zero-copy view; `valid [...]` clause emitted only when `valid_shape` is supplied) |
 | `tile.assemble(target, source, [row, col])` | (optional) `pto.tmov target -> dst`, then `pto.tinsert` for supported ND Vec copies / A5 BF16 NZ Vec-to-Mat inserts / FIXPIPE writebacks; otherwise `pto.subview` + `pto.tmov` |
 | `tile.tpush_to_aiv(acc, split=1, dst=dst, offset=[row, col], st_phase=...)` | A5 direct split-M FIXPIPE: `pto.tinsert`, or `pto.tmov` with `stPhase=final` for a complete final writeback |
+| `tile.tpush_to_aiv(acc, split=0, dst=bf16_dst, aiv_subblockid=lane)` | A5 direct FP32 Acc → BF16 Vec `pto.tmov` with `single_mode_vec0` or `single_mode_vec1` |
 | `tile.mark_remote_written(tile)` | No instruction; records peer-initialized UB for register analysis |
 | `tile.set_validshape(tile, vr, vc)` | `pto.set_validshape`; a view operand is rejected (see below) |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |

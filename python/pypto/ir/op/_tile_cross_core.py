@@ -111,6 +111,7 @@ def tpush_to_aiv(
     id: int | None = None,
     dst: Expr | None = None,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    aiv_subblockid: int | None = None,
     st_phase: STPhase = STPhase.Unspecified,
     span: Span | None = None,
 ) -> Call:
@@ -124,16 +125,19 @@ def tpush_to_aiv(
     Args:
         tile: Tile data to push.
         split: pto-isa split code (0=none, 1/2=up-down/left-right, 3/4=the same
-            axes over an odd extent). Direct destinations currently require 1.
+            axes over an odd extent). Direct destinations support 1 for FP32 and
+            0 for single-lane BF16.
         lane_stride: FIFO partition stride when a ragged boundary was balanced
             across the two AIV lanes, or to preserve an existing box partition.
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
-        dst: Optional explicit peer ND FP32 Vec mailbox. On A5, selects direct
+        dst: Optional explicit peer ND FP32 or BF16 Vec mailbox. On A5, selects direct
             FIXPIPE instead of TPipe; the author manages addresses and events.
         offset: Local destination row and column of this fragment. Defaults
             to [0, 0] in direct mode; unsupported with FIFO.
+        aiv_subblockid: Compile-time Python int (0 or 1) for a whole-tile
+            direct BF16 write with split=0 and offset [0, 0].
         st_phase: Unit-flag-aware direct FIXPIPE phase. Final requires a complete
-            half-M destination at zero offset. FIFO mode does not accept Final.
+            destination at zero offset. FIFO mode does not accept Final.
         span: Optional source span.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
@@ -141,16 +145,25 @@ def tpush_to_aiv(
         if id is not None or lane_stride is not None:
             raise ValueError("Direct tpush_to_aiv with dst cannot use FIFO id or lane_stride")
         indices = _to_make_tuple((0, 0) if offset is None else offset, actual_span)
+        direct_kwargs: dict[str, Any] = {"split": split, "st_phase": int(st_phase)}
+        if aiv_subblockid is not None:
+            if type(aiv_subblockid) is not int:
+                raise TypeError("Direct tpush_to_aiv aiv_subblockid must be a compile-time Python int")
+            if aiv_subblockid not in (0, 1):
+                raise ValueError("Direct tpush_to_aiv aiv_subblockid must be 0 or 1")
+            direct_kwargs["aiv_subblockid"] = aiv_subblockid
         # The direct transfer has no FIFO credit/token ownership; give the
         # existing pipe-analysis passes an unambiguous internal operation.
         return _ir_core.create_op_call(
             "tile.tpush_to_aiv_direct",
             [tile, dst, indices],
-            {"split": split, "st_phase": int(st_phase)},
+            direct_kwargs,
             actual_span,
         )
     if offset is not None or st_phase != STPhase.Unspecified:
         raise ValueError("tpush_to_aiv offset/st_phase require an explicit dst")
+    if aiv_subblockid is not None:
+        raise ValueError("tpush_to_aiv requires an explicit dst when using aiv_subblockid")
     kwargs: dict[str, Any] = {"split": split}
     if lane_stride is not None:
         kwargs["lane_stride"] = lane_stride

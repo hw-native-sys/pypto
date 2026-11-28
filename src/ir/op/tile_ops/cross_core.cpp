@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -468,27 +469,27 @@ void CheckSplitBoundaryCarriesValid(const std::string& op_name, const std::vecto
 
 // Direct FIXPIPE uses the caller's explicitly addressed remote UB storage,
 // not the TPipe slot/credit protocol. The public tpush_to_aiv wrapper selects
-// this internal operation only when the author supplies dst. The target row offset addresses the
-// local half received by each vector lane.
+// this operation when the author supplies dst. Split-M addresses one local
+// half per lane. Single-lane conversion writes the entire tile to one peer.
 REGISTER_OP("tile.tpush_to_aiv_direct")
-    .set_description("Drain an Acc tile directly to both AIV UB views with split-M FIXPIPE")
+    .set_description("Drain an Acc tile directly to peer AIV UB with FIXPIPE")
     .set_op_category("CrossCoreOp")
     .set_core_affinity(core_affinity::CoreAffinity::CUBE)
     .add_argument("tile", "FP32 Acc tile")
-    .add_argument("dst", "Destination row-major FP32 Vec tile")
+    .add_argument("dst", "Destination row-major FP32 or BF16 Vec tile")
     .add_argument("offset", "Destination row and column offsets")
     .set_arg_effect(1, ArgEffect::Write)
     .set_attr<int>("split")
     .set_attr<int>("st_phase")
+    .set_attr<int>("aiv_subblockid")
     .no_memory_spec()
     .f_deduce_type([](const auto& args, const auto& kwargs) -> TypePtr {
       CHECK(args.size() == 3) << "Direct tpush_to_aiv requires tile, dst, and offset";
       auto acc = As<TileType>(args[0]->GetType());
       auto dst = As<TileType>(args[1]->GetType());
       auto offset = As<MakeTuple>(args[2]);
-      CHECK(dst && acc && dst->shape_.size() == 2 && acc->shape_.size() == 2 &&
-            dst->dtype_ == DataType::FP32 && acc->dtype_ == DataType::FP32)
-          << "Direct tpush_to_aiv requires 2D FP32 tiles";
+      CHECK(dst && acc && dst->shape_.size() == 2 && acc->shape_.size() == 2 && acc->dtype_ == DataType::FP32)
+          << "Direct tpush_to_aiv requires a 2D FP32 source and a 2D destination";
       CHECK(dst->memory_space_ == MemorySpace::Vec && acc->memory_space_ == MemorySpace::Acc)
           << "Direct tpush_to_aiv requires explicit Vec destination and Acc source";
       auto dst_view = tile_view_semantics::GetEffectiveTileView(*dst);
@@ -506,8 +507,21 @@ REGISTER_OP("tile.tpush_to_aiv_direct")
       CHECK(offset && offset->elements_.size() == 2) << "Direct tpush_to_aiv requires two index offsets";
       auto split = GetKwargOr<int>(kwargs, "split", 0);
       auto phase = GetKwargOr<int>(kwargs, "st_phase", static_cast<int>(STPhase::kUnspecified));
-      CHECK(split == 1) << "Direct tpush_to_aiv currently supports only split=1 (split M)";
+      CHECK(split == 0 || split == 1) << "Direct tpush_to_aiv requires split=1 or split=0";
       CHECK(IsValidSTPhase(phase)) << "Direct tpush_to_aiv has invalid st_phase";
+      const bool single_lane = split == 0;
+      if (single_lane) {
+        const int lane = GetKwargOr<int>(kwargs, "aiv_subblockid", -1);
+        CHECK(lane == 0 || lane == 1) << "Direct tpush_to_aiv split=0 requires aiv_subblockid 0 or 1";
+        CHECK(dst->dtype_ == DataType::BF16) << "Direct tpush_to_aiv split=0 requires a BF16 destination";
+      } else {
+        CHECK(std::none_of(kwargs.begin(), kwargs.end(), [](const auto& kwarg) {
+          return kwarg.first == "aiv_subblockid";
+        })) << "Direct tpush_to_aiv aiv_subblockid requires split=0";
+        // The dual-destination instruction supports only non-converting writeback.
+        CHECK(dst->dtype_ == DataType::FP32) << "Direct tpush_to_aiv split=1 requires a FP32 destination";
+      }
+      const int row_divisor = single_lane ? 1 : 2;
       auto acc_view = tile_view_semantics::GetEffectiveTileView(*acc);
       CHECK(acc_view.valid_shape.size() == 2 && acc_view.blayout == TileLayout::col_major &&
             acc_view.slayout == TileLayout::row_major && acc_view.fractal == 1024)
@@ -525,22 +539,24 @@ REGISTER_OP("tile.tpush_to_aiv_direct")
             << "Direct tpush_to_aiv offsets must be integer scalars";
         dst_dims[i] = d->value_;
         acc_dims[i] = a->value_;
-        int64_t extent = i == 0 ? a->value_ / 2 : a->value_;
+        int64_t extent = i == 0 ? a->value_ / row_divisor : a->value_;
         CHECK(extent <= d->value_) << "Direct tpush_to_aiv source does not fit destination";
         if (auto value = As<ConstInt>(offset->elements_[i])) {
           CHECK(value->value_ >= 0 && value->value_ <= d->value_ - extent)
               << "Direct tpush_to_aiv offset exceeds destination capacity";
         }
       }
-      CHECK(acc_dims[0] % 2 == 0 && dst_dims[1] % 8 == 0)
-          << "Direct tpush_to_aiv requires even source rows and a 32-byte-aligned destination pitch";
-      if (phase == static_cast<int>(STPhase::kFinal)) {
-        // PTOAS v0.78 supports the unit-flag consumer on TMOV, not TINSERT.
+      CHECK(acc_dims[0] % row_divisor == 0) << "Direct tpush_to_aiv split=1 requires even source rows";
+      CHECK(dst_dims[1] % (single_lane ? 16 : 8) == 0)
+          << "Direct tpush_to_aiv requires a 32-byte-aligned destination pitch";
+      if (single_lane || phase == static_cast<int>(STPhase::kFinal)) {
+        // Both single-lane conversion and the unit-flag consumer use whole-tile TMOV.
         auto row = As<ConstInt>(offset->elements_[0]);
         auto col = As<ConstInt>(offset->elements_[1]);
-        CHECK(row && col && row->value_ == 0 && col->value_ == 0 && dst_dims[0] == acc_dims[0] / 2 &&
-              dst_dims[1] == acc_dims[1])
-            << "Final writeback requires the complete split-M destination at offset [0, 0]";
+        CHECK(row && col && row->value_ == 0 && col->value_ == 0 &&
+              dst_dims[0] == acc_dims[0] / row_divisor && dst_dims[1] == acc_dims[1])
+            << (single_lane ? "Single-lane writeback requires a complete destination at offset [0, 0]"
+                            : "Final writeback requires the complete split-M destination at offset [0, 0]");
       }
       return GetUnknownType();
     });

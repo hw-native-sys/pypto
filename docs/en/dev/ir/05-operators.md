@@ -726,7 +726,7 @@ Use `pl.system.sync_set(event_id, pipe=..., ffts_mode=...)` and `pl.system.sync_
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
 | `tile.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `split`, optional `id` |
-| `tile.tpush_to_aiv_direct` (internal) | 3 (Acc, dst, offset) | Direct push into peer UB, no FIFO | `split=1`, `st_phase` |
+| `tile.tpush_to_aiv_direct` (internal) | 3 (Acc, dst, offset) | Direct write into peer UB. Split 1 sends FP32 row halves with optional fragment offsets. For split 0, see [explicit AIV lane](../../api/system.md#explicit-aiv-lane). | `split`, `st_phase`, optional `aiv_subblockid` |
 | `tile.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `split`, optional `id` |
 | `tile.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `split`, optional `id` |
 | `tile.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `split`, optional `id` |

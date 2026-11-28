@@ -286,10 +286,9 @@ std::optional<SliceInfo> ParseSliceWindow(const AssignStmtPtr& assign,
   if (!call || !call->op_ || !IsOp(call, "tile.slice")) return std::nullopt;
   // Rewriting is restricted to canonical 3-arg slices (input, shape, offset): a
   // slice carrying valid_shape / drop_dims is not a plain window, so the
-  // canonicalization rules below do not apply to it.  The Acc safety check has
-  // no such restriction — it only needs the physical base and offset, and a
-  // non-canonical slice miscompiles exactly the same way — so it parses with
-  // `require_canonical = false`.
+  // canonicalization rules below do not apply to it. The writeback safety
+  // checks still need the physical base and offset of non-canonical slices,
+  // so they parse with `require_canonical = false`.
   if (require_canonical ? call->args_.size() != 3 : call->args_.size() < 3) return std::nullopt;
 
   auto src = AsVarLike(call->args_[0]);
@@ -935,9 +934,9 @@ bool IsColExpandMaterializingOp(const OpPtr& op) {
 /// any Var sharing its storage.  Storage sharing is an equivalence relation
 /// built with union-find over the edges that bind a Var to existing storage —
 /// a plain alias, an output that inherits its source buffer (views, in-place
-/// ops), and loop / if merges.  A write is a declared writeback operand, a
-/// declared hardware scratch or absolute-indexed destination, or any tile
-/// operand of a call the registry cannot describe.  Whole-function rather than
+/// ops), and loop / if merges. A write is a declared argument effect or
+/// writeback operand, declared hardware scratch, an absolute-indexed
+/// destination, or a tile operand of a call the registry cannot describe. Whole-function rather than
 /// between-site analysis keeps the sweep O(N α(N)); it can only decline a
 /// placement, never admit a wrong one.
 class SliceStorageAnalysis : public IRVisitor {
@@ -951,6 +950,13 @@ class SliceStorageAnalysis : public IRVisitor {
   const Uses* FindUses(const Var* var) const {
     auto it = uses_.find(var);
     return it == uses_.end() ? nullptr : &it->second;
+  }
+
+  const std::vector<CallPtr>& DirectBf16Writebacks() const { return direct_bf16_writebacks_; }
+
+  const std::vector<const Var*>* FindAliasSources(const Var* var) const {
+    const auto it = alias_sources_.find(var);
+    return it == alias_sources_.end() ? nullptr : &it->second;
   }
 
   /// True when some write in the function may land in `var`'s storage.
@@ -1039,7 +1045,14 @@ class SliceStorageAnalysis : public IRVisitor {
     const auto& entry = registry.GetEntry(call->op_->name_);
     for (size_t i = 0; i < call->args_.size(); ++i) {
       auto kind = entry.GetLaneInvariantArgKind(i);
-      if (kind.has_value() && *kind != LaneInvariantArg::IndexAddressedSource) MarkWritten(call->args_[i]);
+      const bool writes = entry.GetIRStage() == OpIRStage::Functional &&
+                          ArgEffectWrites(entry.GetArgEffect(i, call->kwargs_));
+      if (writes || (kind.has_value() && *kind != LaneInvariantArg::IndexAddressedSource)) {
+        MarkWritten(call->args_[i]);
+      }
+    }
+    if (IsOp(call, "tile.tpush_to_aiv_direct") && call->GetKwarg<int>("split", 0) == 0) {
+      direct_bf16_writebacks_.push_back(call);
     }
     if (result && !call->args_.empty() && op_predicates::OutputInheritsSourceBuffer(call->op_->name_)) {
       const size_t source_index = writeback.value_or(0);
@@ -1048,19 +1061,20 @@ class SliceStorageAnalysis : public IRVisitor {
   }
 
   /// A loop IterArg names its initializer's storage on entry and its yielded
-  /// value's on every later trip; the loop result names the final yield.
+  /// value's on every later trip. The loop result can name either one.
   void RecordLoopEdges(const std::vector<IterArgPtr>& iter_args, const StmtPtr& body,
                        const std::vector<VarPtr>& return_vars) {
-    for (const auto& iter_arg : iter_args) {
+    for (size_t i = 0; i < iter_args.size(); ++i) {
+      const auto& iter_arg = iter_args[i];
       if (!iter_arg) continue;
       if (auto init = AsVarLike(iter_arg->initValue_)) uses_[init.get()].vec_operand = true;
       Union(iter_arg, iter_arg->initValue_);
+      if (i < return_vars.size()) Union(return_vars[i], iter_arg);
     }
     auto yield = transform_utils::GetLastYieldStmt(body);
     if (!yield) return;
     for (size_t i = 0; i < yield->value_.size(); ++i) {
       if (i < iter_args.size() && iter_args[i]) Union(iter_args[i], yield->value_[i]);
-      if (i < return_vars.size()) Union(return_vars[i], yield->value_[i]);
     }
   }
 
@@ -1093,13 +1107,20 @@ class SliceStorageAnalysis : public IRVisitor {
   void Union(const ExprPtr& lhs, const ExprPtr& rhs) {
     auto lhs_var = AsVarLike(lhs);
     auto rhs_var = AsVarLike(rhs);
-    if (!lhs_var || !rhs_var) return;
+    if (!lhs_var || !rhs_var || lhs_var.get() == rhs_var.get()) return;
+    // Track directional provenance as well as shared storage. Other views of
+    // the same allocation need not feed the writeback destination.
+    if (As<TileType>(lhs_var->GetType()) || As<TupleType>(lhs_var->GetType())) {
+      alias_sources_[lhs_var.get()].push_back(rhs_var.get());
+    }
     const Var* lhs_root = Find(lhs_var.get());
     const Var* rhs_root = Find(rhs_var.get());
     if (lhs_root != rhs_root) parent_[lhs_root] = rhs_root;
   }
 
   std::unordered_map<const Var*, Uses> uses_;
+  std::unordered_map<const Var*, std::vector<const Var*>> alias_sources_;
+  std::vector<CallPtr> direct_bf16_writebacks_;
   std::unordered_map<const Var*, const Var*> parent_;
   std::vector<const Var*> written_;
   std::unordered_set<const Var*> written_roots_;
@@ -1274,6 +1295,31 @@ class CanonicalizeMutator : public IRMutator {
       : slices_(collector.slices),
         packed_windows_(collector.packed_windows),
         scalar_defs_(collector.scalar_defs) {}
+
+  /// FixPipe writes to caller-owned storage. Check the original slice and any
+  /// aliases that can feed it before planning extracts or rewriting yields.
+  void CheckDirectBf16WritebackDestinations(const SliceStorageAnalysis& storage,
+                                            const std::unordered_map<const Var*, SliceInfo>& windows) const {
+    std::unordered_set<const Var*> visited;
+    for (const auto& call : storage.DirectBf16Writebacks()) {
+      const auto dst = AsVarLike(call->args_[1]);
+      if (!dst) continue;
+      std::vector<const Var*> pending{dst.get()};
+      while (!pending.empty()) {
+        const auto* var = pending.back();
+        pending.pop_back();
+        if (!visited.insert(var).second) continue;
+        const auto window = windows.find(var);
+        if (window != windows.end()) {
+          CHECK_SPAN(!NeedsAlignedVecMaterialization(window->second), call->span_)
+              << "Direct BF16 tpush_to_aiv requires a statically 32-byte aligned mailbox slice";
+        }
+        if (const auto* sources = storage.FindAliasSources(var)) {
+          pending.insert(pending.end(), sources->begin(), sources->end());
+        }
+      }
+    }
+  }
 
   /// Phase 2a — choose the Vec slices to materialize at their DEFINITION.
   ///
@@ -1929,13 +1975,16 @@ Pass CanonicalizeTileSlice() {
 
     // Phase 2 — materialize Vec slices at their definition where that is
     // provably equivalent, then fold or materialize the remaining consumers.
-    if (!collector->slice_order.empty()) {
+    if (!collector->windows.empty()) {
       SliceStorageAnalysis storage;
       storage.VisitStmt(new_body);
       CanonicalizeMutator mutator(*collector);
-      mutator.PlanDefinitionSiteExtracts(collector->slice_order, storage);
-      new_body = mutator.VisitStmt(new_body);
-      new_body = DropDeadViews(new_body, *collector);
+      mutator.CheckDirectBf16WritebackDestinations(storage, collector->windows);
+      if (!collector->slice_order.empty()) {
+        mutator.PlanDefinitionSiteExtracts(collector->slice_order, storage);
+        new_body = mutator.VisitStmt(new_body);
+        new_body = DropDeadViews(new_body, *collector);
+      }
     }
 
     if (new_body.get() == func->body_.get()) return func;

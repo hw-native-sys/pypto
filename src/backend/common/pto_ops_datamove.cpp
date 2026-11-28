@@ -1690,11 +1690,20 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
     auto acc_code = codegen.GetExprAsCode(acc);
     auto dst_type = codegen.GetExprTypeAnnotation(dst);
     auto acc_type = codegen.GetExprTypeAnnotation(acc);
-    const std::string mode = "accToVecMode = #pto.acc_to_vec_mode<dual_mode_split_m>";
-    if (op->GetKwarg<int>("st_phase", 0) == static_cast<int>(ir::STPhase::kFinal)) {
-      // Final consumes the unit flag through the full-window TMOV instruction.
+    const bool single_lane = op->GetKwarg<int>("split", 0) == 0;
+    const bool final = op->GetKwarg<int>("st_phase", 0) == static_cast<int>(ir::STPhase::kFinal);
+    const char* acc_to_vec_mode = "dual_mode_split_m";
+    if (single_lane) {
+      const int lane = op->GetKwarg<int>("aiv_subblockid");
+      INTERNAL_CHECK_SPAN(lane == 0 || lane == 1, op->span_) << "Invalid direct FixPipe destination lane";
+      acc_to_vec_mode = lane == 0 ? "single_mode_vec0" : "single_mode_vec1";
+    }
+    const std::string mode = std::string("accToVecMode = #pto.acc_to_vec_mode<") + acc_to_vec_mode + ">";
+    if (single_lane || final) {
+      // The destination dtype selects conversion and Final selects the unit flag on TMOV.
+      const char* phase_attr = final ? ", stPhase = #pto<st_phase final>" : "";
       codegen.Emit("pto.tmov ins(" + acc_code + " : " + acc_type + ") outs(" + dst_code + " : " + dst_type +
-                   ") {" + mode + ", stPhase = #pto<st_phase final>}");
+                   ") {" + mode + phase_attr + "}");
     } else {
       // This manually addressed primitive has an explicit in-bounds offset
       // contract. Cast to index without the partition_view helper's runtime
