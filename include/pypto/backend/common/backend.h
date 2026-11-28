@@ -380,7 +380,7 @@ class Backend {
    * names, pass-level workaround toggles, cross-core layout rules...).
    *
    * Passes should prefer the convenience accessor
-   * `ir::PassContext::Current()->GetBackendHandler()`.
+   * `ir::PassContext::CurrentBackendHandler()`.
    * Codegen objects that already hold a Backend* may call this directly.
    *
    * @return Pointer to the handler singleton (never null).

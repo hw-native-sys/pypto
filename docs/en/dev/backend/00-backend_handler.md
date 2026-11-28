@@ -25,8 +25,8 @@ it through the new pure-virtual `Backend::GetHandler()`.
 
 ```text
                        ┌────────────────────────────┐
-        Pass / Codegen │  PassContext::Current()    │
-                       │     ->GetBackendHandler()  │
+        Pass           │  PassContext::             │
+                       │    CurrentBackendHandler() │
                        └─────────────┬──────────────┘
                                      │
                                      ▼
@@ -43,9 +43,9 @@ it through the new pure-virtual `Backend::GetHandler()`.
                 └──────────────────────────────────────┘
 ```
 
-The `PassContext` accessor satisfies the `pass-context-config` rule: passes
-look up backend behaviour via the active `PassContext`, not by reaching out
-to global state.
+Passes use `PassContext::CurrentBackendHandler()` to look up backend behaviour.
+It uses the active context when present and the configured backend when a pass
+runs standalone. A lookup without a configured backend raises `ValueError`.
 
 ## Interface
 

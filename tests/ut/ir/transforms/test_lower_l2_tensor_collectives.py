@@ -1065,6 +1065,30 @@ class Sliced:
         assert any(f.func_type == ir.FunctionType.CCU for f in after.functions.values())
 
 
+class TestStandaloneCcuLowering:
+    @pytest.fixture(autouse=True)
+    def pass_verification_context(self):
+        """Exercise the public standalone pass entry point outside the usual test context."""
+        yield
+
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
+    def test_uses_configured_backend(self, ascend_backend):
+        assert passes.PassContext.current() is None
+        handler = passes.PassContext.current_backend_handler()
+        with passes.PassContext([]) as ctx:
+            assert passes.PassContext.current_backend_handler() is ctx.get_backend().get_handler()
+            assert passes.PassContext.current_backend_handler() is handler
+
+        assert passes.PassContext.current() is None
+        program = _ccu_allgather_program()
+        lower = passes.lower_l2_tensor_collectives()
+        if ascend_backend == BackendType.Ascend910:
+            with pytest.raises(ValueError, match="unsupported by this backend"):
+                lower(program)
+        else:
+            assert any(f.func_type == ir.FunctionType.CCU for f in lower(program).functions.values())
+
+
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910], indirect=True)
 def test_ccu_allgather_unsupported_backend(ascend_backend):
     with pytest.raises(ValueError, match="unsupported by this backend"):

@@ -13,7 +13,7 @@ from enum import Enum
 from types import TracebackType
 from typing import Any, overload
 
-from pypto.pypto_core.backend import Backend
+from pypto.pypto_core.backend import Backend, BackendHandler
 from pypto.pypto_core.ir import Function, HardwareLoopProfile, HardwareLoopQualification, Program, Span, Stmt
 
 class IRProperty(Enum):
@@ -380,6 +380,11 @@ class PassContext:
 
     def get_instruments(self) -> list[PassInstrument]:
         """Get the instruments registered on this context."""
+        ...
+
+    @staticmethod
+    def current_backend_handler() -> BackendHandler:
+        """Use the active context or configured backend. Raise ValueError if no backend is configured."""
         ...
 
     @staticmethod

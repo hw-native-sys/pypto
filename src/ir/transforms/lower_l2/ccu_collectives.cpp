@@ -259,7 +259,7 @@ class CcuLowerer : public IRMutator {
     CHECK_SPAN(As<ConstInt>(input->shape_[1])->value_ <= std::numeric_limits<int64_t>::max() / (2 * nranks),
                span)
         << "CCU allgather target byte size exceeds INT64_MAX";
-    const auto* handler = PassContext::Current()->GetBackendHandler();
+    const auto* handler = PassContext::CurrentBackendHandler();
     CHECK_SPAN(handler && handler->SupportCcu(), span)
         << "CCU allgather is unsupported by this backend; compiler lowering requires Ascend950";
     const std::string entry = "dtype_cpp=bfloat16_t,nranks_cpp=" + std::to_string(nranks);

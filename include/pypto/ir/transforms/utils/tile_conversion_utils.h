@@ -120,8 +120,7 @@ inline ExprPtr MakeSignalOffsets(const ExprPtr& rank_expr, const ExprPtr& row_ex
 /// is configured (the plain-IR unit-test paths).
 inline const backend::BackendHandler* ActiveBackendHandler() {
   if (!backend::BackendConfig::IsConfigured()) return nullptr;
-  const auto* ctx = PassContext::Current();
-  return ctx != nullptr ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+  return PassContext::CurrentBackendHandler();
 }
 
 /// Query the registered select rule before constructing a Call. Standalone

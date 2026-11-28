@@ -29,7 +29,7 @@ workarounds, cross-core layout rules, ...) lives on a `BackendHandler` virtual
 interface. Passes never branch on `BackendType` directly; instead they call:
 
 ```cpp
-const auto* handler = ir::PassContext::Current()->GetBackendHandler();
+const auto* handler = ir::PassContext::CurrentBackendHandler();
 if (handler->RequiresGMPipeBuffer()) { ... }
 ```
 

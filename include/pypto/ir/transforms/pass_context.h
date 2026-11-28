@@ -401,6 +401,10 @@ class PassContext {
    */
   static PassContext* Current();
 
+  /// Resolve the handler through the active context or, for standalone passes,
+  /// the configured backend. Raises ValueError if no backend is configured.
+  [[nodiscard]] static const backend::BackendHandler* CurrentBackendHandler();
+
   /// Access registered operator rules through the same target resolution as
   /// GetBackendHandler; this does not introduce per-context target ownership.
   [[nodiscard]] const backend::Backend* GetBackend() const;

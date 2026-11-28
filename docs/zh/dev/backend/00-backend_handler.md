@@ -23,8 +23,8 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
 
 ```text
                        ┌────────────────────────────┐
-        Pass / Codegen │  PassContext::Current()    │
-                       │     ->GetBackendHandler()  │
+        Pass           │  PassContext::             │
+                       │    CurrentBackendHandler() │
                        └─────────────┬──────────────┘
                                      │
                                      ▼
@@ -41,8 +41,8 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910) { ... }
                 └──────────────────────────────────────┘
 ```
 
-`PassContext` 上的便捷访问点满足 `pass-context-config` 规则的要求：pass 通过
-当前 `PassContext` 查询后端行为，而不是直接读全局状态。
+pass 通过 `PassContext::CurrentBackendHandler()` 查询后端行为。有活动上下文时使用该上下文，
+独立运行 pass 时回退到已配置的后端。未配置后端时，查询会抛出 `ValueError`。
 
 ## 接口
 

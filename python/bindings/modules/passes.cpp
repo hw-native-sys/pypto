@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
@@ -412,6 +413,8 @@ void BindPass(nb::module_& m) {
            "Whether supported whole kernels use Buffer IR")
       .def("get_enable_software_pipeline", &PassContext::GetEnableSoftwarePipeline,
            "Get whether eligible pipeline loops use explicit software pipelining")
+      .def_static("current_backend_handler", &PassContext::CurrentBackendHandler, nb::rv_policy::reference,
+                  "Return the backend handler for the active context or the configured backend")
       .def_static("current", &PassContext::Current, nb::rv_policy::reference,
                   "Get the currently active context, or None if no context is active");
 

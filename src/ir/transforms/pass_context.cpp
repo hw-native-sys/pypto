@@ -381,6 +381,11 @@ void PassContext::RunAfterPipeline(const ProgramPtr& program) {
 
 PassContext* PassContext::Current() { return current_; }
 
+const backend::BackendHandler* PassContext::CurrentBackendHandler() {
+  const auto* ctx = Current();
+  return ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+}
+
 const backend::Backend* PassContext::GetBackend() const { return backend::BackendConfig::GetBackend(); }
 
 const backend::BackendHandler* PassContext::GetBackendHandler() const {
