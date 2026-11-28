@@ -2657,34 +2657,32 @@ class ScopeParser:
     def parse_reg_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
         """Parse a compile-time policy without evaluating runtime bindings."""
         span = self.services.span_tracker.get_span(stmt)
-        if (
-            context_expr.args
-            or len(context_expr.keywords) > 1
-            or any(keyword.arg != "auto_sync" for keyword in context_expr.keywords)
-        ):
+        policies = {"auto_sync": True, "native": False}
+        seen: set[str] = set()
+        if context_expr.args:
             raise ParserSyntaxError(
-                "reg_scope accepts only keyword auto_sync (captures are implicit)", span=span
+                "reg_scope accepts only keywords auto_sync and native (captures are implicit)", span=span
             )
-        auto_sync = True
-        if context_expr.keywords:
-            node = context_expr.keywords[0].value
-            # An IR binding takes precedence over captured Python constants:
-            # a runtime scalar must never silently become a static policy.
+        for keyword in context_expr.keywords:
+            name = keyword.arg
+            if name is None or name not in policies or name in seen:
+                raise ParserSyntaxError(
+                    "reg_scope accepts only keywords auto_sync and native (captures are implicit)", span=span
+                )
+            seen.add(name)
+            node = keyword.value
+            # Runtime bindings must not be silently replaced by captured constants.
             if any(
                 isinstance(part, ast.Name) and self.services.scope_manager.lookup_var(part.id) is not None
                 for part in ast.walk(node)
             ):
-                raise ParserSyntaxError("auto_sync must be a compile-time bool", span=span)
+                raise ParserSyntaxError(f"{name} must be a compile-time bool", span=span)
             success, value = self.services.expr_evaluator.try_eval_expr(node)
             if not success or type(value) is not bool:
-                raise ParserSyntaxError("auto_sync must be a compile-time bool", span=span)
-            auto_sync = value
-        self.parse_scope_body(
-            stmt,
-            ir.ScopeKind.Reg,
-            span,
-            attrs=[("auto_sync", False)] if not auto_sync else [],
-        )
+                raise ParserSyntaxError(f"{name} must be a compile-time bool", span=span)
+            policies[name] = value
+        attrs = [(key, value) for key, value in policies.items() if value != (key == "auto_sync")]
+        self.parse_scope_body(stmt, ir.ScopeKind.Reg, span, attrs=attrs)
 
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.

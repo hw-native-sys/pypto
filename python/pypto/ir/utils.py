@@ -29,6 +29,26 @@ _PARSER_SPAN: ContextVar[_ir.Span | None] = ContextVar("_PARSER_SPAN", default=N
 _PYPTO_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
+# The builder pins RegScope policy while constructing its body. Reductions
+# need a call-local ABI marker because the registry cannot inspect a scope.
+_REG_NATIVE_MODE: ContextVar[bool] = ContextVar("_REG_NATIVE_MODE", default=False)
+
+
+@contextmanager
+def use_reg_native_mode(native: bool) -> Iterator[None]:
+    """Temporarily expose the lexical RegScope policy to DSL wrappers."""
+    token = _REG_NATIVE_MODE.set(native)
+    try:
+        yield
+    finally:
+        _REG_NATIVE_MODE.reset(token)
+
+
+def current_reg_native_mode() -> bool:
+    """Return the active lexical register mode; default to logical VMI."""
+    return _REG_NATIVE_MODE.get()
+
+
 def _normalize_reg_block_stride(value: object) -> int | None:
     """Normalize a literal 32-byte store stride; dynamic scalars are unsupported."""
     # The DSL parser wraps literals in ConstInt, unlike direct Python calls.
@@ -722,6 +742,8 @@ __all__ = [
     "resolve_fixpipe_epilogue",
     "resolve_saturation_deviation",
     "resolve_saturation_mode",
+    "use_reg_native_mode",
+    "current_reg_native_mode",
     "use_parser_span",
     "set_pinned_span",
     "reset_pinned_span",

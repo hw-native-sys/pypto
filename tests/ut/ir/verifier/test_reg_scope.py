@@ -54,6 +54,27 @@ def test_legal_region_early(kind):
     assert verify(region(definition(r)), kind) == []
 
 
+@pytest.mark.parametrize("scope_native,call_native", [(True, False), (False, True)])
+def test_raw_reduction_abi_must_match_scope(scope_native, call_native):
+    value = ir.create_op_call(
+        "reg.broadcast",
+        [ir.ConstFloat(1.0, DataType.FP32, SPAN)],
+        {"lanes": 64, "dtype": DataType.FP32},
+        SPAN,
+    )
+    x = ir.Var("x", value.type, SPAN)
+    mask = register("m")
+    kwargs = {"native": True} if call_native else {}
+    reduction = ir.create_op_call("reg.reduce_max", [x, mask], kwargs, SPAN)
+    result = ir.Var("result", reduction.type, SPAN)
+    body = sequence(ir.AssignStmt(x, value, SPAN), definition(mask), ir.AssignStmt(result, reduction, SPAN))
+    diagnostics = verify(ir.RegScopeStmt("", body, SPAN, attrs={"native": scope_native}))
+    assert diagnostics
+    assert (
+        "physical reduction" in diagnostics[0].message or "reg_scope(native=True)" in diagnostics[0].message
+    )
+
+
 @pytest.mark.parametrize("wrapper", ["direct", "if", "for"])
 def test_while_inside_register_scope_is_rejected(wrapper):
     backend.set_backend_type(backend.BackendType.Ascend950)

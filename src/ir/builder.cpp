@@ -343,9 +343,9 @@ StmtPtr IRBuilder::EndSimtScope(const Span& end_span, const std::vector<VarPtr>&
   return scope;
 }
 
-void IRBuilder::BeginRegScope(const Span& span, bool auto_sync) {
+void IRBuilder::BeginRegScope(const Span& span, bool auto_sync, bool native) {
   BeginScope(ScopeKind::Reg, span, std::nullopt, std::nullopt, std::nullopt, "", nullptr, std::nullopt,
-             std::nullopt, {{"auto_sync", auto_sync}});
+             std::nullopt, {{"auto_sync", auto_sync}, {"native", native}});
 }
 
 void IRBuilder::EmitRegMemBar(const std::string& kind, const Span& span) {
@@ -375,20 +375,26 @@ VarPtr IRBuilder::EmitReg(const std::string& name, const std::string& op_name,
   CHECK(op_name.rfind("reg.", 0) == 0) << "EmitReg expects a reg operation";
   CHECK(!IsOp(OpRegistry::GetInstance().GetOp(op_name), "reg.mem_bar"))
       << "reg.mem_bar is statement-only; use EmitRegMemBar";
-  bool inside = false;
+  const ScopeContext* region = nullptr;
   for (const auto& context : context_stack_) {
     if (context->GetType() == BuildContext::Type::SCOPE &&
         static_cast<ScopeContext*>(context.get())->GetScopeKind() == ScopeKind::Reg) {
-      inside = true;
+      region = static_cast<ScopeContext*>(context.get());
     }
   }
-  CHECK_SPAN(inside, span) << "EmitReg requires RegScope";
-  // The registry normalizes defaults for both Builder and raw IR calls.
+  CHECK_SPAN(region, span) << "EmitReg requires RegScope";
+  // Stamp the self-contained reduction ABI just as the DSL parser does.
   const auto op = OpRegistry::GetInstance().GetOp(op_name);
   auto has_kwarg = [&kwargs](const std::string& key) {
     return std::any_of(kwargs.begin(), kwargs.end(), [&key](const auto& item) { return item.first == key; });
   };
-  auto call = OpRegistry::GetInstance().Create(op_name, args, kwargs, span);
+  auto call_kwargs = kwargs;
+  if ((IsOp(op, "reg.reduce_max") || IsOp(op, "reg.reduce_sum")) && !has_kwarg("native")) {
+    for (const auto& [key, value] : region->GetAttrs()) {
+      if (key == "native" && std::any_cast<bool>(value)) call_kwargs.emplace_back("native", true);
+    }
+  }
+  auto call = OpRegistry::GetInstance().Create(op_name, args, call_kwargs, span);
   auto var = Var(name, call->GetType(), span);
   // The DSL treats a same-dtype conversion without modifiers as a no-op and
   // returns its operand. Preserve that canonical form for raw builder users.

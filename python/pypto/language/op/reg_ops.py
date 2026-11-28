@@ -7,11 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Logical register operations, valid within an A5 InCore/AIV reg_scope."""
+"""Logical and explicit physical A5 register operations inside reg_scope."""
 
 from typing import Any
 
-from pypto.ir.utils import _get_span_or_capture, _normalize_reg_block_stride
+from pypto.ir.utils import _get_span_or_capture, _normalize_reg_block_stride, current_reg_native_mode
 from pypto.language.typing import Reg, Scalar, Tile
 from pypto.pypto_core import DataType, ir
 
@@ -59,9 +59,29 @@ def mem_bar(kind: str) -> ir.Call:
     return _call("mem_bar", [], kind=kind)
 
 
-def load(tile: Tile | ir.Expr, offset: int | Scalar | ir.Expr = 0, *, lanes: int) -> Reg:
-    """Read lanes consecutive initialized elements from a Vec Tile."""
-    return Reg(_call("load", [_expr(tile), _expr(offset)], lanes=_lanes(lanes)))
+def load(
+    tile: Tile | ir.Expr,
+    offset: int | Scalar | ir.Expr = 0,
+    *,
+    lanes: int,
+    dtype: DataType | None = None,
+    dist: str | None = None,
+) -> Reg:
+    """Read consecutive Vec lanes, or a full A5 register in a native scope.
+
+    Native loads default to the Tile dtype and NORM distribution. UNPK4
+    reads 64 packed bytes, BRC_B32 one 32-bit value, and E2B_B16 eight
+    16-bit values. The offset is in elements of the source tile.
+    """
+    kwargs: dict[str, Any] = {"lanes": _lanes(lanes)}
+    source = _expr(tile)
+    if dtype is not None or dist is not None:
+        if not isinstance(source.type, ir.TileType):
+            raise TypeError("reg.load requires a Tile")
+        kwargs.update(
+            dtype=dtype if dtype is not None else source.type.dtype, dist="NORM" if dist is None else dist
+        )
+    return Reg(_call("load", [source, _expr(offset)], **kwargs))
 
 
 def store(
@@ -71,21 +91,33 @@ def store(
     mask: Reg | ir.Expr | None = None,
     *,
     block_stride: int | None = None,
+    post_update: bool = False,
+    dist: str | None = None,
 ) -> Tile:
     """Write active lanes, optionally striding between 32-byte blocks.
 
     offset is in elements; block_stride is a positive static i16 integer.
     Gaps and inactive lanes retain their previous destination contents.
+    In a native scope, dist defaults to NORM. PK_B32 packs the even BF16
+    lanes under a 64-lane mask, and ONEPT_B32 writes lane zero.
+    ``post_update=True`` selects the native strided POST_UPDATE encoding.
+    The updated temporary pointer is discarded; the Tile alias is unchanged.
     """
     if value is None:
         raise TypeError("reg.store requires value")
+    kwargs: dict[str, Any] = {}
+    if dist is not None:
+        kwargs["dist"] = dist
     args = [_expr(tile), _expr(offset), _expr(value)]
     if mask is not None:
         args.append(_expr(mask))
-    kwargs: dict[str, Any] = {}
     stride = _normalize_reg_block_stride(block_stride)
     if stride is not None:
         kwargs["block_stride"] = stride
+    if post_update:
+        if stride is None:
+            raise TypeError("post_update requires block_stride")
+        kwargs["post_update"] = True
     return Tile(expr=_call("store", args, **kwargs))
 
 
@@ -218,26 +250,44 @@ def maximum(
 
 
 def convert(
-    value: Reg | ir.Expr, *, dtype: DataType, rounding: str | None = None, saturate: bool | None = None
+    value: Reg | ir.Expr,
+    mask: Reg | ir.Expr | None = None,
+    *,
+    dtype: DataType,
+    rounding: str | None = None,
+    saturate: bool | None = None,
+    part: str | None = None,
+    lanes: int | None = None,
 ) -> Reg:
-    """Convert an explicitly supported dtype pair, preserving logical lanes."""
+    """Convert logical lanes, or select physical destination lanes in a native scope.
+
+    Native FP4/FP8 widening uses PART_P0. Native FP32 to BF16 uses PART_EVEN
+    or PART_ODD with rounding="R" and saturate=False to populate alternate lanes.
+    """
     expr = _expr(value)
     if not isinstance(expr.type, ir.RegType) or expr.type.kind != ir.RegKind.VecReg:
         raise TypeError("reg.convert requires VecReg")
-    src = expr.type.dtype
-    if src == dtype and rounding is None and saturate is None:
-        return Reg(expr)
+    args = [expr]
     kwargs: dict[str, Any] = {"dtype": dtype}
-    if rounding is None and src == DataType.FP32:
-        if dtype in (DataType.FP16, DataType.BF16, DataType.FP8E4M3FN):
-            rounding = "R"
-        elif dtype == DataType.INT32:
-            rounding = "Z"
+    if mask is not None or part is not None or lanes is not None:
+        if mask is None or part is None or lanes is None:
+            raise TypeError("Native convert requires mask, part and lanes")
+        args.append(_expr(mask))
+        kwargs.update(lanes=_lanes(lanes), part=part)
+    else:
+        src = expr.type.dtype
+        if src == dtype and rounding is None and saturate is None:
+            return Reg(expr)
+        if rounding is None and src == DataType.FP32:
+            if dtype in (DataType.FP16, DataType.BF16, DataType.FP8E4M3FN):
+                rounding = "R"
+            elif dtype == DataType.INT32:
+                rounding = "Z"
     if rounding is not None:
         kwargs["rounding"] = rounding
     if saturate is not None:
         kwargs["saturate"] = saturate
-    return Reg(_call("convert", [expr], **kwargs))
+    return Reg(_call("convert", args, **kwargs))
 
 
 def compare(lhs: Reg | ir.Expr, rhs: Reg | ir.Expr, seed: Reg | ir.Expr, *, predicate: str) -> Reg:
@@ -447,7 +497,11 @@ def _reduction(
 
 
 def reduce_sum(
-    value: Reg | ir.Expr, mask: Reg | ir.Expr, *, reassoc: bool = False, group_size: int | None = None
+    value: Reg | ir.Expr,
+    mask: Reg | ir.Expr,
+    *,
+    reassoc: bool = False,
+    group_size: int | None = None,
 ) -> Reg:
     """Reduce active lanes to one lane, or to one lane per group.
 
@@ -455,12 +509,24 @@ def reduce_sum(
     Inactive input lanes contribute zero. No implicit widening is performed.
     With group_size, the source splits into equal contiguous groups and the
     result holds one lane per group in group order; see group_broadcast.
+    In a native scope, the FP32 sum is in lane zero of a full register.
     """
+    if current_reg_native_mode():
+        if group_size is not None:
+            raise TypeError("Native reduction does not take group_size")
+        return _reduction("reduce_sum", value, mask, None, native=True, reassoc=reassoc)
     return _reduction("reduce_sum", value, mask, group_size, reassoc=reassoc)
 
 
 def reduce_max(value: Reg | ir.Expr, mask: Reg | ir.Expr, *, group_size: int | None = None) -> Reg:
-    """Reduce to one lane, or one lane per group; inactive inputs give the dtype minimum or -inf."""
+    """Reduce to one lane or one lane per group, with the dtype minimum or -inf for inactive inputs.
+
+    In a native scope, the FP32 maximum is in lane zero of a full register.
+    """
+    if current_reg_native_mode():
+        if group_size is not None:
+            raise TypeError("Native reduction does not take group_size")
+        return _reduction("reduce_max", value, mask, None, native=True)
     return _reduction("reduce_max", value, mask, group_size)
 
 

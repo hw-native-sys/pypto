@@ -19,6 +19,7 @@
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -44,7 +45,6 @@ class VFOperands : public var_collectors::VarDefUseCollector {
   std::map<const Var*, VarPtr> aliases;
   std::map<const Var*, VarPtr> references;
   bool has_control_flow = false;
-  bool micro = false;
   std::vector<ForStmtPtr> loops;
 
   void VisitStmt(const StmtPtr& stmt) override {
@@ -73,7 +73,6 @@ class VFOperands : public var_collectors::VarDefUseCollector {
     var_collectors::VarDefUseCollector::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    micro |= IsOp(call, "reg.squeeze_store_init");
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
         IsOp(call, "reg.squeeze_store_flush")) {
@@ -140,7 +139,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
     for (const auto& loop : operands.loops) {
       const auto stop_type = ir::As<ir::ScalarType>(loop->stop_->GetType());
       CHECK_SPAN((loop->hardware_loop_policy_ == ir::HardwareLoopPolicy::Require ||
-                  (operands.micro && ir::HasCanonicalHardwareLoopBounds(loop))) &&
+                  (scope->Native() && ir::HasCanonicalHardwareLoopBounds(loop))) &&
                      stop_type && (stop_type->dtype_.IsInt() || stop_type->dtype_ == DataType::INDEX),
                  loop->span_)
           << "VF hardware loop lowering requires canonical integer loops";
@@ -176,7 +175,7 @@ void PTOCodegen::EmitVFHelperCall(const ir::RegScopeStmtPtr& scope) {
   PTOCodegen helper(backend_);
   helper.emit_source_loc_ = emit_source_loc_;
   helper.inside_reg_scope_ = true;
-  helper.micro_reg_scope_ = operands.micro;
+  helper.micro_reg_scope_ = scope->Native();
   helper.fs_.current_function = fs_.current_function;
   helper.fs_.truncating_floor_div_mod = PrepareScalarFloorDivMod(scope->body_);
   helper.fs_.constants_indent = "    ";

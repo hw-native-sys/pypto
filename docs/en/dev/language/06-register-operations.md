@@ -5,7 +5,7 @@ A5 (Ascend950). This page lists every supported `pl.reg` operation, its paramete
 return type and dtype restrictions. All names in the tables have the `pl.reg.` prefix.
 
 The compiler outlines each register scope early into a `FunctionType.VF`
-device helper. The public `reg_scope()` syntax is unchanged. Captured Tiles
+device helper. The default `reg_scope()` uses logical VMI; `native=True` selects physical micro lowering. Captured Tiles
 and Scalars become function parameters; Tile aliases can be returned, while
 registers and local Scalars remain inside the helper.
 
@@ -27,7 +27,7 @@ def kernel(
     z = pl.tile.add(out, out)
 ```
 
-`pl.reg_scope(*, auto_sync=True)` has no captures, result list or yield.
+`pl.reg_scope(*, auto_sync=True, native=False)` has no captures, result list or yield.
 `auto_sync` must be a compile-time bool; omitted or `True` retains automatic
 UB barrier insertion, while `False` selects explicit synchronization. Scopes cannot
 nest. The frontend accepts InCore and AIV device contexts, including an explicit
@@ -182,12 +182,12 @@ with pl.reg_scope():
     out = pl.reg.store(dst, value=packed, mask=keep)
 ```
 
-Use the explicit `squeeze_store_init/step/flush` operations when successive
+Use the explicit `squeeze_store_init/step/flush` operations inside `pl.reg_scope(native=True)` when successive
 chunks must append into one dense UB sequence. Carry the opaque state through
 the loop with `pl.range(..., init_values=...)` and yield each updated state:
 
 ```python
-with pl.reg_scope():
+with pl.reg_scope(native=True):
     init_ureg = pl.reg.squeeze_store_init(dst, offset=7)
     for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
         value = pl.reg.load(src, offset=i * 64, lanes=64)
@@ -227,7 +227,7 @@ zero elements and preserves the destination. The same rule covers an empty
 straight-line sequence:
 
 ```python
-with pl.reg_scope():
+with pl.reg_scope(native=True):
     ureg = pl.reg.squeeze_store_init(dst, offset=7)
     written = pl.reg.squeeze_store_flush(ureg, dst)
 ```
@@ -284,14 +284,13 @@ cursor/count management and backend validation; increasing a resource limit alon
 does not provide that support. See the [register limits](https://www.hiascend.com/document/detail/en/CANNCommunityEdition/910/API/ascendcopapi/docs/en/api/SIMD-API/basic_api/reg_vector_compute/register_data_types/UnalignRegForLoad-UnalignRegForStore.md)
 and [squeeze-store AR semantics](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/ascendcopapi/atlasascendc_api_07_0324.html).
 
-Squeeze-store uses physical micro instructions for its alignment state. A
-register scope containing a stream uses physical register codegen throughout.
+Squeeze-store uses physical micro instructions for its alignment state and
+requires an explicit native register scope.
 It currently supports full 256-byte loads/stores,
 scalar broadcast, index generation, reinterpretation, comparisons, selection,
 mask generation/logic, and squeeze. Other operations or partial register shapes
 are diagnosed. The verifier rejects `reg.add` anywhere in a scope containing a
-stream. Scopes without streams retain ordinary VMI lowering, including
-pure `squeeze`. Future PTOAS stream-aware VMI can preserve this public API.
+stream. Default logical scopes retain ordinary VMI lowering, including pure `squeeze`.
 
 ## Vector and mask generators
 
@@ -590,7 +589,7 @@ with pl.reg_scope():
 
 | API | Meaning |
 | --- | ------- |
-| `with ib.reg_scope(span=None, *, auto_sync=True):` | Open a register region in Python IRBuilder. |
+| `with ib.reg_scope(span=None, *, auto_sync=True, native=False):` | Open a register region in Python IRBuilder. |
 | `ib.emit_reg(name, op_name, args, kwargs=None, span=None)` | Create a named register operation. `op_name` is the registered name such as `"reg.add"`; `args` contains IR operands, `kwargs` operation attributes. |
 | `ib.emit_reg_mem_bar(kind, span=None)` | Emit a statement-only explicit UB barrier. |
 | `ib.emit_reg_store(name, tile, value, offset=0, mask=None, span=None, *, block_stride=None)` | Emit a named store and return the destination Tile alias. |
@@ -603,7 +602,7 @@ function validates ownership; `RegScopeValid` validates manually constructed IR,
 and `MixedKernelExpanded` checks final AIV placement. Memory-effect inspection
 preserves masks without claiming full-buffer initialization or disjointness.
 
-Python printing emits `pl.reg_scope(auto_sync=False)` for a manual scope.
+Python printing preserves `auto_sync=False` and `native=True` on the scope.
 Other nonempty attributes and nonempty `name_hint` raise an error to avoid losing
 metadata; binary serialization preserves those fields. Empty scopes print as
 `pass`. The API list above describes the supported frontend surface; PTOAS
@@ -651,3 +650,36 @@ Explicit masks retain zero-inactive-result semantics; omitted masks do not need
 result-clearing selects. Two adjacent BF16 loads followed by unmasked `dintlv`
 can therefore lower to A5 `DINTLV_B16`, with `convert` selecting the required
 EVEN/ODD parts automatically. Physical conversion parts remain a backend choice.
+
+### Explicit physical register mode (A5)
+
+For instruction-for-instruction ports of native VF kernels, declare
+`with pl.reg_scope(native=True):`. The scope selects the PTO micro-op ABI
+for its entire body; all vector registers and masks must have full hardware
+width (256 bytes per vector). The default `native=False` uses logical VMI,
+and no individual operation can implicitly change that mode. Physical-only
+distributions, conversion parts, and strided post-update stores are rejected
+in logical scopes. `native` and `auto_sync` are independent compile-time booleans.
+
+- `load(..., dtype=..., lanes=256, dist="UNPK4")` reads 64 packed FP4/FP8 bytes
+  into a 256-lane register. `BRC_B32` reads one 32-bit element and `E2B_B16`
+  reads eight 16-bit group scales. The default `NORM` reads a complete register.
+- `convert(x, mask, dtype=..., lanes=..., part="PART_P0")` converts native
+  FP4 to BF16 or FP8 to FP32. FP32-to-BF16 uses `PART_EVEN` or `PART_ODD`,
+  rounding `R` and disabled saturation, returning 128 physical lanes.
+- Use `dintlv` on two physical BF16 registers to collect their populated even
+  lanes into one full register, or `store(..., dist="PK_B32")` to
+  write a single register's packed even lanes. `ONEPT_B32` writes lane zero.
+  Omitting `dist` selects a normal masked store.
+  The mask for `PK_B32` is a 64-lane 32-bit mask, not 128 lanes.
+- `reduce_max(x, mask)` and `reduce_sum(x, mask, reassoc=True)`
+  return a full FP32 register. Lane zero holds the reduction result.
+
+All offsets are in the backing Tile's elements. Bounds and initialization
+are checked using the actual source/store footprint rather than counting
+unused physical register lanes. Only the explicitly supported native
+operations may be combined inside the scope; unsupported operations fail
+verification rather than being silently lowered through logical VMI.
+
+`store(..., block_stride=N, post_update=True)` selects the native
+strided post-update encoding in a native scope while discarding the updated temporary pointer.

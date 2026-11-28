@@ -495,6 +495,116 @@ def kernel(policy: pl.Scalar[pl.BOOL]):
 """)
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        'x = pl.reg.load(src, lanes=64, dist="BRC_B32")',
+        'out = pl.reg.store(src, value=x, mask=m, dist="ONEPT_B32")',
+        "out = pl.reg.store(src, value=x, mask=m, block_stride=1, post_update=True)",
+        'c = pl.reg.convert(x, m, dtype=pl.BF16, lanes=128, part="PART_EVEN", rounding="R", saturate=False)',
+        "state = pl.reg.squeeze_store_init(squeeze_dst)",
+    ],
+)
+def test_physical_only_ops_require_explicit_scope(body):
+    with pytest.raises((ParserError, ValueError), match=r"requires reg_scope\(native=True\)"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec],
+           squeeze_dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
+    with pl.reg_scope():
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+        {body}
+""")
+
+
+@pytest.mark.parametrize(
+    "body,match",
+    [
+        ("partial = pl.reg.load(src, lanes=32)", "full 256-byte registers"),
+        ("partial = pl.reg.full_mask(lanes=32)", "full hardware mask"),
+        ("y = pl.reg.add(x, x)", "explicit predicate"),
+        ("y = pl.reg.reduce_min(x, m)", "not supported in physical RegScope"),
+    ],
+)
+def test_native_scope_early_verification(body, match):
+    with pytest.raises((ParserError, ValueError), match=match):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]):
+    with pl.reg_scope(native=True):
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+        {body}
+""")
+
+
+def test_native_scope_reductions_and_roundtrip():
+    function = pl.parse("""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(src: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec]):
+    with pl.reg_scope(native=True, auto_sync=False):
+        x = pl.reg.load(src, lanes=64)
+        m = pl.reg.full_mask(lanes=64)
+        maximum = pl.reg.reduce_max(x, m)
+        total = pl.reg.reduce_sum(x, m, reassoc=True)
+    with pl.reg_scope(native=False):
+        logical_x = pl.reg.load(src, lanes=64)
+        logical_m = pl.reg.full_mask(lanes=64)
+        logical_max = pl.reg.reduce_max(logical_x, logical_m)
+        logical_sum = pl.reg.reduce_sum(logical_x, logical_m, reassoc=True)
+""")
+    assert isinstance(function, ir.Function)
+    physical, logical = function.body.stmts
+    assert physical.native and not physical.auto_sync
+    assert not logical.native and logical.auto_sync
+    for scope, lanes in [(physical, 64), (logical, 1)]:
+        for stmt in scope.body.stmts[-2:]:
+            assert stmt.var.type.lanes == lanes
+    printed = python_print(function, format=False)
+    assert "reg_scope(auto_sync=False, native=True)" in printed
+    assert printed.count("native=True") == 1
+    ir.assert_structural_equal(function, pl.parse(printed), enable_auto_mapping=True)
+    ir.assert_structural_equal(function, ir.deserialize(ir.serialize(function)))
+
+
+def test_native_scope_builder_infers_physical_reduction():
+    builder = ir.IRBuilder()
+    span = ir.Span.unknown()
+    with builder.function("kernel", type=ir.FunctionType.AIV) as function:
+        with builder.reg_scope(native=True):
+            x = builder.emit_reg(
+                "x",
+                "reg.broadcast",
+                [ir.ConstFloat(1.0, DataType.FP32, span)],
+                {"dtype": DataType.FP32, "lanes": 64},
+            )
+            m = builder.emit_reg("m", "reg.full_mask", [], {"lanes": 64})
+            maximum = builder.emit_reg("maximum", "reg.reduce_max", [x, m])
+            total = builder.let("total", pl.reg.reduce_sum(x, m, reassoc=True).unwrap())
+    assert maximum.type.lanes == 64
+    assert total.type.lanes == 64
+    printed = python_print(function.get_result(), format=False)
+    assert printed.count("native=True") == 1
+    ir.assert_structural_equal(function.get_result(), pl.parse(printed), enable_auto_mapping=True)
+
+
+@pytest.mark.parametrize("op", ["load", "store", "convert", "reduce_max", "reduce_sum"])
+def test_native_is_not_a_public_op_parameter(op):
+    assert "native" not in inspect.signature(getattr(pl.reg, op)).parameters
+
+
+@pytest.mark.parametrize("option", ["0", '"physical"', "policy"])
+def test_reg_native_requires_compiletime_bool(option):
+    with pytest.raises((ParserError, ValueError, TypeError), match="native|bool"):
+        pl.parse(f"""
+@pl.function(type=pl.FunctionType.AIV)
+def kernel(policy: pl.Scalar[pl.BOOL]):
+    with pl.reg_scope(native={option}):
+        pass
+""")
+
+
 def test_squeeze_store_explicit_state_roundtrip():
     kernel = pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
@@ -502,7 +612,7 @@ def kernel(
     src: pl.Tile[[256], pl.UINT32, pl.MemorySpace.Vec],
     dst: pl.Tile[[320], pl.UINT32, pl.MemorySpace.Vec],
 ):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         init_ureg = pl.reg.squeeze_store_init(dst)
         for i, (curr_ureg,) in pl.range(0, 4, init_values=(init_ureg,)):
             value = pl.reg.load(src, offset=i * 64, lanes=64)
@@ -558,7 +668,7 @@ def test_squeeze_store_accepts_flattenable_destination(shape, view):
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
            dst: pl.Tile[{shape}, pl.UINT32, pl.MemorySpace.Vec{view}]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         ureg = pl.reg.squeeze_store_init(dst, offset=7)
         value = pl.reg.load(src, lanes=64)
         keep = pl.reg.active_mask(3, lanes=64)
@@ -585,7 +695,7 @@ def test_squeeze_store_rejects_non_linear_destination(shape, view):
         pl.parse(f"""
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(dst: pl.Tile[{shape}, pl.UINT32, pl.MemorySpace.Vec, {view}]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         ureg = pl.reg.squeeze_store_init(dst)
         written = pl.reg.squeeze_store_flush(ureg, dst)
 """)
@@ -613,7 +723,7 @@ def test_squeeze_store_rejects_invalid_lifecycle(body, message):
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
            dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         value = pl.reg.load(src, lanes=64)
         keep = pl.reg.active_mask(3, lanes=64)
         ureg = pl.reg.squeeze_store_init(dst)
@@ -632,7 +742,7 @@ def test_squeeze_store_allows_more_than_four_sequential_chains():
     function = pl.parse(f"""
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
 {pairs}
 """)
     assert python_print(function, format=False).count("pl.reg.squeeze_store_init(") == 5
@@ -640,16 +750,17 @@ def kernel(dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
 
 def test_squeeze_store_rejects_add_before_opening_stream():
     with pytest.raises(
-        (ParserError, ValueError), match=r"reg\.add is not supported in a RegScope with squeeze-store"
+        (ParserError, ValueError),
+        match=r"reg\.add is not supported in a RegScope with squeeze-store",
     ):
         pl.parse("""
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
            dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         value = pl.reg.load(src, lanes=64)
-        added = pl.reg.add(value, value)
         keep = pl.reg.full_mask(lanes=64)
+        added = pl.reg.add(value, value, keep)
         initial = pl.reg.squeeze_store_init(dst)
         updated = pl.reg.squeeze_store_step(initial, dst, added, keep)
         written = pl.reg.squeeze_store_flush(updated, dst)
@@ -663,7 +774,7 @@ def test_squeeze_store_rejects_opening_inside_nonsequential_ancestor(outer_loop)
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
            dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         for i in pl.{outer_loop}(2):
             for j in pl.range(2):
                 value = pl.reg.load(src, lanes=64)
@@ -683,7 +794,7 @@ def test_squeeze_store_rejects_equivalent_stored_producers(mask_expression):
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
            dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         value = pl.reg.load(src, lanes=64)
         first_mask = {mask_expression}
         second_mask = {mask_expression}
@@ -713,7 +824,7 @@ def test_squeeze_store_rejects_loop_invariant_producers(source):
 @pl.function(type=pl.FunctionType.AIV)
 def kernel(src: pl.Tile[[64], pl.UINT32, pl.MemorySpace.Vec],
            dst: pl.Tile[[128], pl.UINT32, pl.MemorySpace.Vec]):
-    with pl.reg_scope():
+    with pl.reg_scope(native=True):
         value = pl.reg.load(src, lanes=64)
         keep = pl.reg.active_mask(3, lanes=64)
         initial = pl.reg.squeeze_store_init(dst)

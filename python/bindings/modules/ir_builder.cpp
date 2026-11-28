@@ -114,7 +114,7 @@ void BindIRBuilder(nb::module_& m) {
       .def("end_simt_scope", &IRBuilder::EndSimtScope, nb::arg("span"),
            nb::arg("private_scalars") = std::vector<VarPtr>{})
       .def("begin_reg_scope", &IRBuilder::BeginRegScope, nb::arg("span"), nb::arg("auto_sync") = true,
-           "Begin an implicit-capture register region")
+           nb::arg("native") = false, "Begin an implicit-capture register region")
       .def("emit_reg_mem_bar", &IRBuilder::EmitRegMemBar, nb::arg("kind"), nb::arg("span"))
       .def("end_reg_scope", &IRBuilder::EndRegScope, nb::arg("span"), "End a register region")
       .def(

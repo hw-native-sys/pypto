@@ -26,6 +26,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -43,6 +44,7 @@ std::string RegisterElement(DataType dtype) {
   if (dtype == DataType::FP16) return "f16";
   if (dtype == DataType::BF16) return "bf16";
   if (dtype == DataType::FP8E4M3FN) return "f8E4M3FN";
+  if (dtype == DataType::FP4E2M1X2) return "!pto.f4E2M1x2";
   return "f32";
 }
 
@@ -52,7 +54,6 @@ class ScopeOperands : public IRVisitor {
  public:
   // Access sites whose Tile operands need an external UB pointer.
   std::vector<CallPtr> memory;
-  bool micro = false;
   // Store/control-flow result -> source view. Stores change bytes, not Tile
   // ownership; branch aliases additionally require both sources to agree.
   std::map<const Var*, VarPtr> aliases;
@@ -79,7 +80,6 @@ class ScopeOperands : public IRVisitor {
     IRVisitor::VisitStmt_(stmt);
   }
   void VisitExpr_(const CallPtr& call) override {
-    micro |= IsOp(call, "reg.squeeze_store_init");
     if (IsOp(call, "reg.load") || IsOp(call, "reg.store") || IsOp(call, "reg.gather") ||
         IsOp(call, "reg.scatter") || IsOp(call, "reg.squeeze_store_step") ||
         IsOp(call, "reg.squeeze_store_flush")) {
@@ -135,8 +135,8 @@ std::string PTOCodegen::GetRegTypeString(const ir::RegTypePtr& type) const {
   }
   if (micro_reg_scope_) {
     if (type->GetRegKind() == ir::RegKind::MaskReg) {
-      CHECK(type->GetShape() == 64 || type->GetShape() == 128)
-          << "Squeeze-store micro lowering requires 64- or 128-lane masks";
+      CHECK(type->GetShape() == 64 || type->GetShape() == 128 || type->GetShape() == 256)
+          << "Physical micro lowering requires a full hardware mask";
       return "!pto.mask<b" + std::to_string(2048 / type->GetShape()) + ">";
     }
     CHECK(type->GetShape() * type->GetDType().GetByte() == 256)
@@ -234,7 +234,7 @@ void PTOCodegen::VisitStmt_(const ir::RegScopeStmtPtr& scope) {
     reg_addresses_[target.get()] = it->second;
   }
   inside_reg_scope_ = true;
-  micro_reg_scope_ = operands.micro;
+  micro_reg_scope_ = scope->Native();
   EmitStructural("pto.vecscope {");
   IncreaseIndent();
   VisitStmt(scope->body_);
@@ -320,30 +320,96 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
     return true;
   }
   if (IsOp(call, "reg.load") || IsOp(call, "reg.store")) {
-    CHECK_SPAN(GetKwargOr<int>(call->kwargs_, "block_stride", 0) == 0, call->span_)
-        << "Squeeze-store micro lowering requires contiguous register stores";
-    const auto base = pointer(args[0], args[1]);
+    auto base = pointer(args[0], args[1]);
     auto tile = As<TileType>(args[0]->GetType());
     auto ptr_type = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
     auto zero = GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+    auto dist = GetStringKwarg(call->kwargs_, "dist", "");
+    // PTOAS spells ONEPT_B32 as 1PT_B32; an omitted NORM distribution
+    // is the natural element-width store (NORM is only a load token).
+    if (IsOp(call, "reg.store")) {
+      if (dist == "NORM") {
+        dist.clear();
+      }
+      if (dist == "ONEPT_B32") {
+        dist = "1PT_B32";
+      }
+    }
+    const auto attr = dist.empty() ? "" : " {dist = \"" + dist + "\"}";
     if (IsOp(call, "reg.load")) {
-      Emit(name + " = pto.vlds " + base + "[" + zero + "] : " + ptr_type + ", index -> " +
-           GetRegTypeString(As<RegType>(call->GetType())));
+      auto result_type = As<RegType>(call->GetType());
+      if (result_type->GetDType() != tile->dtype_) {
+        // Offset is in storage elements; only reinterpret the pointer after
+        // addressing the original storage. Validation ensures equal byte widths.
+        const auto typed = NewNamedTemp("native_load_ptr");
+        const auto new_type = "!pto.ptr<" + RegisterElement(result_type->GetDType()) + ", ub>";
+        Emit(typed + " = pto.castptr " + base + " : " + ptr_type + " -> " + new_type);
+        base = typed;
+        ptr_type = new_type;
+      }
+      Emit(name + " = pto.vlds " + base + "[" + zero + "]" + attr + " : " + ptr_type + ", index -> " +
+           GetRegTypeString(result_type));
       bind();
     } else {
       auto lanes = As<RegType>(args[2]->GetType())->GetShape();
       auto mask = args.size() == 4 ? value(args[3]) : full_mask(lanes);
-      auto mask_type = GetRegTypeString(std::make_shared<RegType>(lanes, DataType::BOOL, RegKind::MaskReg));
-      Emit("pto.vsts " + value(args[2]) + ", " + base + "[" + zero + "], " + mask + " : " + type(args[2]) +
-           ", " + ptr_type + ", index, " + mask_type);
+      auto mask_type =
+          args.size() == 4
+              ? type(args[3])
+              : GetRegTypeString(std::make_shared<RegType>(lanes, DataType::BOOL, RegKind::MaskReg));
+      const auto block_stride = GetKwargOr<int>(call->kwargs_, "block_stride", 0);
+      if (block_stride > 0) {
+        CHECK_SPAN(dist.empty(), call->span_) << "Native distribution and block_stride cannot be combined";
+        const auto block = GetOrEmitConstant(static_cast<int64_t>(block_stride), DataType::INT16);
+        const auto repeat = GetOrEmitConstant(int64_t{0}, DataType::INT16);
+        const bool post = GetKwargOr<bool>(call->kwargs_, "post_update", false);
+        const auto post_result = post ? NewNamedTemp("native_store_post") + " = " : "";
+        // PTOAS selects the hardware POST_UPDATE mode when the op produces
+        // the updated temporary pointer. The caller's Tile view is unchanged.
+        Emit(post_result + "pto.vsstb " + value(args[2]) + ", " + base + ", " + block + ", " + repeat + ", " +
+             mask + " : " + type(args[2]) + ", " + ptr_type + ", i16, i16, " + mask_type +
+             (post ? " -> " + ptr_type : ""));
+      } else {
+        Emit("pto.vsts " + value(args[2]) + ", " + base + "[" + zero + "], " + mask + attr + " : " +
+             type(args[2]) + ", " + ptr_type + ", index, " + mask_type);
+      }
       BindVarToMlir(result, value(args[0]));
     }
+    return true;
+  }
+  if (IsOp(call, "reg.dintlv") || IsOp(call, "reg.intlv")) {
+    CHECK_SPAN(args.size() == 2, call->span_) << "Physical native interleave does not take a mask";
+    auto low = NewNamedTemp("native_interleave_low");
+    auto high = NewNamedTemp("native_interleave_high");
+    const auto opcode = IsOp(call, "reg.dintlv") ? "pto.vdintlv" : "pto.vintlv";
+    Emit(low + ", " + high + " = " + opcode + " " + value(args[0]) + ", " + value(args[1]) + " : " +
+         type(args[0]) + ", " + type(args[1]) + " -> " + type(args[0]) + ", " + type(args[1]));
+    reg_tuple_values_[result.get()] = {low, high};
+    return true;
+  }
+  if (IsOp(call, "reg.gather")) {
+    auto zero_expr = std::make_shared<ConstInt>(0, DataType::INDEX, call->span_);
+    auto base = pointer(args[0], args.size() > 3 ? args[3] : zero_expr);
+    auto tile = As<TileType>(args[0]->GetType());
+    auto ptr_type = "!pto.ptr<" + RegisterElement(tile->dtype_) + ", ub>";
+    Emit(name + " = pto.vgather2 " + base + ", " + value(args[1]) + ", " + value(args[2]) + " : " + ptr_type +
+         ", " + type(args[1]) + ", " + type(args[2]) + " -> " +
+         GetRegTypeString(As<RegType>(call->GetType())));
+    bind();
     return true;
   }
   auto result_reg = As<RegType>(call->GetType());
   CHECK_SPAN(result_reg, call->span_) << "Unsupported result in squeeze-store micro lowering";
   auto result_type = GetRegTypeString(result_reg);
-  if (IsOp(call, "reg.full_mask")) {
+  if (IsOp(call, "reg.convert") && call->HasKwarg("part")) {
+    std::string attrs = "{part = \"" + GetStringKwarg(call->kwargs_, "part", "") + "\"";
+    if (!GetStringKwarg(call->kwargs_, "rounding", "").empty()) {
+      attrs += R"(, rnd = "R", sat = "RS_DISABLE")";
+    }
+    attrs += "}";
+    Emit(name + " = pto.vcvt " + value(args[0]) + ", " + value(args[1]) + " " + attrs + " : " +
+         type(args[0]) + ", " + type(args[1]) + " -> " + result_type);
+  } else if (IsOp(call, "reg.full_mask")) {
     Emit(name + " = pto.pset_b" + std::to_string(2048 / result_reg->GetShape()) +
          " \"PAT_ALL\" : " + result_type);
   } else if (IsOp(call, "reg.active_mask")) {
@@ -400,8 +466,32 @@ bool PTOCodegen::TryEmitMicroRegCall(const ir::CallPtr& call, const ir::VarPtr& 
     }
     Emit(name + " = " + opcode + " " + operands + ", " + all + " : " + types + ", " + result_type + " -> " +
          result_type);
+  } else if (IsOp(call, "reg.mul") || IsOp(call, "reg.add") || IsOp(call, "reg.sub") ||
+             IsOp(call, "reg.maximum") || IsOp(call, "reg.minimum") || IsOp(call, "reg.div") ||
+             IsOp(call, "reg.exp") || IsOp(call, "reg.muls") || IsOp(call, "reg.shift_rights") ||
+             IsOp(call, "reg.reduce_max") || IsOp(call, "reg.reduce_sum") || IsOp(call, "reg.gather_lanes")) {
+    const auto& spec = OpRegistry::GetInstance().GetEntry(call->op_->name_).GetRegSpec();
+    if (!spec) {
+      INTERNAL_CHECK_SPAN(false, call->span_) << "Missing native register emitter metadata";
+      return false;
+    }
+    auto opcode = std::string("pto.") + spec->emitter.substr(std::string("pto.vmi.").size());
+    std::string operands, types;
+    for (const auto& arg : args) {
+      if (!operands.empty()) {
+        operands += ", ";
+        types += ", ";
+      }
+      operands += value(arg);
+      types += type(arg);
+    }
+    const auto predicate = As<RegType>(args.back()->GetType());
+    CHECK_SPAN(IsOp(call, "reg.gather_lanes") || (predicate && predicate->GetRegKind() == RegKind::MaskReg),
+               call->span_)
+        << "Physical native math requires explicit predicate";
+    Emit(name + " = " + opcode + " " + operands + " : " + types + " -> " + result_type);
   } else {
-    CHECK_SPAN(false, call->span_) << call->op_->name_ << " is not supported in squeeze-store micro lowering";
+    CHECK_SPAN(false, call->span_) << call->op_->name_ << " is not supported in physical micro lowering";
   }
   bind();
   return true;

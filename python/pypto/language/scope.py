@@ -270,11 +270,14 @@ class reg_scope:
     Register and local scalar values cannot escape; store results can.
     ``auto_sync=False`` disables PTOAS automatic intra-scope memory barriers;
     callers must supply necessary ordering with ``pl.reg.mem_bar``.
+    ``native=True`` selects full-width physical A5 registers throughout the region.
     """
 
-    def __init__(self, *, auto_sync: bool = True) -> None:
+    def __init__(self, *, auto_sync: bool = True, native: bool = False) -> None:
         if type(auto_sync) is not bool:
             raise TypeError("reg_scope auto_sync must be a compile-time bool")
+        if type(native) is not bool:
+            raise TypeError("reg_scope native must be a compile-time bool")
 
     def __enter__(self) -> None:
         raise RuntimeError("pl.reg_scope() is only valid inside a parsed PyPTO function")
