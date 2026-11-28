@@ -554,3 +554,150 @@ The 24 execution cases require a real NPU, `torch_npu`, and the optional
 `--codegen-only` is selected. Two separate codegen smoke cases compile the test
 kernel for both runtimes without claiming to validate device execution. A green
 job with skipped execution cases is not evidence of numerical eager correctness.
+
+## SHMEM graphs and the Qwen3 TP workload
+
+In-process SHMEM kernels use the ordinary `@pl.jit` call interface after
+`pypto.torch.init()`. Pass a contiguous view returned by
+`ShmemWindow.as_torch_tensor()` for each `pld.DistributedTensor` parameter. For
+example, `tput_chip(x, src, dst)` passes only the declared arguments. The
+compiler records which tensor supplies each generated `CommContext`; the
+runtime checks the backing window, fills the context slots and retains its
+owner until asynchronous work or graph replay retires. Use Gloo for the default
+WORLD group by default. When integrating with vLLM Ascend, supply its TP CPU
+group as `gloo_group=get_tp_group().cpu_group` to `acquire_gloo_shmem_window`.
+It must use Gloo and match WORLD membership and rank order. This gives
+NPUSHMEM the Gloo Store for its process-wide heap and preserves vLLM's HCCL
+WORLD. All members must create windows in the same order. The worker owns
+the window and launches PyPTO kernels against its views in the same process.
+
+Use `examples/distributed/08_gloo_shmem_collectives.py --prepare-only` to warm
+the JIT artifact cache on the CPU. Use the same PTOAS, CANN and SHMEM
+environment and artifact directory for the two-rank device run. The graph and model benchmarks also support prebuilt
+artifact bundles with the same tensor arguments. Regenerate bundles that
+predate communication-context binding metadata.
+
+Synchronization and retirement govern ownership. Synchronize device work, reset
+the graphs that refer to the window, and drain their tickets before dropping
+the window and its views. Torch symmetric memory manages the backing allocation.
+
+`tests/st/runtime/kernel/test_gloo_shmem_capture.py` records real Torch graphs
+containing local kernels and SHMEM communication. It covers TSTORE, TPUT,
+allreduce, changing replay inputs, device barriers, and graph resource retirement
+on 2/4/8 ranks. Prepare with
+`tests/st/runtime/kernel/capture_kernels.py --artifacts <directory>` outside the
+allocation; select `--runtime host_build_graph` for HBG and use a separate directory.
+Run under allocated torchrun with `PYPTO_SHMEM_EAGER_ARTIFACTS=<directory>`,
+separately for `TASK_QUEUE_ENABLE=0` and `1`.
+
+`examples/models/qwen3_tp` implements fixed-shape Qwen3-14B prefill and decode
+using the existing KERNEL worker. It has no PROGRAM worker or borrowed PROGRAM
+context. Gloo bootstraps the SHMEM window; each reduction publishes data, executes
+a reusable device barrier, sums peer data, and executes a second barrier before
+reuse. Both eager and capture use this same sequence. Weights use BF16 storage,
+with FP32 intermediate arithmetic and explicit rounding boundaries; this is not
+bitwise equivalence to Hugging Face eager BF16.
+
+Prepare artifacts and rank-local weights before requesting devices:
+
+```bash
+WORLD_SIZE=2 TORCH_DEVICE_BACKEND_AUTOLOAD=0 python -m examples.models.qwen3_tp.prepare   --artifacts build/qwen-kernel/artifacts --weights build/qwen-kernel/weights   --model /path/to/Qwen3-14B
+```
+
+On allocated devices, launch the benchmark as a module from the repository root:
+
+```bash
+torchrun --standalone --nproc-per-node=2 --module tests.benchmarks.qwen3_kernel \
+  --mode eager --artifacts build/qwen-kernel/artifacts --weights build/qwen-kernel/weights \
+  --prompt-ids prompt.json --output result.json
+```
+
+Use `--mode capture` to measure graph replay. The default workload has
+five measured requests after one warm-up, each producing eight greedy tokens.
+The prompt file is a nonempty JSON array of token IDs, at most 32 tokens;
+batch size is one and total cached length is at most 128.
+
+The runner groups attention preparation, scores, softmax, context and cast into
+one submission per layer, preserving the five device tasks and their external
+intermediate buffers. This reduces per-rank calls per forward from 763 to 603.
+Use `--unfused-attention` for the separate-call control, or `--paired-attention`
+with eager mode to alternate both configurations in one process. Paired runs
+warm each configuration and check all logits for bitwise equality outside the
+timer.
+
+TP2 HBG eager also groups attention with its reduction and FFN with its
+reduction. Decode submits the KV write separately before attention reads a
+read-only cache slice. Use `--paired-layer-grouping --warmups 3` to compare
+this path with the attention-only grouping in one process. `--profile-host`
+records one measured request per configuration with cProfile. Its timings
+include profiler overhead.
+
+Capture caches one graph per `(position, token_count)`, keeping tensor addresses
+and scalar bindings fixed; subsequent requests update input contents and replay
+those graphs. This bounded demonstration is not a general dynamic-position
+serving implementation. All graphs are reset before closing the worker.
+
+The runner sets `ring_task_window=16`, `ring_heap=1048576` bytes and
+`ring_dep_pool=64` for both modes. Entries submitted during capture use at
+most five tasks. The model uses caller-owned tensors for intermediates.
+Preparation defaults to HBG, which shares heap scratch between ordered
+invocations. TMR can be selected with `--runtime tensormap_and_ringbuffer` for
+eager execution, but its retained per-invocation runtime pools can exhaust device
+memory when caching all model graphs, even after reducing ring sizes.
+After recording a new graph, ranks rendezvous through Gloo before its first
+replay; otherwise an early rank could time out in a device barrier while its
+peer is still recording. Cached replays have no such Host rendezvous. They synchronize device completion
+without draining live graph tickets; those tickets are reclaimed after graph
+reset during final cleanup.
+
+Compare with `tests/benchmarks/qwen3_native_vllm.py` using the same model, TP size,
+prompt and output length. It uses the installed vLLM default graph configuration;
+`--enforce-eager` selects its eager baseline. The output also records
+`VLLM_BATCH_INVARIANT` when that native setting is used. Record the selected configuration
+and dependency versions with the results. Compare warm request wall time
+including generation and sampling; phase timings have different engine boundaries
+and must be labelled separately. Initialization and graph recording are excluded
+from warm measurements. Any vLLM internal compilation during initialization still
+runs inside its allocated device job; PyPTO artifacts are prepared beforehand.
+The standalone runner copies logits to CPU before greedy sampling; vLLM has its
+own scheduling, sampling and KV-cache implementation. Save raw samples and tokens,
+and validate saved logits with `tests/st/distributed/test_qwen3_tp_reference.py`
+on CPU before treating a timing as a successful model result.
+
+### Generate with vLLM Ascend
+
+The Qwen3 example provides `examples.models.qwen3_tp.vllm_ascend_worker.Qwen3PyPTOAscendWorker`
+for vLLM Ascend V1. vLLM schedules and returns requests through `LLM.generate()`.
+Each worker loads its BF16 shard, owns a PyPTO KV cache, and invokes PyPTO for the
+model forward and TP collectives. The worker retires device work before releasing
+its SHMEM mapping. This example supports greedy text generation with one active
+sequence, prompts of at most 32 tokens, and a 128-token context.
+
+Use vLLM 0.20.2 and vLLM Ascend 0.20.2rc1 with two Ascend devices. Prepare the
+Qwen3 HBG artifacts and TP2 weight shards on the CPU as described above. Give the
+two prepared directories to the worker under `additional_config["pypto_qwen3_tp"]`.
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model=checkpoint_dir,
+    worker_cls="examples.models.qwen3_tp.vllm_ascend_worker.Qwen3PyPTOAscendWorker",
+    additional_config={"pypto_qwen3_tp": {"artifacts": artifacts_dir, "weights": weights_dir}},
+    distributed_executor_backend="mp",
+    dtype="bfloat16",
+    tensor_parallel_size=2,
+    max_model_len=128,
+    max_num_seqs=1,
+    enforce_eager=True,
+    enable_prefix_caching=False,
+    enable_chunked_prefill=False,
+    async_scheduling=False,
+    block_size=128,
+)
+output = llm.generate(prompt, SamplingParams(temperature=0, max_tokens=8))
+```
+
+The test `tests/st/runtime/kernel/vllm_ascend_shmem_probe.py` checks two requests
+scheduled on the same worker pair. It compares every prefill and decode result
+against a saved standalone PyPTO reference on both ranks.

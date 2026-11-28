@@ -1646,8 +1646,9 @@ def _generate_config_file(
 
     ``orchestration_signature`` is the orchestration entry's per-tensor
     ``ArgDirection`` names ("IN"/"OUT"/"INOUT"), in ``orch_args`` tensor order
-    followed by SCALAR slots for KERNEL entry validation. PROGRAM signatures
-    exclude scalars. When present, the ``ORCHESTRATION`` dict gains a
+    followed by SCALAR slots (including CommContext pointers) for KERNEL entry
+    validation. PROGRAM signatures exclude scalars. When present, the
+    ``ORCHESTRATION`` dict gains a
     ``"signature"`` field so the runtime builds a non-empty ChipCallable
     signature, indexed by the orch tensor index in
     ``bind_callable_to_runtime_impl``. This lets read-only IN tensors skip the

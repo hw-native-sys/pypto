@@ -2144,5 +2144,22 @@ def test_output_collection_preserves_metadata_order_and_identity():
     assert collect_output_values(args, [], return_style=True) == ()
 
 
+def test_materialized_comm_context_is_uint64_scalar():
+    span = ir.Span.unknown()
+    ctx = ir.Var("ctx", ir.CommCtxType.get(), span)
+    func = ir.Function(
+        "chip_orch",
+        [(ctx, ir.ParamDirection.In)],
+        [],
+        ir.SeqStmts([], span),
+        span,
+        ir.FunctionType.Orchestration,
+    )
+    infos, outputs, _ = _extract_func_param_infos(func)
+    assert infos[0].shape is None
+    assert infos[0].dtype == DataType.UINT64
+    assert outputs == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
