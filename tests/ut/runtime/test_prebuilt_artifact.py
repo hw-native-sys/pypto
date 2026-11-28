@@ -1710,10 +1710,6 @@ def test_private_output_base_inside_cache_keeps_runtime_outside(
     assert not (root / "runs").exists()
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
-
-
 def test_ccu_sources_and_binary_package_preserve_order(tmp_path, fake_runtime):
     _chip(tmp_path)
     modules = [{"ccu_id": i, "source": f"ccu/module_{i}.cpp"} for i in range(2)]
@@ -1745,3 +1741,7 @@ def test_ccu_sources_and_binary_package_preserve_order(tmp_path, fake_runtime):
     (tmp_path / "prebuilt/ccu_0.so").write_bytes(b"tampered")
     with pytest.raises(ValueError, match="size mismatch"):
         _prebuilt.load_prebuilt(tmp_path, "a5", BuildKind.SINGLE_CHIP)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
