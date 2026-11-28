@@ -421,6 +421,8 @@ set(PYPTO_SOURCES
     src/codegen/pto/pto_urma_codegen.cpp
     src/codegen/pto/pto_scalar_floor_div_mod_plan.cpp
     src/codegen/pto/pto_tensor_view_plan.cpp
+    src/codegen/pto/tile_output_bindings.cpp
+    src/codegen/pto/tile_storage_plan.cpp
     src/codegen/pto/pto_type_utils.cpp
     src/codegen/distributed/distributed_codegen.cpp
     src/codegen/distributed/distributed_op_registry.cpp

@@ -745,6 +745,27 @@ class ScalarOut:
     assert len(codegen.PTOCodegen().generate_bundle(result).helpers) == 1
 
 
+def test_combined_codegen_keeps_outlined_vf_branch_on_captured_tile():
+    source = program("""
+with pl.reg_scope():
+    value = pl.reg.load(src, lanes=64)
+    if n > 0:
+        out = pl.reg.store(dst, value=value)
+    else:
+        doubled = pl.reg.add(value, value)
+        out = pl.reg.store(dst, value=doubled)
+    observed = pl.reg.load(out, lanes=64)
+z = pl.tile.add(out, out)
+""")
+    lowered = PassManager.get_strategy().run_passes(source)
+    assert len(helpers(lowered)) == 1
+    # Combined emission binds a fresh clone of the outlined scope at its call.
+    mlir = codegen.PTOCodegen().generate(lowered)
+    scope = mlir.split("pto.vecscope", 1)[1]
+    assert "scf.if" in scope and scope.count("pto.vmi.vstore") == 2, mlir
+    assert "pto.tmov" not in scope, mlir
+
+
 def test_branch_cannot_choose_between_different_tile_storage():
     source = program("""
 with pl.reg_scope():

@@ -17,14 +17,12 @@
 #include <vector>
 
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/tile_storage_plan.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/tile_view_semantics.h"
-#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -152,93 +150,6 @@ std::string PTOCodegen::GetScalarIterArgTypeString(
   return GetTypeString(scalar_type->dtype_);
 }
 
-namespace {
-// A ScopeStmt subtype (InCoreScopeStmt, SpmdScopeStmt, ...) has its own
-// ObjectKind, so As<ScopeStmt> misses it; match the whole family by base type.
-std::shared_ptr<const ir::ScopeStmt> AsScope(const StmtPtr& s) {
-  return std::dynamic_pointer_cast<const ir::ScopeStmt>(s);
-}
-
-// Find the YieldStmt terminating a branch body (last yield, recursing through the
-// trailing SeqStmts and any scope wrappers). Used to recover the per-slot yield
-// source so a branch-local producer can be re-pointed at the phi handle.
-YieldStmtPtr FindBranchYield(const StmtPtr& body) {
-  if (!body) return nullptr;
-  if (auto y = As<ir::YieldStmt>(body)) return y;
-  if (auto seq = As<ir::SeqStmts>(body)) {
-    for (auto it = seq->stmts_.rbegin(); it != seq->stmts_.rend(); ++it) {
-      if (auto y = FindBranchYield(*it)) return y;
-    }
-  }
-  if (auto scope = AsScope(body)) return FindBranchYield(scope->body_);
-  return nullptr;
-}
-
-// True when `var` is defined lexically inside `body` — an AssignStmt result, a
-// loop iter-arg/return-var, or a nested control-flow return-var — i.e. a
-// branch-local value whose handle can be safely re-pointed at the phi buffer. A
-// yield source that is NOT branch-local (a function param / outer-scope tile
-// threaded through the branch unchanged) must not be re-bound: its handle is read
-// elsewhere, so re-pointing it would corrupt those reads.
-bool IsDefinedInBranch(const ir::Var* var, const StmtPtr& body) {
-  if (!body || !var) return false;
-  if (auto assign = As<ir::AssignStmt>(body)) {
-    // Only a real op producer (Call value) writes a fresh buffer we may re-point.
-    // A bare-var alias (`r = a`) or a view writes nothing at its own handle, so
-    // re-pointing it would leave the phi buffer unwritten — the tmov fallback in
-    // emit_branch copies those into the phi handle instead.
-    if (assign->var_.get() != var) return false;
-    auto call = As<ir::Call>(assign->value_);
-    if (!call || !call->op_) return false;
-    // A zero-copy view (inherit-input: tile.reshape, tile.slice, ...) IS the
-    // "view" the comment above excludes. Its codegen emits nothing when the target
-    // handle already carries the result type, so re-pointing it at the phi handle
-    // leaves the phi buffer unwritten. `[N, 1]` col-vector carries always hit this:
-    // their elementwise ops run on a `[1, N]` row-major view and the branch yields
-    // the reshape back, not the op result.
-    auto& registry = ir::OpRegistry::GetInstance();
-    if (registry.IsRegistered(call->op_->name_) &&
-        registry.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) {
-      return false;
-    }
-    return true;
-  }
-  if (auto seq = As<ir::SeqStmts>(body)) {
-    for (const auto& s : seq->stmts_) {
-      if (IsDefinedInBranch(var, s)) return true;
-    }
-    return false;
-  }
-  if (auto for_stmt = As<ir::ForStmt>(body)) {
-    for (const auto& ia : for_stmt->iter_args_) {
-      if (ia.get() == var) return true;
-    }
-    for (const auto& rv : for_stmt->return_vars_) {
-      if (rv.get() == var) return true;
-    }
-    return IsDefinedInBranch(var, for_stmt->body_);
-  }
-  if (auto while_stmt = As<ir::WhileStmt>(body)) {
-    for (const auto& ia : while_stmt->iter_args_) {
-      if (ia.get() == var) return true;
-    }
-    for (const auto& rv : while_stmt->return_vars_) {
-      if (rv.get() == var) return true;
-    }
-    return IsDefinedInBranch(var, while_stmt->body_);
-  }
-  if (auto if_stmt = As<ir::IfStmt>(body)) {
-    for (const auto& rv : if_stmt->return_vars_) {
-      if (rv.get() == var) return true;
-    }
-    if (IsDefinedInBranch(var, if_stmt->then_body_)) return true;
-    return if_stmt->else_body_.has_value() && IsDefinedInBranch(var, *if_stmt->else_body_);
-  }
-  if (auto scope = AsScope(body)) return IsDefinedInBranch(var, scope->body_);
-  return false;
-}
-}  // namespace
-
 std::string PTOCodegen::GetValueCarryTypeString(const ir::TypePtr& type) const {
   if (auto reg = As<ir::RegType>(type)) return GetRegTypeString(reg);
   return GetScalarIterArgTypeString(As<ScalarType>(type));
@@ -280,8 +191,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     std::vector<std::string> scf_return_names;
     std::vector<std::string> scf_return_types;
     std::vector<std::pair<std::string, AllocTileFields>> deferred_tile_valid_shapes;
-    const auto then_yield = FindBranchYield(op->then_body_);
-    const auto else_yield = op->else_body_ ? FindBranchYield(*op->else_body_) : nullptr;
+    // Scalar-only branches need no Tile preparation, including in Buffer and SIMT functions.
+    static const TileBranchPlan empty_branch;
+    const auto prepared = fs_.storage.branches.find(op.get());
+    const auto& branch =
+        inside_reg_scope_ || prepared == fs_.storage.branches.end() ? empty_branch : prepared->second;
 
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
@@ -300,22 +214,14 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
               << "Register Tile branch result lacks a prepared external handle";
           continue;
         }
-        const auto then_value =
-            then_yield && i < then_yield->value_.size() ? ir::AsVarLike(then_yield->value_[i]) : nullptr;
-        const auto else_value =
-            else_yield && i < else_yield->value_.size() ? ir::AsVarLike(else_yield->value_[i]) : nullptr;
+        INTERNAL_CHECK_SPAN(prepared != fs_.storage.branches.end(), op->span_) << "Missing Tile branch plan";
         if (!tile_type->memref_) {
           // If both arms yield the same already-bound descriptor, it dominates
           // the join. Keep its TPOP provenance and runtime valid shape so a
           // subsequent dynamic view can replay directly from that descriptor.
-          if (then_value && else_value) {
-            const auto then_it = fs_.var_to_mlir.find(GetVarKey(then_value));
-            const auto else_it = fs_.var_to_mlir.find(GetVarKey(else_value));
-            if (then_it != fs_.var_to_mlir.end() && else_it != fs_.var_to_mlir.end() &&
-                then_it->second == else_it->second && IsLocallyBoundTileName(then_it->second)) {
-              BindVarToMlir(return_var, then_it->second);
-              continue;
-            }
+          if (auto handle = ResolveJoinHandle(branch, i, {}); !handle.empty()) {
+            BindVarToMlir(return_var, handle);
+            continue;
           }
           // A borrowed FIFO value has no address for a phi allocation. Carry
           // its tile handle through the branch instead of allocating storage
@@ -336,29 +242,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // cannot be an operand of that head declaration. Declare such a handle
         // with its physical box and restore the logical valid shape here,
         // immediately before the if uses it.
-        AllocTileFields logical_fields = ComputeAllocTileFields(tile_type);
-        bool has_dynamic_valid_shape = false;
-        if (const auto& tile_view = tile_type->tile_view_; tile_view.has_value()) {
-          for (const auto& dim : tile_view->valid_shape) {
-            if (dim && !As<ir::ConstInt>(dim)) {
-              has_dynamic_valid_shape = true;
-              break;
-            }
-          }
-        }
-        AllocTileFields alloc_fields =
-            has_dynamic_valid_shape ? ComputeAllocTileFields(tile_type, true) : logical_fields;
-        // Under PTOAS no `addr` is baked, so variables denoting the same buffer
-        // must share ONE tile_buf handle — two addr-less allocs are two
-        // independent buffers to ptoas PlanMemory. When the phi's MemRef is
-        // already bound to a handle (a loop-carried accumulator: the `pl.range`
-        // init, the iter_arg and the loop result all share the phi's MemRef),
-        // reuse it. Minting a second handle here would strand that buffer: the
-        // branch producers write the phi handle (they are re-bound to it below,
-        // fix #1956) while the loop result and every post-if read still resolve
-        // to the shared one, which no branch ever wrote.
-        std::string ret_name =
-            TryGetSharedTileBufHandle(tile_type, alloc_fields.type_str, then_value, else_value);
+        AllocTileFields logical_fields = EmitAllocTileOperands(tile_type);
+        const auto& valid_update = fs_.storage.operands.at(tile_type.get()).restore_valid_column;
+        AllocTileFields alloc_fields = valid_update ? EmitAllocTileOperands(tile_type, true) : logical_fields;
+        // The prepared allocation owner may already name a loop carry. Keep
+        // its SSA so subsequent iterations see the value written by this arm.
+        std::string ret_name = ResolveJoinHandle(branch, i, alloc_fields.type_str);
         if (!ret_name.empty()) {
           // The shared handle must dominate both branches and the post-if read.
           // Hoist its declaration to the function head unless the body already
@@ -378,11 +267,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         // producers and the synthetic tmov below share this exact target.
         ret_name = PrepareTileDestination(return_var, ret_name, "if result").name;
         BindVarToMlir(return_var, ret_name);
-        if (has_dynamic_valid_shape) {
+        if (valid_update) {
           // The PTOAS planner can reuse an existing descriptor for this phi.
           // Its validity reset must participate in NZ insertion alignment too.
-          const auto valid_shape = ir::tile_view_semantics::GetEffectiveTileView(*tile_type).valid_shape;
-          RecordTileValidColumnUpdate(ret_name, valid_shape.back());
+          RecordTileValidColumnUpdate(ret_name, *valid_update);
           deferred_tile_valid_shapes.emplace_back(ret_name, std::move(logical_fields));
         }
       } else if (ir::AsTensorTypeLike(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
@@ -426,30 +314,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     std::vector<std::string> inplace_return_ssa(op->return_vars_.size());
     std::vector<std::string> inplace_return_comm_ctx(op->return_vars_.size());
 
-    auto emit_branch = [&](const StmtPtr& body, const char* branch_name) {
-      const YieldStmtPtr yield = FindBranchYield(body);
-      // Fix #1956: under memory_planner=PTOAS, MemoryReuse (which would alias the
-      // branch yields onto the phi return_var's canonical MemRef via
-      // YieldFixupMutator) is skipped. Without it, each branch's tile producer
-      // writes its own handle and the post-if read of the phi handle reads a
-      // buffer no branch wrote. Re-bind each tile yield-source var to the phi
-      // return_var's (head-declared) handle so this branch's producer writes it.
-      // Under PYPTO (emit_tile_addr_) the IR-level aliasing already holds, so
-      // leave the bindings untouched.
-      if (!emit_tile_addr_ && yield) {
-        for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-          if (i >= yield->value_.size()) continue;
-          if (returns_via_scf[i]) continue;
-          if (!As<TileType>(op->return_vars_[i]->GetType())) continue;
-          auto src = ir::AsVarLike(yield->value_[i]);
-          if (!src) continue;
-          auto src_tile = As<TileType>(src->GetType());
-          if (src_tile && !src_tile->memref_) continue;
-          // Only re-point a branch-local producer; an outer var yielded through
-          // the branch is read elsewhere and must keep its own handle.
-          if (!IsDefinedInBranch(src.get(), body)) continue;
-          auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
-          if (phi_it != fs_.var_to_mlir.end()) BindVarToMlir(src, phi_it->second);
+    auto emit_branch = [&](const StmtPtr& body, const TileBranchArm& arm, const char* branch_name) {
+      const auto& yield = arm.yield;
+      for (size_t i = 0; i < arm.transfers.size(); ++i) {
+        const auto& transfer = arm.transfers[i];
+        if (transfer.redirect_producer) {
+          BindVarToMlir(transfer.source, GetVarName(op->return_vars_[i]));
         }
       }
       fs_.yield_buffer.clear();
@@ -462,8 +332,6 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       std::vector<std::string> ssa_yields;
       ssa_yields.reserve(scf_return_types.size());
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-        auto yielded_tile =
-            yield && i < yield->value_.size() ? As<TileType>(yield->value_[i]->GetType()) : nullptr;
         if (returns_via_scf[i]) {
           auto value = branch_yields[i];
           if (auto tile_type = As<TileType>(op->return_vars_[i]->GetType())) {
@@ -529,21 +397,14 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
                 << "' yields different backing SSAs across branches: " << inplace_return_ssa[i] << " vs "
                 << branch_yields[i];
           }
-        } else if (As<TileType>(op->return_vars_[i]->GetType()) &&
-                   (!emit_tile_addr_ || (yielded_tile && !yielded_tile->memref_))) {
-          // Tile phi under PTOAS (fix #1956). A branch-local producer was already
-          // re-pointed at the phi handle above, so its yield resolves to the phi
-          // handle and needs nothing. Any other yield — an outer tile threaded
-          // through the branch, or one the re-point conservatively skipped — has
-          // NOT written the phi buffer, so copy it in: without MemoryReuse's
-          // YieldFixupMutator (skipped under PTOAS) the post-if read would
-          // otherwise see an uninitialised phi buffer. Borrowed sources need
-          // the same copy under PYPTO: YieldFixup cannot compare their absent
-          // MemRefs with the allocated phi's address.
+        } else if (!inside_reg_scope_ && arm.transfers[i].copy_if_distinct) {
+          // A writeback op may choose its input handle after its producer was
+          // redirected. Materialize the transfer only for distinct SSA values.
           auto phi_it = fs_.var_to_mlir.find(GetVarKey(op->return_vars_[i]));
           if (phi_it != fs_.var_to_mlir.end() && !branch_yields[i].empty() &&
               branch_yields[i] != phi_it->second) {
-            if (yielded_tile && !yielded_tile->memref_) {
+            if (arm.transfers[i].borrowed) {
+              const auto yielded_tile = As<TileType>(yield->value_[i]->GetType());
               // Receives defined outside the branch bypass the finalizer's
               // branch-local yield check. Copying them into a phi buffer is
               // supported only in Vec: Mat-to-Mat tmov is not legal. Check at
@@ -557,12 +418,8 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
             // with. They can differ: a `pto.treshape` view carries static valid
             // dims (the op takes no valid operands) while an `alloc_tile` handle
             // is always dynamic-valid.
-            auto type_of = [&](const std::string& ssa) -> std::string {
-              auto it = fs_.ssa_to_tile_buf_type.find(ssa);
-              return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
-            };
-            std::string src_ty = type_of(branch_yields[i]);
-            std::string dst_ty = type_of(phi);
+            std::string src_ty = GetSSATileBufType(branch_yields[i]);
+            std::string dst_ty = GetSSATileBufType(phi);
             if (src_ty.empty()) src_ty = dst_ty;
             if (dst_ty.empty()) dst_ty = src_ty;
             std::ostringstream mov;
@@ -588,7 +445,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       fs_.yield_buffer.clear();
     };
 
-    emit_branch(op->then_body_, "then");
+    emit_branch(op->then_body_, branch.then_arm, "then");
     DecreaseIndent();
 
     EmitStructural("} else {");
@@ -596,7 +453,7 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     const auto& else_body = op->else_body_;
     INTERNAL_CHECK_SPAN(else_body.has_value(), op->span_)
         << "Internal error: IfStmt with return_vars has no else_body";
-    emit_branch(*else_body, "else");
+    emit_branch(*else_body, branch.else_arm, "else");
     DecreaseIndent();
     EmitStructural("}");
 
@@ -756,10 +613,6 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       }
       RegisterCommCtxFor(iter_arg, comm_ctx);
       RegisterCommCtxFor(return_var, comm_ctx);
-    } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
-      const auto memref = ir::GetDefinedMemRef(tile_type);
-      BindVarToMemRef(iter_arg, memref->base_.get());
-      BindVarToMemRef(return_var, memref->base_.get());
     }
   }
 
@@ -908,10 +761,6 @@ void PTOCodegen::VisitStmt_(const WhileStmtPtr& op) {
       }
       RegisterCommCtxFor(iter_arg, comm_ctx);
       RegisterCommCtxFor(return_var, comm_ctx);
-    } else if (auto tile_type = ir::GetTileTypeWithMemRef(iter_arg->GetType())) {
-      const auto memref = ir::GetDefinedMemRef(tile_type);
-      BindVarToMemRef(iter_arg, memref->base_.get());
-      BindVarToMemRef(return_var, memref->base_.get());
     }
   }
 

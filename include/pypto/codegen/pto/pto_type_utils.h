@@ -56,6 +56,9 @@ std::optional<size_t> GetPtoFp4LogicalAxis(const std::string& loc, const std::st
 std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,
                                                const std::vector<ir::ExprPtr>& coordinates);
 
+/// Physical descriptor type of an ordinary alloc_tile declaration.
+std::string FormatAllocatedTileType(const ir::TileType& tile_type, const std::string& dtype);
+
 /// Format a complete !pto.tile_buf<...> type string from individual components.
 /// All dimensions use IR units; packed Cube carriers are expanded for PTOAS.
 /// v_row/v_col are the valid shape dimensions (may differ from rows/cols).
@@ -100,7 +103,7 @@ struct TileTypeComponents {
 /// `v_row_dynamic` / `v_col_dynamic` are always set when the corresponding rank is
 /// present, so the resulting `!pto.tile_buf<...>` type string always reads
 /// `v_row=?, v_col=?`. The actual extents are conveyed via the `valid_row` /
-/// `valid_col` operands on `pto.alloc_tile` (see ComputeAllocTileFields).
+/// `valid_col` operands on `pto.alloc_tile` (see EmitAllocTileOperands).
 ///
 /// @param dtype_str_override Optional override for the dtype string (e.g.,
 ///                           PTOCodegen::GetTypeString); empty falls back to

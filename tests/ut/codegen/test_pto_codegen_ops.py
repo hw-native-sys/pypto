@@ -2376,11 +2376,9 @@ class Window:
         assert "pto.tgetval" in mlir, f"Expected pto.tgetval for tile.read, got:\n{mlir}"
         assert "arith.muli" in mlir, f"Expected arith.muli for dynamic flat offset, got:\n{mlir}"
         assert "arith.addi" in mlir, f"Expected arith.addi for dynamic flat offset, got:\n{mlir}"
-        assert "%cols_idx = arith.index_cast" in mlir, f"Expected i64 shape dim cast to index, got:\n{mlir}"
-        assert "%cols_idx" in next(
-            (line for line in mlir.splitlines() if "arith.muli" in line and "flat_offset_mul" in line),
-            "",
-        ), f"Expected dynamic stride multiply to use the casted cols index, got:\n{mlir}"
+        stride_mul = next(line for line in mlir.splitlines() if "flat_offset_mul = arith.muli" in line)
+        stride = re.search(r"arith\.muli %\w+, (%\w+) : index", stride_mul)
+        assert stride and f"{stride[1]} = arith.index_cast %arg2 : i64 to index" in mlir, mlir
 
     def test_tile_read_variable_2d_partial(self):
         """2D tile [1, 8], tile.read(t, [0, col]) with variable col -> arith.muli/arith.addi still emitted.

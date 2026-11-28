@@ -27,6 +27,8 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/pto/tile_output_bindings.h"
+#include "pypto/codegen/pto/tile_storage_plan.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -470,43 +472,13 @@ class PTOCodegen : public CodegenBase {
    * Idempotent: a Var is only allocated once per function (tracked via
    * `fs_.emitted_tile_alloc_vars`). Multi-output op codegen (e.g. tile.gather_compare)
    * uses this to eagerly allocate DPS dst/cdst tiles bound by downstream
-   * `dst = tuple_var[i]` AssignStmts before they are visited.
+   * `dst = tuple_var[i]` AssignStmts before they are visited. For these outputs
+   * tile_var is dst and producer is tuple_var: the declaration belongs to the
+   * instruction's scope even when the projection occurs later. Ordinary
+   * allocations pass the same variable for both arguments.
    */
-  void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
-
-  /**
-   * @brief Resolve the DPS element vars of a tuple-returning op call
-   *
-   * Multi-output ops (e.g. tile.gather_compare) return a TupleType. The parser
-   * desugars `a, b = call(...)` into:
-   *   _tuple_tmp = call(...)
-   *   a = _tuple_tmp[0]
-   *   b = _tuple_tmp[1]
-   *
-   * Since the dst element Vars do not appear in the Call's args, codegen must
-   * scan the current function body for these `<var> = tuple_var[i]` AssignStmts
-   * to recover the SSA names of the DPS outputs.
-   *
-   * @param tuple_var The tuple-result Var (typically GetCurrentResultVar()).
-   * @param arity     Number of expected tuple elements.
-   * @return Vector of length `arity`; entry i is the Var bound to
-   *         `tuple_var[i]`, or nullptr if no such consumer exists.
-   */
-  [[nodiscard]] std::vector<ir::VarPtr> ResolveTupleResultElements(const ir::VarPtr& tuple_var,
-                                                                   size_t arity) const;
-
-  /**
-   * @brief Resolve the DPS element vars of a multi-output call's tuple result
-   *
-   * The arity comes from the operator registry (`set_output_arity`), so an
-   * emitter never restates how many outputs its operator has and the two cannot
-   * drift apart.
-   *
-   * @param op A call whose operator declares an output arity greater than 1.
-   * @return Vector of length `arity`; entry i is the Var bound to element i, or
-   *         nullptr if no such consumer exists.
-   */
-  [[nodiscard]] std::vector<ir::VarPtr> ResolveTupleResultElements(const ir::CallPtr& op) const;
+  void EmitAllocTileForVar(const ir::VarPtr& tile_var, const ir::TileTypePtr& tile_type,
+                           const ir::VarPtr& producer);
 
   /// One DPS destination of a multi-output op: everything an emitter needs to
   /// name it in an `outs(...)` clause.
@@ -530,19 +502,8 @@ class PTOCodegen : public CodegenBase {
       const std::shared_ptr<const ir::TileType>& tile_type, const std::string& name_hint,
       std::optional<std::pair<std::string, std::string>> mutable_valid_shape = std::nullopt);
 
-  /**
-   * @brief Resolve and allocate every DPS destination of a multi-output call
-   *
-   * Wraps the whole preamble a multi-output emitter would otherwise repeat:
-   * resolve the element vars, check each carries a MemRef, and emit its
-   * `alloc_tile` eagerly — the intrinsic writes those buffers before the
-   * `<var> = tuple[i]` AssignStmts that would normally allocate them. An emitter
-   * is then only the format string for its intrinsic.
-   *
-   * @param op A call whose operator declares an output arity greater than 1.
-   * @return One entry per output, in tuple-element order.
-   */
-  [[nodiscard]] std::vector<TupleOutput> PrepareTupleOutputs(const ir::CallPtr& op);
+  /// Emit the prepared destinations at the producer, before the hardware writes them.
+  [[nodiscard]] std::vector<TupleOutput> EmitTupleOutputs(const ir::CallPtr& op);
 
   /**
    * @brief Override the current result buffer name
@@ -834,7 +795,7 @@ class PTOCodegen : public CodegenBase {
   std::string EmitCommRemoteOffsetInline(const std::string& ctx_ssa, const std::string& peer_ssa,
                                          const DataType& dtype);
 
-  /// Enter/leave an emitted MLIR region, tracking indentation and allocation dominance.
+  /// Enter/leave an emitted MLIR region, tracking indentation.
   void IncreaseIndent();
   void DecreaseIndent();
 
@@ -1036,11 +997,6 @@ class PTOCodegen : public CodegenBase {
   void EmitUrmaTransferAdapterDeclarations();
 
   /**
-   * @brief Build variable identity to MemRef mapping from function body
-   */
-  void BuildVarToMemRefMapping(const ir::FunctionPtr& func);
-
-  /**
    * @brief Get the pointer-identity key for a variable
    */
   [[nodiscard]] const ir::Var* GetVarKey(const ir::VarPtr& var) const;
@@ -1048,8 +1004,6 @@ class PTOCodegen : public CodegenBase {
                           const std::string& context) const;
   void BindVarToMlir(const ir::VarPtr& var, const std::string& mlir_name);
   void BindTensorView(const ir::VarPtr& var, const std::string& tensor_view_name);
-  void BindVarToMemRef(const ir::VarPtr& var, const ir::Var* base_ptr);
-
   /**
    * @brief Emit make_tensor_view from prepared GM parameter views
    */
@@ -1063,7 +1017,7 @@ class PTOCodegen : public CodegenBase {
    * actual extent (constant SSA when the IR-level extent is a constant,
    * runtime SSA otherwise).
    *
-   * Returned by ComputeAllocTileFields and consumed by EmitAllocTileForVar
+   * Returned by EmitAllocTileOperands and consumed by EmitAllocTileForVar
    * (single-statement allocs) and the IfStmt return-tile path
    * (deferred allocs via AllocNewTileBuf).
    */
@@ -1106,24 +1060,11 @@ class PTOCodegen : public CodegenBase {
    * @param use_physical_valid_shape Use `shape_`, ignoring an explicit logical
    *        `tile_view_.valid_shape`, for the alloc operands.
    */
-  AllocTileFields ComputeAllocTileFields(const std::shared_ptr<const ir::TileType>& tile_type,
-                                         bool use_physical_valid_shape = false);
+  AllocTileFields EmitAllocTileOperands(const std::shared_ptr<const ir::TileType>& tile_type,
+                                        bool use_physical_valid_shape = false);
 
-  /**
-   * @brief The tile_buf handle already bound to the buffer `tile_type` denotes.
-   *
-   * Only meaningful under the PTOAS memory planner (`emit_tile_addr_ == false`),
-   * where variables denoting the same buffer must share one handle because
-   * there is no baked `addr` to alias through. Returns "" when addresses are
-   * baked, when `tile_type` has no MemRef, or when no handle is bound yet. Mixed
-   * view types can reuse a declared tile handle only when its declaration
-   * dominates the current region, both branch yields already share it in the
-   * result's known memory space, and its actual SSA type matches `expected_type`.
-   */
-  [[nodiscard]] std::string TryGetSharedTileBufHandle(const std::shared_ptr<const ir::TileType>& tile_type,
-                                                      const std::string& expected_type,
-                                                      const ir::VarPtr& then_value,
-                                                      const ir::VarPtr& else_value) const;
+  std::string ResolveJoinHandle(const TileBranchPlan& branch, size_t index,
+                                const std::string& expected_type) const;
 
   /**
    * @brief Declare `ssa_name`'s `pto.alloc_tile` in the function head.
@@ -1209,8 +1150,7 @@ class PTOCodegen : public CodegenBase {
   /// Per-function mutable state that is reset at the start of each GenerateFunction call.
   struct FunctionState {
     bool buffer_ir = false;
-    /// Lowered slot producers require shared alias identity even through split APIs.
-    bool has_software_pipeline_slots = false;
+    TileStoragePlan storage;
     std::ostringstream constants_section;
     std::ostringstream body_section;
     std::string constants_indent;  ///< Fixed indent for constants_section (set once per function)
@@ -1226,15 +1166,11 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
     std::map<std::string, std::string>
         view_ssa_to_base_ptr;  ///< tensor_view SSA → base ptr SSA (for rebinding IfStmt phi return_vars)
-    std::map<const ir::Var*, std::string> memref_to_mlir;    ///< keyed by base_ Ptr
-    std::map<const ir::Var*, const ir::Var*> var_to_memref;  ///< maps tile var → base_ Ptr
+    std::map<const ir::Var*, std::string> memref_to_mlir;  ///< keyed by base_ Ptr
     /// Plain Tile assignments recorded while emitting the surrounding function.
     /// RegScope pre-scanning uses this provenance when an external alias is
     /// defined before the scope and therefore is outside its statement tree.
     std::map<const ir::Var*, ir::VarPtr> tile_aliases;
-    std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
-        memref_to_tile_type;  ///< keyed by base_ Ptr
-
     std::map<std::pair<int64_t, uint8_t>, std::string> emitted_numeric_constants;
 
     struct ExtraAllocTile {
@@ -1300,38 +1236,13 @@ class PTOCodegen : public CodegenBase {
     int temp_counter = 0;
     std::set<std::string> used_ssa_names;
 
-    std::map<const ir::Var*, std::string> memref_to_var_name;  ///< keyed by base_ Ptr
-    std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
+    std::map<const ir::Var*, std::string> allocation_names;  ///< Original SSA of each shared allocation.
     std::set<const ir::Var*> emitted_tile_alloc_vars;
-    /// PTOAS memory-planner mode only (no addr baked): full-MemRef-identity key
-    /// (base+offset+size) -> canonical tile_buf SSA. Variables that resolve to
-    /// the same buffer (e.g. a loop-carried accumulator coalesced by
-    /// MemoryReuse) share one handle so the op writes in place and ptoas
-    /// PlanMemory keeps them one buffer. Views (same base, different
-    /// offset/size) get distinct keys and are never merged.
-    std::map<std::string, std::string> memref_identity_to_mlir;
-    /// MemRef-identity key -> the tile_buf type of the first var bound to it.
-    std::map<std::string, std::string> memref_identity_type;
-    /// MemRef-identity keys whose vars do NOT all share one tile_buf type — e.g.
-    /// a `[1, N]` row-major op result and its `[N, 1]` col-major reshape view,
-    /// which occupy the same bytes. Their shared handle carries exactly one type
-    /// (differently-typed reads become `pto.treshape` views of it), so it must
-    /// never be re-typed to suit another var. `TryGetSharedTileBufHandle` only
-    /// accepts these identities for a dominating tile handle shared by both
-    /// branch yields in the result's known memory space, whose declared type
-    /// matches the requested type.
-    std::set<std::string> memref_identity_mixed_types;
     /// alloc_tile SSA handles already emitted — dedups the alloc when several
     /// vars share one handle (PTOAS in-place aliasing).
     std::set<std::string> emitted_tile_alloc_names;
-    /// Declaration region for each emitted/staged alloc. Region 0 is the
-    /// function body/head; every SCF region gets a unique ID, including sibling
-    /// branches at the same nesting depth. Only active ancestor regions dominate
-    /// the current emission point. Keep this separate from function-wide dedup.
-    std::map<std::string, size_t> tile_alloc_scope;
-    std::vector<size_t> tile_alloc_scope_stack{0};
-    std::set<size_t> active_tile_alloc_scopes{0};
-    size_t next_tile_alloc_scope = 0;
+    /// Last lexical position where a materialized allocation is visible.
+    std::map<std::string, size_t> allocation_scope_end;
 
     ir::FunctionPtr current_function;
     ir::VarPtr current_result_var;
@@ -1373,10 +1284,7 @@ class PTOCodegen : public CodegenBase {
     /// to recover the per-tensor CommContext pointer.
     std::map<const ir::Var*, std::string> dist_tensor_to_ctx;
 
-    /// Every `<var> = <tuple>[i]` binding in the current function body, keyed by
-    /// the tuple Var. Built once on function entry so a multi-output emitter
-    /// resolves its destinations by lookup rather than by rescanning the body.
-    std::map<const ir::Var*, std::vector<ir::VarPtr>> tuple_element_index;
+    TileOutputBindings tile_outputs;  ///< Prepared once and read throughout function emission.
     /// Scatter GET result tuple to its borrowed destination tensor (element zero).
     std::map<const ir::Var*, ir::VarPtr> urma_get_destinations;
 
@@ -1385,7 +1293,7 @@ class PTOCodegen : public CodegenBase {
 
     void Reset() {
       buffer_ir = false;
-      has_software_pipeline_slots = false;
+      storage = {};
       constants_section.str("");
       constants_section.clear();
       body_section.str("");
@@ -1399,9 +1307,7 @@ class PTOCodegen : public CodegenBase {
       tensor_to_base_ptr.clear();
       view_ssa_to_base_ptr.clear();
       memref_to_mlir.clear();
-      var_to_memref.clear();
       tile_aliases.clear();
-      memref_to_tile_type.clear();
 
       emitted_numeric_constants.clear();
 
@@ -1425,23 +1331,16 @@ class PTOCodegen : public CodegenBase {
       temp_counter = 0;
       used_ssa_names.clear();
 
-      memref_to_var_name.clear();
-      tile_var_allocs.clear();
+      allocation_names.clear();
       emitted_tile_alloc_vars.clear();
-      memref_identity_to_mlir.clear();
-      memref_identity_type.clear();
-      memref_identity_mixed_types.clear();
       emitted_tile_alloc_names.clear();
-      tile_alloc_scope.clear();
-      tile_alloc_scope_stack = {0};
-      active_tile_alloc_scopes = {0};
-      next_tile_alloc_scope = 0;
+      allocation_scope_end.clear();
       multi_buffer_regions.clear();
       multi_buffer_region_order.clear();
       unsigned_slot_remainders.clear();
       slot_index_ssa.clear();
 
-      tuple_element_index.clear();
+      tile_outputs.clear();
       urma_get_destinations.clear();
       current_function.reset();
       current_result_var.reset();
@@ -1557,10 +1456,6 @@ class PTOCodegen : public CodegenBase {
   /// Spell scalar/vector/mask value types carried by SCF iter_args and results.
   /// Tile handles follow the separate mutable-storage control-flow path.
   std::string GetValueCarryTypeString(const ir::TypePtr& type) const;
-  /// MemRef bases owned by Tile parameters, including their derived views.
-  /// Rebuilt per function: preserve caller storage instead of allocating locally.
-  /// Unlike reg_addresses_, this tracks ownership, not emitted pointer SSA names.
-  std::set<const ir::Var*> parameter_backed_tile_bases_;
   void CheckLoopTensorYields(const std::vector<ir::IterArgPtr>& iter_args, const ir::Span& span) const;
   std::string GetScalarIterArgTypeString(const std::shared_ptr<const ir::ScalarType>& scalar_type) const;
 };

@@ -139,7 +139,7 @@ overload.
 
 **Detection scope.** Both layers detect SPMD usage on a per-function basis:
 
-- `MemRefCollectorVisitor::UsesSpmdBlockOps` / `UsesSubblockOp` (C++,
+- `RuntimeParameterCollector::UsesSpmdBlockOps` / `UsesSubblockOp` (C++,
   `src/codegen/pto/pto_codegen.cpp`) drive whether PTOCodegen appends the
   block / subblock params to a given function's signature.
 - `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id` (Python,

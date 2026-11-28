@@ -319,7 +319,7 @@ ExprPtr LowerTileTQuantMxRule(const CallPtr& call, const std::vector<ExprPtr>& a
       << "Internal error: tile.tquant_mx public destination has an unsupported MX dtype";
 
   // Value-returning TQUANT (gather_compare-style): Bind the TupleType result,
-  // then project dst/exp so InitMemRef + ResolveTupleResultElements see real
+  // then project dst/exp so InitMemRef and PTO output preparation see real
   // TupleGetItem consumers. max/scaling remain write-only workspace inputs.
   const std::string algorithm = call->GetKwarg<std::string>("quant_scale_alg", "ocp");
   std::vector<std::pair<std::string, std::any>> quant_kwargs = {{"dtype", dtype}, {"group_axis", group_axis}};

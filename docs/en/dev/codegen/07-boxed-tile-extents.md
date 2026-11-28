@@ -1,6 +1,6 @@
 # Boxed Tile Extents
 
-Every `pto.alloc_tile` PyPTO emits is validated against the box grid PTOAS will
+Each ordinary Tile declaration is validated against the box grid PTOAS will
 check it against. PTO addresses a boxed tile one box at a time, so a tile whose
 *physical* extent is not a whole number of boxes has no address at all.
 
@@ -38,10 +38,10 @@ which moves and computes only the real data. A tensor-level pl.matmul /
 pl.matmul_acc does this for its M axis automatically.
 ```
 
-`ComputeAllocTileFields` is the single choke point every allocation passes
-through — the per-variable declaration, the hoisted `extra_alloc_tiles`, and the
-control-flow paths alike — so the check sees exactly what is emitted and cannot
-drift from it. A tensor-level `pl.matmul` / `pl.matmul_acc` never trips it *on
+`EmitAllocTileOperands` checks ordinary Tile declarations, including hoisted
+control-flow destinations. Multi-buffer slots bypass this helper.
+`EmitMultiBufferRegionAllocs` emits their region after planning checks the
+reference slot's flat extents. The boxed-extent check applies to ordinary declarations. A tensor-level `pl.matmul` / `pl.matmul_acc` never trips it *on
 its M axis*, which is boxed for the user in
 [`ConvertTensorToTileOps`](../passes/13-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing).
 The axes that remain the user's responsibility are `K` and `N`.

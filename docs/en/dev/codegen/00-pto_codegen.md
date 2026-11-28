@@ -199,13 +199,20 @@ class PTOCodegen : public CodegenBase {
 
 ### Implementation Components
 
-**File**: `src/codegen/pto/pto_codegen.cpp`
+**Source directory**: `src/codegen/pto/`
 
 | Component | Purpose |
 | --------- | ------- |
 | `PTOCodegen` | Main visitor class (inherits `CodegenBase`) for IR traversal |
-| `MemRefCollectorVisitor` | Collects MemRef objects and their associated TileType for allocation |
+| `PrepareTileStorage` | Binds Tile results to allocation windows or writeback inputs and prepares allocation operands and branch transfers |
+| `PrepareTileOutputBindings` | Resolves each native multi-output instruction’s destinations in hardware operand order |
 | Helper functions | `DataTypeToMLIRImpl()`, `MemorySpaceToMLIR()` |
+
+For an allocated Tile returned by an `if`, the plan identifies which producers can write the result directly
+and which yielded values may need a copy. A borrowed Tile can pass through as an SSA result. The emitter
+checks the actual operand handles before emitting a move. A declaration in a completed sibling branch is
+out of scope. When valid extents are computed inside a loop, the head declaration uses the physical shape
+and the branch restores the logical extents before either arm executes.
 
 ## Python API
 
@@ -791,8 +798,8 @@ The codegen maintains several mappings to track MLIR variable names:
 | ------- | ------- | ------- |
 | `var_to_mlir_` | IR variable → MLIR SSA name | `"tile_a"` → `"%0"` |
 | `tensor_to_view_` | Parameter → tensor_view | `"a"` → `"%3"` |
-| `memref_to_mlir_` | MemRef pointer → tile_buf | `memref.get()` → `"%0"` |
-| `memref_to_tile_type_` | MemRef pointer → TileType | Used for deriving tile_buf types |
+| `memref_to_mlir_` | Allocation base → tile_buf | `memref->base_.get()` → `"%0"` |
+| `storage.memref_to_tile_type` | Allocation base → TileType | Windows of one allocation share the key `memref->base_.get()` |
 
 **SSA value naming**:
 
@@ -812,9 +819,9 @@ The codegen:
 
 1. Resolves `tile_a` → `%0` via `var_to_mlir_`
 2. Resolves `tile_b` → `%1` via `var_to_mlir_`
-3. Gets `tile_c`'s MemRef from its TileType
-4. Maps MemRef → `%2` via `memref_to_mlir_`
-5. Gets tile_buf type from `memref_to_tile_type_`
+3. Resolves the destination for `tile_c` from its SSA binding
+4. Falls back to its MemRef base in `memref_to_mlir_` when a destination binding is missing
+5. Prefers the type registered for each SSA name when annotating operands. The MemRef fallback uses `storage.memref_to_tile_type`
 6. Generates: `pto.tmul ins(%0 : !pto.tile_buf<...>, %1 : !pto.tile_buf<...>) outs(%2 : !pto.tile_buf<...>)`
 
 ## Type Conversions

@@ -815,13 +815,13 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
 // Op surface: 3 inputs / TupleType{dst_TileType, cdst_TileType} output. The DPS
 // dst/cdst buffers are bound by downstream `<element> = tuple_var[i]`
 // AssignStmts (parser desugaring of `dst, cdst = ...`) rather than named in
-// args_, so PrepareTupleOutputs recovers and allocates them.
+// args_. Entry preparation binds them before the emitter writes either result.
 static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
   INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
       << "tile.gather_compare requires 3 arguments (src, kvalue, tmp), but got " << op->args_.size();
 
-  const auto outs = codegen.PrepareTupleOutputs(op);
+  const auto outs = codegen.EmitTupleOutputs(op);
 
   int cmp_mode = op->GetKwarg<int>("cmp_mode");
   CHECK(cmp_mode >= 0 && cmp_mode < 6) << "tile.gather_compare cmp_mode out of range: " << cmp_mode;
@@ -1298,7 +1298,7 @@ static std::string MakeTQuantMxCodegenPTO(const CallPtr& op, codegen::CodegenBas
   INTERNAL_CHECK_SPAN(dtype == DataType::FP8E4M3FN || dtype == DataType::FP4E2M1X2, op->span_)
       << "Internal error: tile.tquant_mx_raw reached codegen with unsupported dtype " << dtype.ToString();
 
-  const auto outs = codegen.PrepareTupleOutputs(op);
+  const auto outs = codegen.EmitTupleOutputs(op);
 
   // Every TQUANT operand must take the static-valid bridge (see EmitStaticValidTileView).
   auto src_view = EmitStaticValidTileView(codegen, op->args_[0], "tquant_src_static");

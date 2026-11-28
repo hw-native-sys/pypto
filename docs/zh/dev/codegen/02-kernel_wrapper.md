@@ -127,7 +127,7 @@ device 的显式 lane 重载。
 
 **检测范围。** 两层各自基于函数体独立检测 SPMD usage:
 
-- `MemRefCollectorVisitor::UsesSpmdBlockOps` / `UsesSubblockOp`(C++，位于
+- `RuntimeParameterCollector::UsesSpmdBlockOps` / `UsesSubblockOp`(C++，位于
   `src/codegen/pto/pto_codegen.cpp`)决定 PTOCodegen 是否给该函数签名追加
   block / subblock 形参。
 - `_uses_spmd_block_ops` / `_uses_dynamic_subblock_id`(Python，位于

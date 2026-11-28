@@ -1,6 +1,6 @@
 # 分块 Tile 尺寸校验
 
-PyPTO 发射的每一条 `pto.alloc_tile` 都会按 PTOAS 将要检查的分块网格先行校验。
+PyPTO 在发射普通 Tile 声明时会按 PTOAS 将要检查的分块网格先行校验。
 PTO 以「块」为单位寻址分块 tile，因此*物理*尺寸不是整数个块的 tile 根本没有地址。
 
 该规则与 PTOAS 的 `verifyBoxedTileLayout` 完全一致：
@@ -30,8 +30,8 @@ a Mat tile of physical shape [100, 128] and dtype fp16 must be a whole number of
 allocate 112 on that axis and declare 100 as the tile's valid_shape ...
 ```
 
-`ComputeAllocTileFields` 是所有分配的唯一收口——逐变量声明、被提升出来的
-`extra_alloc_tiles`、以及控制流路径都经过它——因此校验看到的正是最终发射的内容，不会与之
-漂移。张量层的 `pl.matmul` / `pl.matmul_acc` 不会因 *M 轴*触发它：M 轴已由
+`EmitAllocTileOperands` 校验普通 Tile 声明，包括提升到函数头的控制流目的 Tile。
+多缓冲槽位走独立路径：规划时检查参考槽位的平铺范围，再由 `EmitMultiBufferRegionAllocs`
+发射区域分配。分块尺寸校验适用于普通声明。张量层的 `pl.matmul` / `pl.matmul_acc` 不会因 *M 轴*触发它：M 轴已由
 [`ConvertTensorToTileOps`](../passes/13-convert_tensor_to_tile_ops.md#cube-operand-m-axis-boxing)
 自动对齐；仍需用户自行保证的是 `K` 与 `N`。

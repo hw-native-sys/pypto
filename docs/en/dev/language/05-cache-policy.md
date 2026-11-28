@@ -405,7 +405,7 @@ an error that names both versions.
 | Lowering | `src/ir/transforms/tensor_to_tile/incore_conversion.cpp` |
 | Printer | `src/ir/transforms/python_printer_stmt.cpp` (`PrintScopeCachePolicyStmts`) |
 | Codegen | `src/backend/common/pto_ops_memory.cpp` (`MakeTileLoadCodegenPTO`) |
-| Synthetic param | `src/codegen/pto/pto_codegen.cpp` (`MemRefCollectorVisitor::UsesL2BypassLoad`, signature emission) |
+| Synthetic param | `src/codegen/pto/pto_codegen.cpp` (`RuntimeParameterCollector::UsesL2BypassLoad`, signature emission) |
 | Kernel wrapper | `python/pypto/backend/pto_backend.py` (`_uses_l2_cache_offset`, `_generate_kernel_wrapper`) |
 | Runtime accessor | `runtime/src/a2a3/runtime/*/common/intrinsic.h` (`get_l2_cache_offset`), `runtime/docs/l2-cache-bypass.md` |
 

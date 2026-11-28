@@ -162,6 +162,7 @@ std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,
                                                const std::vector<ir::ExprPtr>& coordinates) {
   const auto space = tile.GetMemorySpace();
   INTERNAL_CHECK(space) << "Internal error: PTO tile coordinates require a memory space";
+  if (!tile.dtype_.IsPackedFp4()) return coordinates;
   const auto view = ir::tile_view_semantics::GetEffectiveTileView(tile);
   auto result = coordinates;
   if (auto axis =
@@ -171,6 +172,16 @@ std::vector<ir::ExprPtr> GetPtoTileCoordinates(const ir::TileType& tile,
         ir::AdjustPackedFp4CastLastDim({result[*axis]}, tile.dtype_, DataType::FP32, ir::Span::unknown())[0];
   }
   return result;
+}
+
+std::string FormatAllocatedTileType(const ir::TileType& tile_type, const std::string& dtype) {
+  auto memory_space = tile_type.GetMemorySpace();
+  INTERNAL_CHECK(memory_space.has_value()) << "Internal error: tile_type must have memory_space";
+
+  std::string loc = MemorySpaceToMLIR(*memory_space);
+  auto c = ExtractTileTypeInfo(tile_type, dtype);
+  return FormatTileBufTypeString(loc, c.dtype_str, c.rows, c.cols, c.blayout, c.slayout, c.fractal, c.pad,
+                                 c.compact, c.v_row, c.v_col, c.v_row_dynamic, c.v_col_dynamic);
 }
 
 std::string FormatTileBufTypeString(const std::string& loc, const std::string& dtype_str, int64_t rows,

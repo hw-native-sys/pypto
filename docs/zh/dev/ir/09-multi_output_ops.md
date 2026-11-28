@@ -110,8 +110,9 @@ InitMemRef           dst 和 cdst 是普通 TileType 变量，各自拿到自己
 MemoryReuse          tuple 临时变量把该 call 的 no-alias 输入传递到每个元素上；
                      每个元素都是独立的复用候选
         ↓
-PTO codegen          PrepareTupleOutputs(op) 从 `<var> = _tuple_tmp[i]` 绑定中
-                     找回元素变量并为它们分配空间
+PTO 准备             将原生 Tile 的每个输出槽绑定到投影变量及其 MemRef。
+        ↓
+PTO codegen          在生成生产者指令时发射已绑定的目的缓冲区。
 ```
 
 DSL 包装器为每个输出返回一个指向*同一个* call 的 `TupleGetItemExpr`；`python/pypto/language/parser/_dsl_invoker.py` 中的 `_unwrap_result` 通用地识别这一形状，并把裸 `Call` 交还给解析器重新绑定。
@@ -133,13 +134,14 @@ Tensor 层的计数形状仍为 `[1, rows]`：增加 Vec 物理容量不会增�
 
 ## 代码生成
 
-多输出算子的 `Call` 不在 `args_` 里携带它的目的地——解析器把它们放进了单独的 `AssignStmt`——所以 emitter 需要去查：
+对于原生多输出 Tile 调用，解析器用单独的投影赋值绑定每个输出。
+入口准备阶段在发射前验证这些绑定，算子发射器按 tuple 元素顺序使用它们。
 
 ```cpp
 static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
                                                codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  const auto outs = codegen.PrepareTupleOutputs(op);   // 解析 + 分配
+  const auto outs = codegen.EmitTupleOutputs(op);   // 发射已绑定的目的缓冲区
 
   std::ostringstream oss;
   oss << "pto.tgather ins(" << /* ... 输入 ... */ ")"
@@ -150,9 +152,10 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
 }
 ```
 
-`PrepareTupleOutputs` 从注册表读取 arity，解析出每个元素变量，检查它带有 `InitMemRef` 赋予的 MemRef，并**提前**发出它的 `alloc_tile`——指令会在那些本该负责分配的 `<var> = tuple[i]` `AssignStmt` 之前就写这些 buffer。发射是幂等的，因此那些语句随后会跳过重复发射。
-
-元素绑定在进入函数时一次性建立索引 (`fs_.tuple_element_index`)，所以解析它们是一次 map 查表，而不是每个 call 都重扫一遍函数体。
+`PrepareTileOutputBindings` 按注册的输出数量检查每个槽位，包括后续未读取的结果。
+每个槽位都需要一个已分配 MemRef 的 Tile 投影；缺失或重复绑定会在准备阶段报错。
+借用存储的 VF 和 GM tuple 结果无需分配硬件目的缓冲区。`EmitTupleOutputs`
+在生产者指令写入之前发射绑定的分配，之后的投影复用这些缓冲区。
 
 ## 新增一个多输出算子
 
@@ -161,7 +164,7 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
 3. 用 `set_workspace_arg(i)` 标记暂存区。若结果原地更新已有 GM 张量，用 `set_tuple_result_alias(result, i)` 声明对应的结果元素并标明参数的读写效果。
 4. 从 `f_deduce_type` 返回 N 元 `TupleType`。
 5. DSL 包装器返回一组指向同一个 call 的 `TupleGetItemExpr(call, i)`——解析器的解包路径认这个形状。
-6. codegen emitter 使用 `PrepareTupleOutputs(op)` 编写。
+6. codegen emitter 使用 `EmitTupleOutputs(op)` 编写。
 7. 测试注册契约（`tests/ut/ir/operators/test_op_registry.py` 会自动发现任何新的 `set_output_arity(N > 1)`）以及端到端的 lowering。
 
 ## 参见

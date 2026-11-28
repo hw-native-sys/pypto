@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import InternalError, ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.backend._ptoas_locate import find_ptoas_binary
 from pypto.backend.pto_backend import _run_ptoas
@@ -325,8 +325,7 @@ def test_shared_destinations_assemble_with_ptoas(operation, tmp_path: Path):
     assert output.is_file()
 
 
-def test_each_tuple_output_uses_its_own_shared_storage_view():
-    """PrepareTupleOutputs must resolve both destinations, not only the first."""
+def _shared_tuple_output_program(count_names: tuple[str, ...]) -> ir.Program:
     span = ir.Span.unknown()
     zero = ir.ConstInt(0, pl.INDEX, span)
 
@@ -383,8 +382,16 @@ def test_each_tuple_output_uses_its_own_shared_storage_view():
                 ),
                 span,
             ),
+            # Reverse projection order: outs are ordered by result slot, not first use.
+            *[
+                ir.AssignStmt(
+                    counts if name == "counts" else ir.Var(name, counts_type, span),
+                    ir.TupleGetItemExpr(pair, 1, span),
+                    span,
+                )
+                for name in count_names
+            ],
             ir.AssignStmt(indices, ir.TupleGetItemExpr(pair, 0, span), span),
-            ir.AssignStmt(counts, ir.TupleGetItemExpr(pair, 1, span), span),
             ir.AssignStmt(
                 indices_stored,
                 ir.Call(ir.Op("tile.store"), [indices, offsets, indices_out], indices_out.type, span),
@@ -406,7 +413,23 @@ def test_each_tuple_output_uses_its_own_shared_storage_view():
         span,
         ir.FunctionType.InCore,
     )
-    mlir = _generate(ir.Program([function], "SharedStorageTupleOutputs", span))
+    return ir.Program([function], "SharedStorageTupleOutputs", span)
+
+
+@pytest.mark.parametrize(
+    ("count_names", "message"),
+    [
+        ((), r"tile.gather_compare.*output 1 has no .*binding"),
+        (("counts", "other_counts"), r"element 1 .*bound twice.*counts.*other_counts"),
+    ],
+)
+def test_tuple_output_requires_exactly_one_destination(count_names, message):
+    with pytest.raises(InternalError, match=message):
+        _generate(_shared_tuple_output_program(count_names))
+
+
+def test_each_tuple_output_uses_its_own_shared_storage_view():
+    mlir = _generate(_shared_tuple_output_program(("counts",)))
     producer = _line(mlir, "pto.tgather ins(")
     destinations, types = _operands(producer, "outs")
     definitions = _definitions(mlir)
@@ -490,6 +513,96 @@ def test_tile_write_result_keeps_the_actual_input_binding(dynamic_valid):
     assert "rows=32, cols=1," in annotations[0], write
     assert "pto.treshape %root " not in mlir, mlir
     assert mlir.count("= pto.alloc_tile") == 2, mlir
+
+
+@pytest.mark.parametrize("outer_allocation", [False, True], ids=["sibling-local", "dominating"])
+def test_returnless_if_reuses_only_visible_tile_storage(outer_allocation):
+    span = ir.Span.unknown()
+    zero = ir.ConstInt(0, pl.INDEX, span)
+    shape = (1, 32)
+    storage = ir.MemRef(ir.Var("base", ir.PtrType(), span), zero, 128, span)
+    tile = ir.TileType(shape, pl.FP32, storage, None, ir.MemorySpace.Vec)
+    flag = ir.Var("flag", ir.ScalarType(pl.BOOL), span)
+    source = ir.Var("source", ir.TensorType(shape, pl.FP32), span)
+    output = ir.Var("output", source.type, span)
+    offsets = ir.MakeTuple([zero, zero], span)
+    sizes = ir.MakeTuple([ir.ConstInt(dim, pl.INDEX, span) for dim in shape], span)
+
+    def arm(name):
+        # Two writes to one window must share the declaration within this arm.
+        statements = []
+        for i in range(2):
+            value = ir.Var(f"{name}{i}", tile, span)
+            stored = ir.Var(f"stored_{name}{i}", output.type, span)
+            statements.extend(
+                [
+                    ir.AssignStmt(
+                        value, ir.Call(ir.Op("tile.load"), [source, offsets, sizes], tile, span), span
+                    ),
+                    ir.AssignStmt(
+                        stored,
+                        ir.Call(ir.Op("tile.store"), [value, offsets, output], output.type, span),
+                        span,
+                    ),
+                ]
+            )
+        return ir.SeqStmts(statements, span)
+
+    body = []
+    if outer_allocation:
+        root = ir.Var("root", tile, span)
+        body.append(ir.AssignStmt(root, ir.Call(ir.Op("tile.create"), [], tile, span), span))
+    body.extend([ir.IfStmt(flag, arm("left"), arm("right"), [], span), ir.ReturnStmt([], span)])
+    params = [(flag, ir.ParamDirection.In), (source, ir.ParamDirection.In), (output, ir.ParamDirection.Out)]
+    func = ir.Function("kernel", params, [], ir.SeqStmts(body, span), span, ir.FunctionType.InCore)
+    mlir = _generate(ir.Program([func], "SiblingLoads", span))
+    before, branches = mlir.split("scf.if")
+    lhs, rhs = branches.split("} else {")
+    for emitted, name in [(lhs, "left0"), (rhs, "right0")]:
+        handle = "%root" if outer_allocation else f"%{name}"
+        assert f"{handle} = pto.alloc_tile" in (before if outer_allocation else emitted), mlir
+        for op, direction in [("pto.tload", "outs"), ("pto.tstore", "ins")]:
+            uses = [_operands(line, direction)[0] for line in emitted.splitlines() if op in line]
+            assert uses == [[handle], [handle]], mlir
+    assert mlir.count("= pto.alloc_tile") == (1 if outer_allocation else 2), mlir
+
+
+def test_uniform_storage_phi_cannot_reuse_a_completed_branch_declaration():
+    """The first arm owns one local allocation. Both later producers write a single
+    dominating phi, and the identity join reuses it without a third allocation or copy.
+    """
+    span = ir.Span.unknown()
+    zero = ir.ConstInt(0, pl.INDEX, span)
+    storage = ir.MemRef(ir.Var("base", ir.PtrType(), span), zero, 128, span)
+    tile = ir.TileType((1, 32), pl.FP32, storage, None, ir.MemorySpace.Vec)
+    flag = ir.Var("flag", ir.ScalarType(pl.BOOL), span)
+    first, left, right, merged = (ir.Var(name, tile, span) for name in ("first", "left", "right", "merged"))
+
+    def create(var):
+        return ir.AssignStmt(var, ir.Call(ir.Op("tile.create"), [], tile, span), span)
+
+    def arm(var):
+        return ir.SeqStmts([create(var), ir.YieldStmt([var], span)], span)
+
+    identity = ir.Var("identity", tile, span)
+    body = ir.SeqStmts(
+        [
+            ir.IfStmt(flag, create(first), None, [], span),
+            ir.IfStmt(flag, arm(left), arm(right), [merged], span),
+            ir.IfStmt(flag, ir.YieldStmt([merged], span), ir.YieldStmt([merged], span), [identity], span),
+            ir.ReturnStmt([], span),
+        ],
+        span,
+    )
+    func = ir.Function("kernel", [(flag, ir.ParamDirection.In)], [], body, span, ir.FunctionType.InCore)
+    mlir = _generate(ir.Program([func], "SiblingTileStorage", span))
+    # The first arm owns one local allocation. Both following joins share the head
+    # allocation, so their producers require neither a third allocation nor a copy.
+    before, first_arm, second_arm, identity_arm = mlir.split("scf.if")
+    assert "%first = pto.alloc_tile" in first_arm, mlir
+    assert "%merged = pto.alloc_tile" in before, mlir
+    assert "%first" not in second_arm and "pto.tmov" not in second_arm, mlir
+    assert "pto.tmov" not in identity_arm and mlir.count("= pto.alloc_tile") == 2, mlir
 
 
 def test_branch_move_copies_to_the_actual_phi_even_when_ir_storage_matches():

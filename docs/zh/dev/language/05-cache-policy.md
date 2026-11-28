@@ -363,7 +363,7 @@ A5 使用 CachePolicy 接口，由后端转换为 ISA 缓存控制模式。
 | 下沉 | `src/ir/transforms/tensor_to_tile/incore_conversion.cpp` |
 | Printer | `src/ir/transforms/python_printer_stmt.cpp`（`PrintScopeCachePolicyStmts`） |
 | Codegen | `src/backend/common/pto_ops_memory.cpp`（`MakeTileLoadCodegenPTO`） |
-| 合成参数 | `src/codegen/pto/pto_codegen.cpp`（`MemRefCollectorVisitor::UsesL2BypassLoad`、签名发射） |
+| 合成参数 | `src/codegen/pto/pto_codegen.cpp`（`RuntimeParameterCollector::UsesL2BypassLoad`、签名发射） |
 | Kernel wrapper | `python/pypto/backend/pto_backend.py`（`_uses_l2_cache_offset`、`_generate_kernel_wrapper`） |
 | 运行时读取入口 | `runtime/src/a2a3/runtime/*/common/intrinsic.h`（`get_l2_cache_offset`）、`runtime/docs/l2-cache-bypass.md` |
 

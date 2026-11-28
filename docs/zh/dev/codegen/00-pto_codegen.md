@@ -176,13 +176,18 @@ class PTOCodegen : public CodegenBase {
 
 ### 实现组件
 
-**文件**: `src/codegen/pto/pto_codegen.cpp`
+**源码目录**: `src/codegen/pto/`
 
 | 组件 | 用途 |
 | ---- | ---- |
 | `PTOCodegen` | 主访问者类 (继承 `CodegenBase`), 用于 IR 遍历 |
-| `MemRefCollectorVisitor` | 收集 MemRef 对象及其关联的 TileType 用于分配 |
+| `PrepareTileStorage` | 将 Tile 结果绑定到分配窗口或原地写回的输入，准备分配操作数和分支传递方式 |
+| `PrepareTileOutputBindings` | 按硬件操作数顺序确定原生多输出指令的目的 Tile |
 | 辅助函数 | `DataTypeToMLIRImpl()`, `MemorySpaceToMLIR()` |
+
+对由 `if` 返回且有独立存储的 Tile，准备阶段标出哪些生产者可直接写入结果，哪些 yield 可能需要复制。
+借用的 Tile 可以作为 SSA 结果穿过分支。发射器在生成搬移指令前核对实际操作数，已经退出的兄弟分支中的声明不可复用。
+若有效范围在循环内计算，函数头使用物理形状声明 Tile，进入分支前再恢复逻辑有效范围。
 
 ## Python API
 
@@ -735,8 +740,8 @@ module {
 | ---- | ---- | ---- |
 | `var_to_mlir_` | IR 变量到 MLIR 静态单赋值 (SSA) 名 | `"tile_a"` -> `"%0"` |
 | `tensor_to_view_` | 参数到 tensor_view | `"a"` -> `"%3"` |
-| `memref_to_mlir_` | MemRef 指针到 tile_buf | `memref.get()` -> `"%0"` |
-| `memref_to_tile_type_` | MemRef 指针到 TileType | 用于推导 tile_buf 类型 |
+| `memref_to_mlir_` | 分配基址到 tile_buf | `memref->base_.get()` -> `"%0"` |
+| `storage.memref_to_tile_type` | 分配基址到 TileType | 同一分配的不同窗口共享键 `memref->base_.get()` |
 
 **SSA 值命名**:
 
@@ -756,9 +761,9 @@ tile_c = pl.mul(tile_a, tile_b)
 
 1. 通过 `var_to_mlir_` 解析 `tile_a` -> `%0`
 2. 通过 `var_to_mlir_` 解析 `tile_b` -> `%1`
-3. 从 TileType 获取 `tile_c` 的 MemRef
-4. 通过 `memref_to_mlir_` 映射 MemRef -> `%2`
-5. 从 `memref_to_tile_type_` 获取 tile_buf 类型
+3. 从 `tile_c` 的 SSA 绑定获取目的值
+4. 缺少目的绑定时，通过 MemRef 基址查找 `memref_to_mlir_`
+5. 标注操作数时优先使用 SSA 名称已注册的类型。回退到 MemRef 时，通过 `storage.memref_to_tile_type` 获取类型
 6. 生成: `pto.tmul ins(%0 : !pto.tile_buf<...>, %1 : !pto.tile_buf<...>) outs(%2 : !pto.tile_buf<...>)`
 
 ## 类型转换

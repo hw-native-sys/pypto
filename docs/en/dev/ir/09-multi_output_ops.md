@@ -140,8 +140,9 @@ InitMemRef           dst and cdst are ordinary TileType vars and each gets its
 MemoryReuse          the tuple temporary carries the call's no-alias inputs onto
                      every element; each element is an independent candidate
         ↓
-PTO codegen          PrepareTupleOutputs(op) recovers the element vars from the
-                     `<var> = _tuple_tmp[i]` bindings and allocates them
+PTO preparation      Bind each native Tile result slot to its projected Var and MemRef.
+        ↓
+PTO codegen          Emit the prepared destinations at the producing instruction.
 ```
 
 The DSL wrapper returns one `TupleGetItemExpr` per output over the *same* call;
@@ -170,14 +171,15 @@ for explicit boundary preparation.
 
 ## Codegen
 
-A multi-output op's `Call` does not carry its destinations in `args_` — the
-parser put them in separate `AssignStmt`s — so an emitter looks them up:
+For a native multi-output Tile call, the parser binds each output in a separate
+projection assignment. Entry preparation validates those bindings before emission.
+The operation emitter uses them in tuple-element order.
 
 ```cpp
 static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
                                                codegen::CodegenBase& codegen_base) {
   auto& codegen = AsPto(codegen_base);
-  const auto outs = codegen.PrepareTupleOutputs(op);   // resolve + allocate
+  const auto outs = codegen.EmitTupleOutputs(op);   // emit bound destinations
 
   std::ostringstream oss;
   oss << "pto.tgather ins(" << /* ... inputs ... */ ")"
@@ -188,15 +190,11 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op,
 }
 ```
 
-`PrepareTupleOutputs` reads the arity from the registry, resolves each element
-var, checks it carries the MemRef `InitMemRef` assigned, and emits its
-`alloc_tile` **eagerly** — the intrinsic writes those buffers before the
-`<var> = tuple[i]` `AssignStmt`s that would otherwise allocate them. The
-emission is idempotent, so those statements then skip re-emitting.
-
-The element bindings are indexed once per function on entry
-(`fs_.tuple_element_index`), so resolving them is a map lookup rather than a
-body rescan per call.
+`PrepareTileOutputBindings` uses the registered output arity and requires one
+projected Tile with an assigned MemRef per slot, including unread results. Missing
+or duplicate bindings fail preparation. Borrowed VF and GM tuple results do not
+allocate hardware destinations. `EmitTupleOutputs` emits the bound allocations at
+the producer, before the instruction writes them. Later projections reuse them.
 
 ## Adding a multi-output operator
 
@@ -209,7 +207,7 @@ body rescan per call.
 4. Return an N-element `TupleType` from `f_deduce_type`.
 5. Write the DSL wrapper to return a tuple of `TupleGetItemExpr(call, i)` over
    one call — the parser's unpacking path recognizes that shape.
-6. Write the codegen emitter using `PrepareTupleOutputs(op)`.
+6. Write the codegen emitter using `EmitTupleOutputs(op)`.
 7. Test the registration contract (`tests/ut/ir/operators/test_op_registry.py`
    picks up any new `set_output_arity(N > 1)` automatically) and the lowering
    end to end.
