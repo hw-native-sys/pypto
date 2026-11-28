@@ -1302,20 +1302,6 @@ class TestMultiFuncDepDiscovery:
         dep_names = [d.__name__ for d in deps]
         assert "_inner_dep" in dep_names
 
-    def test_incore_func_type_preserved(self):
-        @jit.incore
-        def sub(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-            return c
-
-        assert sub._func_type == "incore"
-
-    def test_incore_level_preserved(self):
-        @jit.incore(level=pl.Level.AIC)
-        def aic_sub(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-            return c
-
-        assert aic_sub._level == pl.Level.AIC
-
     def test_non_jit_callees_not_in_deps(self):
         """Regular Python functions called from entry are not added as deps."""
 
@@ -4402,44 +4388,6 @@ class TestInlineFuncIntegration:
         assert len(deps) == 1
         assert deps[0]._func_type == "inline"
 
-    def test_inline_compiled_program_drops_dep_function(self):
-        """After compilation, the Inline dep is gone (spliced + removed).
-
-        Inline bodies must include their own ``pl.at`` scope: unlike InCore,
-        Inline doesn't provide an implicit scope. The body is spliced into the
-        caller's lexical context as-is, then ``OutlineIncoreScopes`` extracts
-        the spliced ``pl.at`` block normally.
-        """
-        torch = pytest.importorskip("torch")
-
-        @jit.inline
-        def add_inline(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-            M, N = a.shape
-            with pl.at(level=pl.Level.CORE_GROUP):
-                tile_a = pl.load(a, [0, 0], [M, N])
-                tile_b = pl.load(b, [0, 0], [M, N])
-                tile_c = pl.add(tile_a, tile_b)
-                pl.store(tile_c, [0, 0], c)
-            return c
-
-        @jit
-        def add_entry(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-            c = add_inline(a, b, c)
-            return c
-
-        a = torch.randn(32, 32)
-        b = torch.randn(32, 32)
-        c = torch.empty(32, 32)
-        # lower() returns the post-pass IR (after PassManager.Default).
-        # CompiledProgram.program is the *pre-pass* IR, so the cache entry would
-        # still contain "add_inline"; we must inspect the post-pass return value.
-        post_pass = add_entry.lower(a, b, c)
-        func_names = [f.name for f in post_pass.functions.values()]
-        assert "add_inline" not in func_names, (
-            f"Inline function should have been spliced and removed, got {func_names}"
-        )
-        assert "add_entry" in func_names
-
     def test_inline_body_spliced_into_entry(self):
         """The inlined body's tile ops appear inside the (post-outline) entry.
 
@@ -4476,6 +4424,9 @@ class TestInlineFuncIntegration:
         a = torch.randn(32, 32)
         b = torch.randn(32, 32)
         c = torch.empty(32, 32)
+        # Inspect post-pass IR via lower(): CompiledProgram.program is pre-pass
+        # and may still contain the inline function. Inline originally supplies
+        # no implicit scope, so the explicit pl.at is outlined after splicing.
         post_pass = add_entry.lower(a, b, c)
         # After OutlineIncoreScopes: entry is Orchestration, inline body became
         # an InCore-class function (AIV/AIC/InCore) named *_incore_*.

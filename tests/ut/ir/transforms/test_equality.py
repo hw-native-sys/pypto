@@ -57,13 +57,6 @@ class TestReferenceEquality:
 
         assert not ir.structural_equal(x, y)
 
-    def test_same_const_structural_equal(self):
-        """Test that constants with same value are structurally equal."""
-        c1 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-        c2 = ir.ConstInt(42, DataType.INT64, ir.Span.unknown())
-
-        ir.assert_structural_equal(c1, c2)
-
     def test_different_const_not_structural_equal(self):
         """Test that constants with different values are not structurally equal."""
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
@@ -520,33 +513,8 @@ class TestEdgeCases:
 class TestAutoMapping:
     """Tests for auto mapping feature in structural equality and hash."""
 
-    def test_auto_mapping_simple_vars_equal(self):
-        """Test that x+1 equals y+1 with auto mapping enabled."""
-        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        y = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        c1_1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
-        c1_2 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
-
-        expr1 = ir.Add(x, c1_1, DataType.INT64, ir.Span.unknown())  # x + 1
-        expr2 = ir.Add(y, c1_2, DataType.INT64, ir.Span.unknown())  # y + 1
-
-        # Without auto mapping, they should NOT be equal
-        assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=False)
-
-        # With auto mapping, they SHOULD be equal
-        ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
-
     def test_auto_mapping_simple_vars_not_equal(self):
         """Test that x+1 does not equal y+1 without auto mapping."""
-        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        y = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
-
-        expr1 = ir.Add(x, c1, DataType.INT64, ir.Span.unknown())  # x + 1
-        expr2 = ir.Add(y, c1, DataType.INT64, ir.Span.unknown())  # y + 1
-
-        # Without auto mapping (default), they should NOT be equal
-        assert not ir.structural_equal(expr1, expr2)
         x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         y = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
         c1 = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
@@ -707,7 +675,7 @@ class TestAutoMapping:
         expr1 = ir.Add(x1, c1, DataType.INT64, ir.Span.unknown())
         expr2 = ir.Add(x2, c2, DataType.INT64, ir.Span.unknown())
 
-        # Should be equal both with and without auto mapping
+        # Distinct Var objects compare equal only when auto mapping is enabled.
         assert not ir.structural_equal(expr1, expr2, enable_auto_mapping=False)
         ir.assert_structural_equal(expr1, expr2, enable_auto_mapping=True)
 

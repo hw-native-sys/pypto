@@ -576,7 +576,7 @@ class TestManualScopeCodegen:
         ) in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
-    def test_compiler_derived_deps_in_default_auto_scope_do_not_emit_set_dependencies(self):
+    def test_default_auto_scope_keeps_plain_calls_fire_and_forget(self):
         """Default auto_scope=True is skipped unless AUTO-scope analysis is enabled."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)
@@ -607,9 +607,10 @@ class TestManualScopeCodegen:
         assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" not in code, code
         assert "SIMPLER_SCOPE() {" in code, code
         assert "TaskId producer_tid = task_0_outs.task_id();" not in code, code
-        assert "params_t1.set_dependencies(" not in code, code
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" not in code, code
+        assert "set_dependencies(" not in code, code
 
-    def test_compiler_derived_deps_in_default_auto_scope_emit_set_dependencies_when_enabled(self):
+    def test_default_auto_scope_emits_dependencies_and_captures_task_id_when_enabled(self):
         """Default auto_scope=True can become MANUAL when analysis covers the body."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)
@@ -649,79 +650,7 @@ class TestManualScopeCodegen:
             f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
         ) in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
-
-    def test_compiler_derived_deps_for_plain_auto_call_do_not_capture_task_id_by_default(self):
-        """pl.at-style ordinary calls stay fire-and-forget by default."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def fill(
-                self,
-                out: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                return out
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                produced = self.fill(scratch)
-                out = self.consume(produced)
-                return out
-
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(Prog)
-        code = _generate_orch_code(transformed)
-
-        assert "SIMPLER_SCOPE(ScopeMode::MANUAL)" not in code, code
-        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" not in code, code
-        assert "set_dependencies(" not in code, code
-
-    def test_compiler_derived_deps_for_plain_auto_call_capture_task_id_when_enabled(self):
-        """pl.at-style ordinary calls are captured when deps need them."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910)
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def fill(
-                self,
-                out: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                return out
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                produced = self.fill(scratch)
-                out = self.consume(produced)
-                return out
-
-        transformed = _run_default_pipeline_with_auto_scope_deps(Prog)
-        code = _generate_orch_code(transformed)
-
-        assert code.count("SIMPLER_SCOPE(ScopeMode::MANUAL)") == 1, code
-        assert "SIMPLER_SCOPE() {" not in code, code
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        producer_tid = re.search(
-            r"TaskId (\w+_tid) = TaskId::invalid\(\);[\s\S]*\1 = task_0_outs\.task_id\(\);",
-            code,
-        )
-        assert producer_tid, code
-        assert (
-            f"if ({producer_tid.group(1)}.is_valid()) "
-            f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
-        ) in code, code
-        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_auto_scope_task_id_array_slot_dep_uses_scalar_snapshot(self):
         """A TaskId array slot read is a valid explicit dep in auto scope."""

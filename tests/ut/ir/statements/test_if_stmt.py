@@ -286,27 +286,6 @@ class TestIfStmtHash:
 class TestIfStmtEquality:
     """Tests for IfStmt structural equality function."""
 
-    def test_if_stmt_structural_equal(self):
-        """Test structural equality of IfStmt nodes."""
-        span = ir.Span.unknown()
-        dtype = DataType.INT64
-        x1 = ir.Var("x", ir.ScalarType(dtype), span)
-        y1 = ir.Var("y", ir.ScalarType(dtype), span)
-        x2 = ir.Var("x", ir.ScalarType(dtype), span)
-        y2 = ir.Var("y", ir.ScalarType(dtype), span)
-        condition1 = ir.Eq(x1, y1, dtype, span)
-        condition2 = ir.Eq(x2, y2, dtype, span)
-        assign1 = ir.AssignStmt(x1, y1, span)
-        assign2 = ir.AssignStmt(x2, y2, span)
-
-        if_stmt1 = ir.IfStmt(condition1, assign1, None, [], span)
-        if_stmt2 = ir.IfStmt(condition2, assign2, None, [], span)
-
-        # Different variable pointers, so not equal without auto_mapping
-        assert not ir.structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=False)
-        # With auto_mapping, they should be equal
-        ir.assert_structural_equal(if_stmt1, if_stmt2, enable_auto_mapping=True)
-
     def test_if_stmt_different_condition_not_equal(self):
         """Test IfStmt nodes with different condition are not equal."""
         span = ir.Span.unknown()

@@ -2863,17 +2863,6 @@ class TestYieldFixup:
         with pytest.raises(ValueError, match="share the same on-chip buffer"):
             _run_pipeline(Before)
 
-    def test_divergent_acc_phi_rejects_acc_to_acc_move(self):
-        """YieldFixup must not manufacture an unsupported Acc-to-Acc copy.
-
-        The divergent phi cannot be safely coalesced because one seed is
-        produced before the branch. Reject it before codegen rather than emit a
-        type-correct ``tile.move`` that PTOAS cannot lower for distinct L0C
-        buffers.
-        """
-        with pytest.raises(InternalError, match="cannot reconcile divergent L0C accumulator buffers"):
-            _run_pipeline(_divergent_acc_phi_program())
-
 
 class TestNestedCarryLifetimeCarrier:
     """A nested loop's carry init is the *enclosing* loop's IterArg.

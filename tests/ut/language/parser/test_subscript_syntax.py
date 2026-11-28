@@ -25,7 +25,7 @@ class TestTensorSubscript:
     """Tests for tensor subscript syntax: A[i, j], A[0:16, :]."""
 
     def test_tensor_read_via_subscript(self):
-        """A[i, j] with all integer indices on Tensor -> tensor.read."""
+        """A[i, j] with variable integer Tensor indices -> tensor.read."""
 
         @pl.function
         def read_elem(
@@ -90,21 +90,6 @@ class TestTensorSubscript:
         assert isinstance(mixed_sub, ir.Function)
         printed = mixed_sub.as_python()
         assert "tensor.slice" in printed
-
-    def test_tensor_subscript_variable_indices(self):
-        """A[i, j] with variable indices on Tensor -> tensor.read."""
-
-        @pl.function
-        def read_var(
-            A: pl.Tensor[[64, 128], pl.FP32],
-            i: pl.Scalar[pl.INDEX],
-            j: pl.Scalar[pl.INDEX],
-        ) -> pl.Scalar[pl.FP32]:
-            return A[i, j]
-
-        assert isinstance(read_var, ir.Function)
-        printed = read_var.as_python()
-        assert "tensor.read" in printed
 
     def test_tensor_subscript_step_error(self):
         """A[0:16:2, :] with step should raise error."""

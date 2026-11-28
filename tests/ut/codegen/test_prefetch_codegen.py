@@ -82,12 +82,34 @@ class OrderedSyntheticArgsProgram:
 class TestPrefetchPTOCodegen:
     """Each prefetch op lowers to its PTOAS counterpart with the right operand types."""
 
-    def test_make_context_lowers_from_hidden_i8_pointer(self):
-        """A synthetic INT8 pointer feeds ``pto.make_prefetch_async_context``."""
+    def test_prefetch_sequence_lowers_with_typed_operands(self):
+        """The context, async prefetch, session projection, and wait have the PTOAS types."""
         mlir = _generate_mlir(PrefetchProgram)
         assert re.search(r"func\.func @main\([^)]*!pto\.ptr<i8>[^)]*\)", mlir), mlir
         assert re.search(
             r"pto\.make_prefetch_async_context\(%\w+ : !pto\.ptr<i8>\)",
+            mlir,
+        ), mlir
+
+        # ``tprefetch_async`` takes a whole-tensor partition view plus the context.
+        assert re.search(
+            r"= pto\.tprefetch_async\(%\w+, %\w+ : "
+            r"!pto\.partition_tensor_view<1x4096xf32>, !pto\.prefetch_async_context\) "
+            r"-> !pto\.async_event",
+            mlir,
+        ), mlir
+
+        # ``get_prefetch_async_session`` is a bare projection — no parenthesised operand list.
+        assert re.search(
+            r"= pto\.get_prefetch_async_session %\w+ : "
+            r"!pto\.prefetch_async_context -> !pto\.async_session",
+            mlir,
+        ), mlir
+
+        # ``wait`` pairs the event and session and yields an ``i1``.
+        assert re.search(
+            r"= pto\.comm\.wait_async_event\(%\w+, %\w+ : "
+            r"!pto\.async_event, !pto\.async_session\) -> i1",
             mlir,
         ), mlir
 
@@ -130,34 +152,6 @@ class TestPrefetchPTOCodegen:
             r"__pypto_spmd_block_idx, __pypto_spmd_block_num\);",
             call_line,
         ), call_line
-
-    def test_async_prefetch_lowers_with_partition_view(self):
-        """``tprefetch_async`` takes a whole-tensor partition view plus the context."""
-        mlir = _generate_mlir(PrefetchProgram)
-        assert re.search(
-            r"= pto\.tprefetch_async\(%\w+, %\w+ : "
-            r"!pto\.partition_tensor_view<1x4096xf32>, !pto\.prefetch_async_context\) "
-            r"-> !pto\.async_event",
-            mlir,
-        ), mlir
-
-    def test_session_uses_projection_assembly_form(self):
-        """``get_prefetch_async_session`` is a bare projection — no parenthesised operand list."""
-        mlir = _generate_mlir(PrefetchProgram)
-        assert re.search(
-            r"= pto\.get_prefetch_async_session %\w+ : "
-            r"!pto\.prefetch_async_context -> !pto\.async_session",
-            mlir,
-        ), mlir
-
-    def test_wait_lowers_to_comm_wait_async_event(self):
-        """``wait`` pairs the event and session and yields an ``i1``."""
-        mlir = _generate_mlir(PrefetchProgram)
-        assert re.search(
-            r"= pto\.comm\.wait_async_event\(%\w+, %\w+ : "
-            r"!pto\.async_event, !pto\.async_session\) -> i1",
-            mlir,
-        ), mlir
 
     def test_handle_ssa_values_are_defined_before_use(self):
         """Each handle operand resolves to an SSA name defined earlier in the function.

@@ -93,7 +93,7 @@ class TestOpErrorWrapping:
         assert isinstance(exc_info.value.__cause__, ValueError)
 
     def test_parser_errors_not_double_wrapped(self):
-        """ParserErrors from op dispatch are not re-wrapped."""
+        """Unknown tensor ops raise InvalidOperationError without double wrapping."""
         with pytest.raises(InvalidOperationError, match=r"Unknown operation 'pl\.nonexistent_op'"):
 
             @pl.function

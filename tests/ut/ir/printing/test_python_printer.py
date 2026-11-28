@@ -1281,20 +1281,6 @@ def test_python_print_concise_preserves_const_dtype():
     assert "pl.const(42, pl.INT32)" in concise_result
 
 
-def test_python_print_default_is_verbose():
-    """Test that default (no concise param) still prints type annotations."""
-    span = ir.Span.unknown()
-    dtype = DataType.INT64
-    x = ir.Var("x", ir.ScalarType(dtype), span)
-    c = ir.ConstInt(42, dtype, span)
-    assign = ir.AssignStmt(x, c, span)
-
-    result = assign.as_python()
-    # Default should include type annotation
-    assert "pl.INT64" in result
-    assert "x:" in result or "x :" in result
-
-
 def test_python_print_distinct_iter_args_same_name_hint_disambiguated():
     """Two sibling ForStmts whose iter_args share name_hint must print as distinct identifiers.
 

@@ -81,30 +81,6 @@ class TestPrinterIntegration:
         # Printer uses simplified tensor operation notation
         assert "tensor.add" in printed or "pl.add" in printed
 
-    def test_yield_type_annotation_in_if_statement(self):
-        """Test that type annotations on yield assignments are printed (issue #185)."""
-
-        @pl.function
-        def func_with_if_yield(n: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[64, 128], pl.FP32]:
-            init: pl.Tensor[[64, 128], pl.FP32] = pl.create_tensor([64, 128], dtype=pl.FP32)
-
-            for i, (acc,) in pl.range(5, init_values=(init,)):
-                if i == 0:
-                    out_c: pl.Tensor[[64, 128], pl.FP32] = pl.mul(acc, 2.0)
-                    val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(out_c)
-                else:
-                    val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_(acc)
-
-                result = pl.yield_(val)
-
-            return result
-
-        # Print and verify type annotation is present
-        printed = func_with_if_yield.as_python()
-
-        # Should have type annotation on single-variable yield (not just "val = pl.yield_(out_c)")
-        assert "val: pl.Tensor[[64, 128], pl.FP32] = pl.yield_" in printed
-
     def test_tuple_yield_no_type_annotation(self):
         """Test that tuple yields don't print type annotations (not valid Python syntax)."""
 

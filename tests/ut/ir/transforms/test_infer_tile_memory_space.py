@@ -47,7 +47,7 @@ class TestInferTileMemorySpaceKwargOps:
     """Test memory_space inference for ops that read from target_memory kwarg."""
 
     def test_load_default_vec(self):
-        """tile.load without target_memory kwarg defaults to Vec."""
+        """tile.load defaults to Vec; tile.store needs no extra move from Vec."""
 
         @pl.program
         class Before:
@@ -1414,7 +1414,7 @@ class TestAutoMoveInsertion:
         ir.assert_structural_equal(After, Expected)
 
     def test_no_move_when_already_correct(self):
-        """No move inserted when input already in correct space."""
+        """No extra moves for correctly placed matmul inputs or the Acc store."""
 
         @pl.program
         class Before:
@@ -1523,125 +1523,6 @@ class TestAutoMoveInsertion:
                 ] = pl.move(x_tile, target_memory=pl.MemorySpace.Vec)
                 pl.tile.write(x_tile_V, [0, 0], value)
                 return out_0
-
-        After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_store_no_move_for_vec(self):
-        """tile.store accepts Vec — no move needed for Vec tile."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                x_tile: pl.Tile[[64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    x,
-                    [0],
-                    [64],
-                    target_memory=pl.Mem.Vec,
-                )
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        After = passes.infer_tile_memory_space()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_store_no_move_for_acc(self):
-        """tile.store accepts Acc — no move needed for matmul output."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16] = pl.move(x_tile, target_memory=pl.MemorySpace.Left)
-                y_right: pl.Tile[[128, 128], pl.BF16] = pl.move(y_tile, target_memory=pl.MemorySpace.Right)
-                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
-                    x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                y_tile: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
-                    y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
-                )
-                x_left: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Left] = pl.move(
-                    x_tile, target_memory=pl.MemorySpace.Left
-                )
-                y_right: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Right] = pl.move(
-                    y_tile, target_memory=pl.MemorySpace.Right
-                )
-                z_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(x_left, y_right)
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16],
-            ) -> pl.Tensor[[16, 128], pl.FP32]:
-                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
-                z: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
         After = passes.infer_tile_memory_space()(Before)
         ir.assert_structural_equal(After, Expected)

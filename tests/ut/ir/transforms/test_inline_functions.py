@@ -33,7 +33,7 @@ class TestInlineFunctionsBasic:
     """Single-call-site, single-return cases."""
 
     def test_single_call_site(self):
-        """One Inline function called once: body spliced, function removed."""
+        """One top-level Inline call: splice the body without an extra temporary."""
 
         @pl.program
         class Before:
@@ -3153,32 +3153,6 @@ class TestInlineFunctionsNestedCallSites:
         assert "half" not in printed, printed
         # The hoisted bound precedes the loop it feeds.
         assert printed.index("// 2") < printed.index("pl.range"), printed
-
-    def test_top_level_call_site_gains_no_temporary(self):
-        """`z = helper(a)` already splices; hoisting must not add a redundant copy."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.Inline)
-            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                y: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
-                return y
-
-            @pl.function
-            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                z: pl.Tensor[[1], pl.INT32] = self.helper(a)
-                return z
-
-        @pl.program
-        class Expected:
-            @pl.function
-            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                y_inline: pl.Tensor[[1], pl.INT32] = pl.mul(a, a)
-                z: pl.Tensor[[1], pl.INT32] = y_inline
-                return z
-
-        After = passes.inline_functions()(Before)
-        ir.assert_structural_equal(After, Expected)
 
     def test_tuple_returning_callee_is_not_hoisted(self):
         """A tuple-returning callee must stay put — hoisting it leaves an undefined temp.

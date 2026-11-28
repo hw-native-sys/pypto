@@ -162,11 +162,6 @@ def loop_mlir() -> str:
     return _compile_and_codegen(DynValidShapeLoopIfElse, "kernel")
 
 
-def test_if_else_dyn_valid_shape_compiles(if_else_mlir: str):
-    """Verify that if/else with dynamic valid_shape compiles through the pipeline."""
-    assert if_else_mlir, "Generated MLIR code should not be empty"
-
-
 def test_if_else_dyn_valid_shape_has_dynamic_alloc(if_else_mlir: str):
     """Verify the generated code has dynamic valid-shape tile allocations."""
     alloc_lines = [line.strip() for line in if_else_mlir.split("\n") if "pto.alloc_tile" in line]
@@ -207,11 +202,6 @@ def test_if_else_dyn_valid_shape_padded_alloc_has_pad_min(if_else_mlir: str):
     padded_allocs = [line for line in alloc_lines if "s_padded" in line]
     assert len(padded_allocs) >= 1, f"Expected s_padded alloc, got alloc_lines: {alloc_lines}"
     assert "pad=3>" in padded_allocs[0], f"Expected pad=3 (PadValue.min) in padded alloc: {padded_allocs[0]}"
-
-
-def test_loop_if_else_dyn_valid_shape_compiles(loop_mlir: str):
-    """Verify the loop + if/else pattern with dynamic valid_shape compiles."""
-    assert loop_mlir, "Generated MLIR code should not be empty"
 
 
 def test_loop_if_else_dyn_valid_shape_has_scf_for(loop_mlir: str):

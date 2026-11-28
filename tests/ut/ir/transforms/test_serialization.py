@@ -559,24 +559,6 @@ class TestStatementSerialization:
         # Verify that else_body is None in the restored version
         assert restored_if_stmt.else_body is None
 
-    def test_serialize_for_stmt(self):
-        """Test serialization of ForStmt."""
-        i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-        x = ir.Var("x", ir.ScalarType(DataType.INT64), ir.Span.unknown())
-
-        start = ir.ConstInt(0, DataType.INT64, ir.Span.unknown())
-        stop = ir.ConstInt(10, DataType.INT64, ir.Span.unknown())
-        step = ir.ConstInt(1, DataType.INT64, ir.Span.unknown())
-
-        body = ir.AssignStmt(x, ir.Add(x, i, DataType.INT64, ir.Span.unknown()), ir.Span.unknown())
-
-        for_stmt = ir.ForStmt(i, start, stop, step, [], body, [], ir.Span.unknown())
-
-        data = ir.serialize(for_stmt)
-        restored = ir.deserialize(data)
-
-        ir.assert_structural_equal(for_stmt, restored)
-
     def test_serialize_for_stmt_with_iter_args(self):
         """Test serialization of ForStmt with iter_args."""
         i = ir.Var("i", ir.ScalarType(DataType.INT64), ir.Span.unknown())

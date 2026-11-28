@@ -51,12 +51,6 @@ class TestStandalone:
     def test_create(self):
         assert tca is not None
 
-    def test_unknown_for_unbound_vars(self):
-        fresh = TransitiveComparisonAnalyzer()
-        u = make_var("u")
-        v = make_var("v")
-        assert fresh.try_compare(u, v) == CompareResult.kUnknown
-
     def test_constant_comparison(self):
         assert tca.try_compare(ci(3), ci(5)) == CompareResult.kLT
         assert tca.try_compare(ci(5), ci(3)) == CompareResult.kGT

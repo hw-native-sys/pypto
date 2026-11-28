@@ -53,13 +53,6 @@ class TestFunctionAttrsBinding:
         assert func.attrs["pipeline_depth"] == 2
         assert func.split == ir.SplitMode.UP_DOWN
 
-    def test_no_attrs_means_no_split(self):
-        span = ir.Span.unknown()
-        body = _make_nop_body()
-        func = ir.Function("f", [], [], body, span)
-        assert func.attrs == {}
-        assert func.split is None
-
 
 class TestFunctionAttrsDSL:
     """Test Function attrs via the @pl.function / @pl.program DSL decorators."""

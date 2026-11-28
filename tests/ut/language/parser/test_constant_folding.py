@@ -390,7 +390,11 @@ class TestSymbolicShapeEquality:
     as ``upper - lower`` with a loop induction variable on both sides."""
 
     def test_slice_extent_simplifies_to_constant(self):
-        """``x[:, k : k + C]`` inside a loop produces a literal-C extent."""
+        """``x[:, k : k + C]`` inside a loop produces a literal-C extent.
+
+        The parser used to reject reassignment as a type change because
+        ``k + C - k`` did not match the initial ``C`` shape.
+        """
         C = 64
 
         @pl.function
@@ -416,23 +420,6 @@ class TestSymbolicShapeEquality:
 
         assert isinstance(func, ir.Function)
         _assert_all_slice_extents_are_constint(func, [8, S])
-
-    def test_reassign_across_loop_with_symbolic_extent(self):
-        """Reassignment of a tensor variable inside a loop with a symbolic
-        slice extent should succeed — the pre-fix parser rejected this with
-        'Cannot reassign with a different type' because the slice shape built
-        as ``k + C - k`` did not match the initial ``C`` shape."""
-        C = 64
-
-        @pl.function
-        def func(a: pl.Tensor[[8, 256], pl.BF16]) -> pl.Tensor[[8, 64], pl.BF16]:
-            chunk = a[:, 0:C]
-            for k in pl.range(C, 256, C):
-                chunk = a[:, k : k + C]
-            return chunk
-
-        # `k + C - k` simplifies to the literal C, so both slices keep shape [8, 64]
-        _assert_all_slice_extents_are_constint(func, [8, C])
 
     def test_symbolic_cancellation_in_broadcast_sub(self):
         """``pl.sub`` of two slices whose extents simplify to the same constant

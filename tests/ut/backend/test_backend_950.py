@@ -235,13 +235,6 @@ class TestBackend950Serialization:
         finally:
             Path(temp_path).unlink()
 
-    def test_export_and_check_type_name(self):
-        """Test that Backend950 type name is correctly reported as '950'."""
-        backend = Backend950.instance()
-
-        # Verify type name without needing to parse msgpack
-        assert backend.get_type_name() == "950"
-
     def test_export_nonempty_file(self):
         """Test that exported msgpack file is non-empty."""
         backend = Backend950.instance()

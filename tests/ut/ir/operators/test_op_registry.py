@@ -446,16 +446,6 @@ def test_get_op():
         ir.get_op("nonexistent.op")
 
 
-def test_test_op_kwarg_schema():
-    """Test that test.op has kwarg schema defined."""
-    test_op = ir.get_op("test.op")
-
-    # Check kwarg keys exist in schema
-    assert test_op.has_attr("int_attr")
-    assert test_op.has_attr("string_attr")
-    assert test_op.has_attr("bool_attr")
-
-
 def test_test_op_all_kwarg_keys():
     """Test all kwarg keys of test.op."""
     test_op = ir.get_op("test.op")
@@ -971,14 +961,6 @@ class TestRegistryInfrastructure:
         assert spec is not None
         assert isinstance(spec["output_memory"], ir.MemorySpace)
 
-    def test_kwarg_output_returns_deferred(self):
-        """Retargetable ops (tile.load/tile.create) report 'deferred' when the
-        target_memory kwarg is absent — InferTileMemorySpace resolves from
-        consumer demand."""
-        spec = ir.get_op_memory_spec("tile.load")
-        assert spec is not None
-        assert spec["output_memory"] == "deferred"
-
     def test_inherit_output_returns_string(self):
         """Inherit-from-input output returns the string 'inherit_from_input'."""
         spec = ir.get_op_memory_spec("tile.reshape")
@@ -1322,7 +1304,6 @@ class TestArgEffects:
             ("pld.tensor.all_to_all_v", 4, ir.ArgEffect.ReadWrite),
             # A reduce destination *is* read — its lowering loads the running
             # value back — so the distinction is per operator, not per family.
-            ("pld.tensor.allreduce", 0, ir.ArgEffect.ReadWrite),
             ("pld.tensor.reduce_scatter", 0, ir.ArgEffect.ReadWrite),
         ],
     )

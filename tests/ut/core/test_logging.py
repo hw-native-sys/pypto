@@ -66,35 +66,6 @@ class TestLogLevel:
 class TestSetLogLevel:
     """Test setting log levels."""
 
-    def test_set_log_level_debug(self):
-        """Test setting log level to DEBUG."""
-        # Should not raise any exception
-        set_log_level(LogLevel.DEBUG)
-
-    def test_set_log_level_info(self):
-        """Test setting log level to INFO."""
-        set_log_level(LogLevel.INFO)
-
-    def test_set_log_level_warn(self):
-        """Test setting log level to WARN."""
-        set_log_level(LogLevel.WARN)
-
-    def test_set_log_level_error(self):
-        """Test setting log level to ERROR."""
-        set_log_level(LogLevel.ERROR)
-
-    def test_set_log_level_fatal(self):
-        """Test setting log level to FATAL."""
-        set_log_level(LogLevel.FATAL)
-
-    def test_set_log_level_event(self):
-        """Test setting log level to EVENT."""
-        set_log_level(LogLevel.EVENT)
-
-    def test_set_log_level_none(self):
-        """Test setting log level to NONE (disable all logging)."""
-        set_log_level(LogLevel.NONE)
-
     def test_set_log_level_with_int(self):
         """Test setting log level using integer values."""
         # LogLevel is an IntEnum, so it should accept integers
