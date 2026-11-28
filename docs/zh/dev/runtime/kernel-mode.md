@@ -523,3 +523,41 @@ capture 按 `(position, token_count)` 缓存图，固定张量地址和标量绑
 PyPTO 产物则提前准备。独立 runner 在贪心采样前将 logits 拷贝至 CPU；vLLM
 使用自己的调度、采样与 KV 缓存实现。保留原始样本及 token，并在 CPU 上运行
 `tests/st/distributed/test_qwen3_tp_reference.py` 验证 logits 后，再将计时视为有效模型结果。
+
+### 通过 vLLM Ascend 生成
+
+Qwen3 示例为 vLLM Ascend V1 提供
+`examples.models.qwen3_tp.vllm_ascend_worker.Qwen3PyPTOAscendWorker`。
+vLLM 通过 `LLM.generate()` 调度请求并返回结果。每个 worker 加载对应的 BF16
+权重分片，持有 PyPTO KV cache，并用 PyPTO 执行模型前向和 TP 集合通信。
+worker 在释放 SHMEM 映射前先回收设备任务。示例支持单活跃序列的贪心文本生成，
+提示词最多 32 个 token，上下文最多 128 个 token。
+
+在两张 Ascend 卡上使用 vLLM 0.20.2 和 vLLM Ascend 0.20.2rc1。按上一节先在
+CPU 上准备 Qwen3 HBG 产物和 TP2 权重分片，再通过
+`additional_config["pypto_qwen3_tp"]` 将两个准备目录传给 worker。
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model=checkpoint_dir,
+    worker_cls="examples.models.qwen3_tp.vllm_ascend_worker.Qwen3PyPTOAscendWorker",
+    additional_config={"pypto_qwen3_tp": {"artifacts": artifacts_dir, "weights": weights_dir}},
+    distributed_executor_backend="mp",
+    dtype="bfloat16",
+    tensor_parallel_size=2,
+    max_model_len=128,
+    max_num_seqs=1,
+    enforce_eager=True,
+    enable_prefix_caching=False,
+    enable_chunked_prefill=False,
+    async_scheduling=False,
+    block_size=128,
+)
+output = llm.generate(prompt, SamplingParams(temperature=0, max_tokens=8))
+```
+
+`tests/st/runtime/kernel/vllm_ascend_shmem_probe.py` 验证同一对 worker
+依次处理两个请求，并将两个 rank 的每次 prefill 和 decode 输出与独立 PyPTO
+参考逐步比较。

@@ -663,3 +663,41 @@ The standalone runner copies logits to CPU before greedy sampling; vLLM has its
 own scheduling, sampling and KV-cache implementation. Save raw samples and tokens,
 and validate saved logits with `tests/st/distributed/test_qwen3_tp_reference.py`
 on CPU before treating a timing as a successful model result.
+
+### Generate with vLLM Ascend
+
+The Qwen3 example provides `examples.models.qwen3_tp.vllm_ascend_worker.Qwen3PyPTOAscendWorker`
+for vLLM Ascend V1. vLLM schedules and returns requests through `LLM.generate()`.
+Each worker loads its BF16 shard, owns a PyPTO KV cache, and invokes PyPTO for the
+model forward and TP collectives. The worker retires device work before releasing
+its SHMEM mapping. This example supports greedy text generation with one active
+sequence, prompts of at most 32 tokens, and a 128-token context.
+
+Use vLLM 0.20.2 and vLLM Ascend 0.20.2rc1 with two Ascend devices. Prepare the
+Qwen3 HBG artifacts and TP2 weight shards on the CPU as described above. Give the
+two prepared directories to the worker under `additional_config["pypto_qwen3_tp"]`.
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model=checkpoint_dir,
+    worker_cls="examples.models.qwen3_tp.vllm_ascend_worker.Qwen3PyPTOAscendWorker",
+    additional_config={"pypto_qwen3_tp": {"artifacts": artifacts_dir, "weights": weights_dir}},
+    distributed_executor_backend="mp",
+    dtype="bfloat16",
+    tensor_parallel_size=2,
+    max_model_len=128,
+    max_num_seqs=1,
+    enforce_eager=True,
+    enable_prefix_caching=False,
+    enable_chunked_prefill=False,
+    async_scheduling=False,
+    block_size=128,
+)
+output = llm.generate(prompt, SamplingParams(temperature=0, max_tokens=8))
+```
+
+The test `tests/st/runtime/kernel/vllm_ascend_shmem_probe.py` checks two requests
+scheduled on the same worker pair. It compares every prefill and decode result
+against a saved standalone PyPTO reference on both ranks.
