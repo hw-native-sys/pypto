@@ -284,6 +284,7 @@ nav:
       - en/dev/04-simulator-trace-cleaning.md
       - en/dev/05-runtime-ring-sizing.md
       - en/dev/06-persistent-l3.md
+      - en/dev/distributed-dispatch.md
       - en/dev/07-memory-map.md
       - en/dev/07-ir-lower-trace.md
       - en/dev/08-entry-points.md

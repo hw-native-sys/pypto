@@ -77,14 +77,16 @@ Domain 按 `(compiled program, generated domain name)` 隔离。因此，即使 
 decode 都生成了 `comm_d0`，它们仍然使用不同的物理 domain。所有 prepared
 program 仍须满足原有的 platform、runtime 和 device ID 兼容性检查。
 
-`DistributedWorker.submit()` 和 Simpler 仍会串行构建 graph。请求被接受后，持久
-模式与普通模式遵循相同的有界异步分发约定：PyPTO 最多发布两个 metadata frame，
-实际可重叠的 device run 数量由 backend 协商出的 depth 决定。
+`DistributedWorker.submit()` 和 Simpler 仍会串行构建 graph。Simpler 提供完成事件和
+身份容量时，字节预算和公开的 `Worker.run_identity_capacity` 目录上限共同限制 Host 帧池。
+完成事件归还帧并唤醒等待的提交者。
+资源策略、显式资源契约和前驱成功依赖见[有界分布式提交](distributed-dispatch.md)。
 
-## Runtime 依赖
+## 运行时依赖
 
-该实现不修改 Simpler。每个请求都使用公开的 `Worker.submit()` boundary，其
-native handle 会一直挂在 PyPTO 的有界 dispatch handle 上直到完成。每个请求通过
+按资源预算提交使用 Simpler 公开的身份容量、完成事件及前驱成功接口。每个请求使用公开的
+`Worker.submit()`，其 native handle 由 PyPTO dispatch handle 持有至完成。使用域池的请求
+在提交时声明各帧的 retained 域。域池之外的请求通过
 `Orchestrator.get_or_allocate_domain(..., retain_after_run=True)` 获取通信域
 （CommDomain）。Simpler 在复用时验证配置，将通信域登记到当前运行的完成栅栏
 （completion fence），并在成功运行之间保留其分配。prepared worker 关闭时，
