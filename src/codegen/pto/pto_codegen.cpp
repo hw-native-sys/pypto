@@ -1554,7 +1554,9 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
           const auto* var = root(pending.back());
           pending.pop_back();
           if (!visited.insert(var).second) continue;
-          if (auto use = last_uses.find(var); use != last_uses.end()) last = std::max(last, use->second);
+          if (auto use = last_uses.find(var); use != last_uses.end()) {
+            last = std::max(last, use->second);
+          }
           if (auto interval = liveness.find(var); interval != liveness.end()) {
             first = std::min(first, interval->second.first);
             last = std::max(last, interval->second.second);
