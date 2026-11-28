@@ -282,6 +282,20 @@ class AccessCollector : public IRVisitor {
     return SameAllocation(target_var, result_var);
   }
 
+  static bool IsProvablyBoundScaleExtract(const CallPtr& call, const std::vector<VarPtr>& results) {
+    if (!IsOp(call, "tile.extract_into") || call->args_.size() != 4 || results.size() != 1) {
+      return false;
+    }
+    const auto dst_var = AsVarLike(call->args_[0]);
+    const auto dst = dst_var ? As<TileType>(dst_var->GetType()) : nullptr;
+    // The pre-existing MX path writes an address-bound scale handle and
+    // returns that storage. A general caller-owned L0 window is not evidence
+    // of a whole-allocation transfer, so do not promote it.
+    return dst &&
+           (dst->memory_space_ == MemorySpace::LeftScale || dst->memory_space_ == MemorySpace::RightScale) &&
+           SameAllocation(dst_var, results.front());
+  }
+
   static ExecutionMemoryAccessEvidence ResolveAccessEvidence(const CallPtr& call,
                                                              const std::vector<VarPtr>& results) {
     const auto& registry = OpRegistry::GetInstance();
@@ -292,9 +306,10 @@ class AccessCollector : public IRVisitor {
     if (registered != ExecutionMemoryAccessEvidence::Unknown) return registered;
 
     // Destination-passing and subrange operations remain Unknown by default.
-    // These two cases are promoted locally only when their operands prove an
+    // These cases are promoted locally only when their operands prove an
     // exact whole-window access.
-    if (IsProvablyWholeStore(call) || IsProvablyWholeAssemble(call, results)) {
+    if (IsProvablyWholeStore(call) || IsProvablyWholeAssemble(call, results) ||
+        IsProvablyBoundScaleExtract(call, results)) {
       return ExecutionMemoryAccessEvidence::Functional;
     }
     return ExecutionMemoryAccessEvidence::Unknown;

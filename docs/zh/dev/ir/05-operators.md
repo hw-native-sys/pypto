@@ -388,7 +388,7 @@ dtype。PyPTO 在 Ascend950 上通过 `matmul_mx` 算子族支持 host-prequant 
 | `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | `Left, LeftScale, Right, RightScale, Bias → Acc`；bias 为 `[1, N]` FP32。 |
 | `tile.tget_scale_addr` | 编译器生成的 A5 绑定，接受 `LeftScale↔Left` 或 `RightScale↔Right`；对 `dst_scale` 原地 DPS。用户只编写 `matmul_mx` 算子族。 |
 | `tile.bind_scale_addr` | 从已解析的 MX payload 派生地址，创建空的 scale 句柄。 |
-| `tile.extract_into` | 将 Mat scale 窗口写入已绑定的目标，返回该目标的 SSA 别名。 |
+| `tile.extract_into` | 将 Mat 窗口写入已绑定的 MX scale 或连续、全有效的 L0 数据目标，返回该目标的 SSA 别名。 |
 
 规范样例：`M=128,K=64,N=64`，进入算子的 A/B 均为 `FP8E4M3FN`，scale=`FP8E8M0`（`[128,2]` / `[2,64]`），
 GM scale layout `mx_a_zz` / `mx_b_nn`（host ZZ/NN pack）。FP8 对齐要求为 M↑16、K↑64、N↑32。

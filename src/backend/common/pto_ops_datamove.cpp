@@ -1756,16 +1756,39 @@ void RegisterDataMoveOps(Backend& backend, const std::unordered_set<std::string>
 
     auto existing_type = codegen.GetSSATileBufType(result_target);
     if (explicit_destination) {
-      // The bound handle must also be the TEXTRACT destination. Reallocating
-      // it here would discard the address established by the preceding bind.
-      INTERNAL_CHECK_SPAN(
-          result_target == codegen.GetExprAsCode(op->args_[0]) && existing_type == result_type, op->span_)
-          << "tile.extract_into must write the bound destination handle";
+      const auto dst_tile = ir::As<ir::TileType>(op->args_[0]->GetType());
+      INTERNAL_CHECK_SPAN(dst_tile, op->span_) << "tile.extract_into destination must be a TileType";
+      if (dst_tile->memory_space_ == ir::MemorySpace::Left ||
+          dst_tile->memory_space_ == ir::MemorySpace::Right) {
+        // A subview's actual PTO descriptor can differ from the planned
+        // result type (notably dynamic validity). Use the existing handle,
+        // never an independently allocated descriptor for the SSA result.
+        result_target = codegen.GetExprAsCode(op->args_[0]);
+        result_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+        codegen.SetCurrentResultBuf(result_target);
+        // Native TEXTRACT has no destination pitch argument. A boxed Left window
+        // must span its parent's row extent and a Right window its column extent;
+        // otherwise the compact write would clobber neighboring slot data.
+        for (const auto* window = codegen.FindSubviewAncestor(result_target); window;
+             window = codegen.FindSubviewAncestor(window->source_ssa)) {
+          const bool dense = dst_tile->memory_space_ == ir::MemorySpace::Left
+                                 ? window->view_rows == window->source_rows
+                                 : window->view_cols == window->source_cols;
+          CHECK_SPAN(dense, op->span_)
+              << "tile.extract_into destination must be a dense L0 slot: Left must span all parent "
+                 "rows, Right must span all parent columns";
+        }
+      } else {
+        // Preserve the compiler-bound MX scale handle and its exact type.
+        INTERNAL_CHECK_SPAN(
+            result_target == codegen.GetExprAsCode(op->args_[0]) && existing_type == result_type, op->span_)
+            << "tile.extract_into must write the bound scale destination handle";
+      }
     } else if (!result_type.empty() && existing_type != result_type) {
       result_target = codegen.AllocNewTileBuf(result_type, "extract_buf");
       codegen.SetCurrentResultBuf(result_target);
     }
-    if (!result_type.empty()) {
+    if (!result_type.empty() && !explicit_destination) {
       codegen.RegisterTileBufType(result_target, result_type, codegen.GetCurrentResultTileType());
     }
 

@@ -935,39 +935,80 @@ REGISTER_OP("tile.extract")
       return DeduceTileExtractType(args, kwargs);
     });
 
+TypePtr DeduceTileExtractIntoType(const std::vector<ExprPtr>& args,
+                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 4 && kwargs.empty()) << "tile.extract_into requires (dst, src, index_row, index_col)";
+  auto dst = As<TileType>(args[0]->GetType());
+  auto src = As<TileType>(args[1]->GetType());
+  CHECK(dst && src && dst->shape_.size() == 2 && src->shape_.size() == 2)
+      << "tile.extract_into requires two 2D tiles";
+  // The existing MX lowering binds a scale handle to the paired payload
+  // before extraction. Preserve its validity and uninitialized MemRef
+  // contract; standard L0 data windows require the dense full-valid path.
+  if (dst->memory_space_ == MemorySpace::LeftScale || dst->memory_space_ == MemorySpace::RightScale) {
+    CHECK(dst->dtype_ == DataType::FP8E8M0 && src->memory_space_ == MemorySpace::Mat &&
+          src->dtype_ == dst->dtype_)
+        << "tile.extract_into requires a Mat scale panel of the same dtype as the destination";
+    auto shape = std::make_shared<MakeTuple>(dst->shape_, args[0]->span_);
+    auto extracted = As<TileType>(
+        DeduceTileExtractType({args[1], args[2], args[3], shape}, {{"target_memory", *dst->memory_space_}}));
+    const auto dst_view = tile_view_semantics::GetEffectiveTileView(*dst);
+    const auto extracted_view = tile_view_semantics::GetEffectiveTileView(*extracted);
+    CHECK(tile_view_semantics::ShapeExprListsEquivalent(dst_view.valid_shape, extracted_view.valid_shape))
+        << "tile.extract_into requires the destination valid shape to match the extracted window";
+    return std::make_shared<TileType>(dst->shape_, dst->dtype_, std::nullopt, dst->tile_view_,
+                                      dst->memory_space_);
+  }
+  CHECK(dst->memory_space_ == MemorySpace::Left || dst->memory_space_ == MemorySpace::Right)
+      << "tile.extract_into destination must be in Left or Right memory";
+  CHECK(!src->memory_space_ || src->memory_space_ == MemorySpace::Mat)
+      << "tile.extract_into source must be in Mat memory";
+  CHECK(dst->dtype_ == src->dtype_) << "tile.extract_into source and destination dtypes must match";
+  CHECK(!src->dtype_.IsPackedFp4()) << "tile.extract_into does not support packed FP4";
+  // On A5 the physical L0A format is ColMajor/RowMajor and L0B is
+  // RowMajor/ColMajor, with 512-byte boxes. PTOAS also accepts the legacy
+  // row_major/row_major L0A spelling from tile.extract and emits the SAME
+  // ColMajor/RowMajor native Tile, so an allocating extract result may be
+  // reused. Do not force the A2/A3 logical extract spelling onto A5 views:
+  // tile.create/tile.move already describe the native L0A layout correctly.
+  const auto dst_view = tile_view_semantics::GetEffectiveTileView(*dst);
+  const bool left = dst->memory_space_ == MemorySpace::Left;
+  const bool layout_matches =
+      left ? (dst_view.blayout == TileLayout::col_major || dst_view.blayout == TileLayout::row_major) &&
+                 dst_view.slayout == TileLayout::row_major
+           : dst_view.blayout == TileLayout::row_major && dst_view.slayout == TileLayout::col_major;
+  CHECK(layout_matches && dst_view.fractal == 512)
+      << "tile.extract_into destination must have the native A5 boxed Left or Right TEXTRACT layout";
+  CHECK(tile_view_semantics::ShapeExprListsEquivalent(GetValidShape(dst), dst->shape_))
+      << "tile.extract_into destination must be fully valid";
+  // Reuse the allocating extract's static bounds/type checks. In particular,
+  // forbid a narrowed read that would require a compact destination.
+  const auto span = args[0]->span_;
+  auto shape = std::make_shared<MakeTuple>(dst->shape_, span);
+  auto extracted = As<TileType>(
+      DeduceTileExtractType({args[1], args[2], args[3], shape}, {{"target_memory", *dst->memory_space_}}));
+  CHECK(tile_view_semantics::ShapeExprListsEquivalent(GetValidShape(extracted), dst->shape_))
+      << "tile.extract_into source window must be fully valid";
+  return dst;
+}
+
+// Execution-memory access stays Unknown: the Functional evidence model
+// cannot describe a destination-passing write into caller-owned dst. The
+// DSA reuse-penalty recognizer poisons those allocations unless it proves
+// the existing address-bound MX scale case.
 REGISTER_OP("tile.extract_into")
     .set_op_category("TileOp")
-    .set_description("Extract a Mat scale window into an address-bound MX scale destination")
-    .add_argument("dst", "Bound LeftScale or RightScale tile")
-    .add_argument("src", "Mat scale panel")
+    .set_description("Extract a Mat window into an existing L0 data or MX scale tile")
+    .add_argument("dst", "Existing L0A/L0B data or bound MX scale tile")
+    .add_argument("src", "Source tile in L1 (Mat)")
     .add_argument("index_row", "Starting row offset")
     .add_argument("index_col", "Starting column offset")
-    .set_output_memory_inherit_input()
     .set_input_memory(1, MemorySpace::Mat)
+    .set_output_memory_inherit_input()
     .set_output_reuses_input(0)
     .set_arg_effect(0, ArgEffect::Write)
     .set_arg_effect(1, ArgEffect::Read)
-    .functional_execution_memory_access()
-    .f_deduce_type([](const std::vector<ExprPtr>& args,
-                      const std::vector<std::pair<std::string, std::any>>&) {
-      CHECK(args.size() == 4) << "tile.extract_into requires dst, src, index_row and index_col";
-      auto dst = As<TileType>(args[0]->GetType());
-      auto src = As<TileType>(args[1]->GetType());
-      CHECK(dst && dst->dtype_ == DataType::FP8E8M0 &&
-            (dst->memory_space_ == MemorySpace::LeftScale || dst->memory_space_ == MemorySpace::RightScale))
-          << "tile.extract_into requires a LeftScale or RightScale destination of dtype FP8E8M0";
-      CHECK(src && src->memory_space_ == MemorySpace::Mat && src->dtype_ == dst->dtype_)
-          << "tile.extract_into requires a Mat scale panel of the same dtype as the destination";
-      auto shape = std::make_shared<MakeTuple>(dst->shape_, args[0]->span_);
-      auto extracted = As<TileType>(DeduceTileExtractType({args[1], args[2], args[3], shape},
-                                                          {{"target_memory", *dst->memory_space_}}));
-      const auto dst_view = tile_view_semantics::GetEffectiveTileView(*dst);
-      const auto extracted_view = tile_view_semantics::GetEffectiveTileView(*extracted);
-      CHECK(tile_view_semantics::ShapeExprListsEquivalent(dst_view.valid_shape, extracted_view.valid_shape))
-          << "tile.extract_into requires the destination valid shape to match the extracted window";
-      return std::make_shared<TileType>(dst->shape_, dst->dtype_, std::nullopt, dst->tile_view_,
-                                        dst->memory_space_);
-    });
+    .f_deduce_type(DeduceTileExtractIntoType);
 
 TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
                                     const std::vector<std::pair<std::string, std::any>>& kwargs) {

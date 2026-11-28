@@ -247,7 +247,7 @@ CI 在 A2/A3 模拟器上运行 `tests/st/runtime/ops/test_cast_saturation.py`�
 | pto.mscatter | MSCATTER | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.treshape | TRESHAPE | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tinsert | TINSERT | tile | ✅ | ❌ | ❌ | ✅ | — | 由 `tile.assemble` / auto matmul lowering 发射 |
-| pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
+| pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — | 含 A5 显式连续 L0 目标的 `tile.extract_into`（CPU codegen/BiSheng 验证） |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | 发射 `pto.tfillpad`；PTOAS 内存规划通过 `pto.treshape` 别名保留目标 pad 和完整有效范围；由本地分配支撑的结果保留运行时有效范围更新能力 |
