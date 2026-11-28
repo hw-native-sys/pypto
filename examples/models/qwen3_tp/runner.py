@@ -32,7 +32,16 @@ from examples.models.qwen3_tp import kernels as k
 class Runner:
     """Own model storage and dispatch only PyPTO kernels for model arithmetic."""
 
-    def __init__(self, artifacts: Path, weights: Path, rank: int, local_rank: int, *, capture: bool) -> None:
+    def __init__(
+        self,
+        artifacts: Path,
+        weights: Path,
+        rank: int,
+        local_rank: int,
+        *,
+        capture: bool,
+        gloo_group: dist.ProcessGroup | None = None,
+    ) -> None:
         manifest = json.loads((artifacts / "manifest.json").read_text())
         digest = hashlib.sha256(Path(k.__file__).read_bytes()).hexdigest()
         if manifest["world_size"] != k.TP_WORLD or manifest["source_sha256"] != digest:
@@ -46,6 +55,7 @@ class Runner:
         self.device = f"npu:{local_rank}"
         self.weights_path = weights / f"rank{rank}.pt"
         self.capture = capture
+        self.gloo_group = gloo_group
         self.fuse_attention = True
         runtime = next(iter(self.programs.values())).runtime_name
         self.group_eager_layers = (
@@ -73,13 +83,14 @@ class Runner:
             device=self.device,
             slot_names=("partial", "signal"),
             slot_nbytes=(k.TOK * k.HIDDEN * 4, k.TP_WORLD * 4),
+            gloo_group=gloo_group,
         )
         self.shared = self.window.as_torch_tensor("partial", (k.TOK, k.HIDDEN), torch.float32)
         self.signal = self.window.as_torch_tensor("signal", (k.TP_WORLD, 1), torch.int32)
         self.signal.zero_()
         # A peer may notify this slot immediately after initialization.
         self.npu.synchronize(self.signal.device)
-        dist.barrier()
+        dist.barrier(group=self.gloo_group)
         self.layers: list[dict[str, torch.Tensor]] = []
         self.position = 0
         self.graphs = {}
@@ -183,7 +194,7 @@ class Runner:
                 # Recording can finish at different times on different ranks.
                 # Do not let an early replay wait in a device collective while
                 # its peer is still recording hundreds of model nodes.
-                dist.barrier()
+                dist.barrier(group=self.gloo_group)
             with self.npu.stream(self.stream):
                 self.graphs[key].replay()
         else:

@@ -136,7 +136,8 @@ def test_qwen_runner_clears_signal_before_rank_rendezvous(monkeypatch, tmp_path,
     def shmem_view(slot, shape, dtype):
         return signal if slot == "signal" else object()
 
-    def barrier():
+    def barrier(group=None):
+        assert group is None
         assert events == ["zero", "sync"]
         events.append("barrier")
 

@@ -447,7 +447,11 @@ runtime 完整编译测试 kernel，但不验证设备执行。执行用例被�
 每个 `pld.DistributedTensor` 参数使用 `ShmemWindow.as_torch_tensor()` 返回的连续视图。
 例如 `tput_chip(x, src, dst)` 只传声明中的参数。编译器记录每个生成的 `CommContext`
 对应的张量。运行时校验视图所属窗口，填充上下文槽，并保留窗口直到异步任务或图回放退役。
-默认 WORLD 组使用 Gloo，NPU 后端在 WORLD 内集合分配对称内存。
+默认使用 Gloo WORLD。接入 vLLM Ascend 时，可给 `acquire_gloo_shmem_window`
+传入 `gloo_group=get_tp_group().cpu_group`。该组必须使用 Gloo，且成员和 rank
+顺序与 WORLD 一致。NPUSHMEM 使用该组的 Store 引导进程内的共享堆，vLLM 的 HCCL
+WORLD 保持原样。各 rank 必须以相同顺序建窗。worker 在同一进程持有窗口并将视图传给
+PyPTO 内核。
 
 可用 `examples/distributed/08_gloo_shmem_collectives.py --prepare-only` 在 CPU 上准备 JIT
 缓存。双 rank 设备运行使用同一套 PTOAS、CANN 和 SHMEM 环境及同一产物目录。图和模型基准也支持预构建产物，参数同样

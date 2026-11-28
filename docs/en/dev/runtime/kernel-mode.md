@@ -564,7 +564,12 @@ example, `tput_chip(x, src, dst)` passes only the declared arguments. The
 compiler records which tensor supplies each generated `CommContext`; the
 runtime checks the backing window, fills the context slots and retains its
 owner until asynchronous work or graph replay retires. Use Gloo for the default
-WORLD group because the NPU backend allocates symmetric memory across WORLD.
+WORLD group by default. When integrating with vLLM Ascend, supply its TP CPU
+group as `gloo_group=get_tp_group().cpu_group` to `acquire_gloo_shmem_window`.
+It must use Gloo and match WORLD membership and rank order. This gives
+NPUSHMEM the Gloo Store for its process-wide heap and preserves vLLM's HCCL
+WORLD. All members must create windows in the same order. The worker owns
+the window and launches PyPTO kernels against its views in the same process.
 
 Use `examples/distributed/08_gloo_shmem_collectives.py --prepare-only` to warm
 the JIT artifact cache on the CPU. Use the same PTOAS, CANN and SHMEM

@@ -24,6 +24,7 @@ import os
 import struct
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any
 
 import torch
@@ -45,6 +46,17 @@ from .device_tensor import DeviceTensor
     COMM_BUFFER_ALIGN,
 ) = _shmem_comm_layout()
 COMM_CTX_SLOT = "_comm_ctx"
+
+
+# NPUSHMEM uses one process-wide heap. Registering allocator group 0 a
+# second time or switching its Store midway would cross communication domains.
+@dataclass
+class _Bootstrap:
+    groups: tuple[dist.ProcessGroup, dist.ProcessGroup] | None = None
+
+
+_bootstrap = _Bootstrap()
+_bootstrap_lock = Lock()
 
 
 def align_up(nbytes: int, align: int = COMM_BUFFER_ALIGN) -> int:
@@ -160,6 +172,32 @@ class ShmemWindow:
         return tensor
 
 
+def _enable_gloo_bootstrap(symm_mem: Any, world: dist.ProcessGroup, group: dist.ProcessGroup) -> None:
+    """Provide the fixed NPUSHMEM WORLD bootstrap through vLLM's Gloo Store."""
+    if world.group_name != "0":
+        raise NotImplementedError(f"NPUSHMEM requires WORLD group '0', got {world.group_name!r}")
+    if dist.get_process_group_ranks(group) != dist.get_process_group_ranks(world):
+        raise NotImplementedError("NPUSHMEM requires the Gloo group to match WORLD membership and rank order")
+    rank, size = dist.get_rank(group), dist.get_world_size(group)
+    if (rank, size) != (dist.get_rank(world), dist.get_world_size(world)):
+        raise ValueError("The Gloo group and WORLD must use the same rank numbering")
+
+    with _bootstrap_lock:
+        if _bootstrap.groups is None:
+            if symm_mem.is_symm_mem_enabled_for_group(world.group_name):
+                raise RuntimeError("NPUSHMEM WORLD bootstrap was already registered by another caller")
+            # TorchNPU allocates the heap using the context stored under "0".
+            # The real c10d WORLD survives with its original backend.
+            c10d = importlib.import_module("torch.distributed.distributed_c10d")
+            store = dist.PrefixStore("pypto-npushmem", c10d._get_process_group_store(group))
+            symm_mem._SymmetricMemory.set_group_info(world.group_name, rank, size, store)
+            _bootstrap.groups = world, group
+        elif _bootstrap.groups[0] is not world or _bootstrap.groups[1] is not group:
+            raise RuntimeError("NPUSHMEM is already bound to a different WORLD or Gloo group")
+        if not symm_mem.is_symm_mem_enabled_for_group(group.group_name):
+            symm_mem.enable_symm_mem_for_group(group.group_name)
+
+
 def acquire_gloo_shmem_window(
     *,
     rank: int,
@@ -168,28 +206,31 @@ def acquire_gloo_shmem_window(
     slot_names: Sequence[str],
     slot_nbytes: Sequence[int],
     group_name: str | None = None,
+    gloo_group: dist.ProcessGroup | None = None,
 ) -> ShmemWindow:
     """``empty`` + ``rendezvous`` one uint8 window and carve named slices.
 
-    Requires the default WORLD process group to use Gloo. The installed
-    NPUSHMEM allocator bootstraps its heap collectively across WORLD.
+    With no explicit group, use Gloo WORLD. A caller such as vLLM Ascend may
+    instead supply an existing Gloo group with the same members and rank order
+    as its HCCL WORLD. Each WORLD rank must enter allocation in the same order.
     """
     # The symmetric-memory backend is optional until a live window is requested.
     symm_mem = importlib.import_module("torch.distributed._symmetric_memory")
 
     if not dist.is_initialized():
         raise RuntimeError("SHMEM acquisition requires an initialized Gloo process group")
-    group = dist.group.WORLD
-    if group is None or dist.get_backend(group) != "gloo":
-        raise RuntimeError("SHMEM acquisition requires the default WORLD process group to use Gloo")
+    world = dist.group.WORLD
+    if world is None:
+        raise RuntimeError("SHMEM acquisition requires an initialized WORLD process group")
+    group = world if gloo_group is None else gloo_group
+    if dist.get_backend(group) != "gloo":
+        if gloo_group is None:
+            raise RuntimeError("SHMEM acquisition requires Gloo WORLD or an explicit full-WORLD Gloo group")
+        raise ValueError("gloo_group must use the Gloo backend")
     if group_name is not None and group_name != group.group_name:
-        # NPUSHMEM's allocation is collective across WORLD even when its
-        # rendezvous accepts a subgroup. Reject before allocating any memory.
-        raise NotImplementedError(
-            "SHMEM window allocation requires WORLD. Subgroup allocation is unsupported."
-        )
+        raise NotImplementedError("SHMEM group_name must match the selected full-WORLD Gloo process group")
     if (rank, world_size) != (dist.get_rank(group), dist.get_world_size(group)):
-        raise ValueError("rank/world_size must match the default WORLD Gloo process group")
+        raise ValueError("rank/world_size must match the selected Gloo process group")
     group_name = group.group_name
     if not 0 <= rank < world_size <= COMM_MAX_RANK_NUM:
         raise ValueError(f"Invalid rank={rank}, world_size={world_size}")
@@ -207,7 +248,9 @@ def acquire_gloo_shmem_window(
     offsets_list, window_bytes = carve_window_layout(all_nbytes)
     offsets = dict(zip(all_names, offsets_list, strict=True))
 
-    if not symm_mem.is_symm_mem_enabled_for_group(group_name):
+    if group is not world:
+        _enable_gloo_bootstrap(symm_mem, world, group)
+    elif not symm_mem.is_symm_mem_enabled_for_group(group_name):
         symm_mem.enable_symm_mem_for_group(group_name)
 
     tensor = symm_mem.empty((window_bytes,), dtype=torch.uint8, device=device)
