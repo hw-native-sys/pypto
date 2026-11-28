@@ -30,7 +30,7 @@ import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
-from pypto.ir.op import tile
+from pypto.ir.op import tensor_ops, tile
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import codegen, passes
@@ -2211,9 +2211,7 @@ def test_a_sliced_shard_reaches_its_kernel_unstrided():
     assert _values(_elements(slices[0].args[2])) == [1, 0, 0, 0, 0]  # offsets
 
 
-# -- Temporary guard for hw-native-sys/pto-isa#317 ----------------------------
-# Delete this block together with ``CheckNzGmGapFitsBurstStride`` once the
-# upstream truncation is fixed.
+# -- Source stride on multi-burst NZ loads ------------------------------------
 
 
 def _gap_program(rows: int, tile_rows: int):
@@ -2272,41 +2270,28 @@ def test_accepts_the_largest_encodable_gm_gap():
     _run(_gap_program(rows=65536, tile_rows=16))
 
 
-def test_rejects_a_gm_gap_above_the_burst_stride_field():
-    """Above 65535 blocks pto-isa truncates the gap and reads wrong fractals.
-
-    The message must say this is a temporary guard, not an NZ limitation — a
-    user who reads it as "NZ tops out here" would design around a cap that is
-    about to disappear.
-    """
-    assert 65552 - 16 == 65536
-    with pytest.raises(ValueError) as excinfo:
-        _run(_gap_program(rows=65552, tile_rows=16))
-    message = str(excinfo.value)
-    assert "65536 32-byte blocks" in message
-    assert "NOT an expected pl.NZ limitation" in message
-    assert "pto-isa#317" in message
+@pytest.mark.parametrize("backend", [BackendType.Ascend910, BackendType.Ascend950])
+def test_oversized_gm_gap_uses_target_capability(backend):
+    reset_for_testing()
+    set_backend_type(backend)
+    program = _gap_program(rows=65552, tile_rows=16)
+    if backend == BackendType.Ascend910:
+        _run(program)
+    else:
+        with pytest.raises(ValueError, match="65536 32-byte blocks"):
+            _run(program)
 
 
 def test_a_taller_row_tile_rescues_the_same_tensor():
-    """The gap, not the row extent, is the limit.
-
-    Same 65552-row weight the test above refuses, read in a 32-row tile instead
-    of a 16-row one: the gap drops to 65520 and it compiles. This is why the
-    diagnostic offers a *wider* tile as the workaround.
-    """
+    """The wider row tile fits the stride field even on a target with the conservative guard."""
+    set_backend_type(BackendType.Ascend950)
     assert 65552 - 32 == 65520
     _run(_gap_program(rows=65552, tile_rows=32))
 
 
 def test_a_single_column_block_load_is_exempt_from_the_gap_limit():
-    """``gmGap`` is the stride *between* bursts, so one burst never reads it.
-
-    Verified on device in pto-isa's own tload_gm2mat ST suite: an NZ int16 load
-    with ``gShape1 = 1`` and a 65536-block gap returns bit-exact data, while the
-    identical load at ``gShape1 = 2`` corrupts 1837/4096 elements. Rejecting the
-    single-block case would refuse a load that is actually correct.
-    """
+    """One burst needs no source stride, even on a target with the conservative guard."""
+    set_backend_type(BackendType.Ascend950)
     assert 65552 - 16 == 65536
     _run(_single_column_block_program(rows=65552, tile_rows=16))
 
@@ -2337,13 +2322,8 @@ def _valid_shape_program(rows: int, tile_rows: int, valid_rows: int):
 
 
 def test_a_narrowed_valid_shape_drives_the_gap_check():
-    """The gap follows ``valid_shape``, not ``shapes``.
-
-    ``shapes`` alone puts this load at 65520 blocks — under the bound — while
-    the partition codegen actually emits (``1x2x1x16x32``, from ``valid_shape``)
-    puts it at 65536. Measuring ``shapes`` would wave through a load that
-    truncates on device, which is the whole failure this guard exists to stop.
-    """
+    """The conservative target checks the 65536-block gap of the emitted valid partition."""
+    set_backend_type(BackendType.Ascend950)
     assert 65552 - 32 == 65520  # what `shapes` alone would report
     assert 65552 - 16 == 65536  # what pto-isa actually computes
     with pytest.raises(ValueError) as excinfo:
@@ -2371,6 +2351,105 @@ def test_rejects_a_dynamic_leading_extent_when_folding(dynamic_axis):
 
     with pytest.raises(ValueError, match=f"axis {dynamic_axis} is dynamic"):
         passes.block_nz_tensor_views()(Before)
+
+
+def test_logical_rank_five_nz_with_block_sized_trailing_dimensions(ascend_backend):
+    @pl.program
+    class Logical:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(
+            self, tensor: pl.Tensor[[2, 3, 4, 16, 16], pl.FP16, pl.NZ]
+        ) -> pl.Tensor[[2, 3, 4, 16, 16], pl.FP16, pl.NZ]:
+            return tensor
+
+    blocked = passes.block_nz_tensor_views()(Logical)
+    assert _shape_values(next(iter(blocked.functions.values())).params[0]) == [24, 1, 1, 16, 16]
+    ir.assert_structural_equal(passes.block_nz_tensor_views()(blocked), blocked)
+
+
+def test_blocked_descriptor_survives_roundtrip_and_function_cloning(ascend_backend):
+    @pl.program
+    class Logical:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, tensor: pl.Tensor[[64, 64], pl.FP32, pl.NZ]) -> pl.Tensor[[64, 64], pl.FP32, pl.NZ]:
+            return tensor
+
+    blocked = passes.block_nz_tensor_views()(Logical)
+    # Moving the physical descriptor into another function must preserve the
+    # fact that its coordinates are already blocked, also after persistence.
+    for restored in (ir.deserialize(ir.serialize(blocked)), pl.parse_program(blocked.as_python())):
+        assert isinstance(restored, ir.Program)
+        fn = next(iter(restored.functions.values()))
+        fresh = ir.Function("fresh", fn.params, fn.return_types, fn.body, fn.span, fn.func_type)
+        lowered = passes.block_nz_tensor_views()(ir.Program([fresh], "fresh", fn.span))
+        assert _shape_values(next(iter(lowered.functions.values())).params[0]) == [1, 8, 4, 16, 8]
+
+
+@pytest.mark.parametrize("shape", [[64, 64], [1, 8, 4, 16, 16]])
+def test_rejects_invalid_blocked_nz_descriptor(shape, ascend_backend):
+    # A logical rank and a physical shape with the wrong C0 both lack the
+    # canonical NZ geometry required by the claimed coordinate representation.
+    @pl.program
+    class Invalid:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main(self, tensor: pl.Tensor[shape, pl.FP32, pl.TensorView(layout=pl.NZ, nz_blocked=True)]):
+            return tensor
+
+    with pytest.raises(ValueError, match="nz_blocked=True requires a physical rank-5 NZ shape"):
+        passes.block_nz_tensor_views()(Invalid)
+
+
+@pytest.mark.parametrize("explicit_stride", [[], [8192, 1024, 256, 16, 1]])
+def test_physical_nz_slice_retains_parent_pitch(explicit_stride, ascend_backend):
+    span = ir.Span.unknown()
+    view = ir.TensorView(stride=explicit_stride, layout=ir.TensorLayout.NZ, nz_blocked=True)
+    parent = ir.Var("parent", ir.TensorType([1, 4, 2, 16, 16], DataType.FP16, tensor_view=view), span)
+    with pytest.raises(ValueError, match="gapped block window"):
+        tensor_ops.slice(parent, [1, 2, 1, 16, 16], [0, 0, 0, 0, 0])
+    if not explicit_stride:
+        packed = tensor_ops.slice(parent, [1, 2, 2, 16, 16], [0, 1, 0, 0, 0])
+        assert _shape_values(packed.type) == [1, 2, 2, 16, 16]
+    window = tensor_ops.slice(parent, [1, 4, 2, 16, 16], [0, 0, 0, 0, 0])
+    fn = ir.Function(
+        "main", [parent], [window.type], ir.ReturnStmt([window], span), span, ir.FunctionType.Orchestration
+    )
+    program = passes.materialize_tensor_strides()(
+        passes.block_nz_tensor_views()(ir.Program([fn], "slice", span))
+    )
+    function = program.get_function("main")
+    assert function is not None
+    result = function.return_types[0]
+    assert isinstance(result, ir.TensorType) and result.tensor_view is not None
+    assert result.tensor_view.nz_blocked
+    assert _values(result.tensor_view.stride) == (explicit_stride or [2048, 512, 256, 16, 1])
+
+
+@pytest.mark.parametrize(
+    ("nd_shape", "target", "physical", "blocked_shape"),
+    [
+        ([2, 512], [1, 2, 2, 16, 16], True, [1, 2, 2, 16, 16]),
+        ([2, 256], [1, 2, 1, 16, 16], False, [2, 1, 1, 16, 16]),
+    ],
+)
+def test_nd_to_nz_backing_alias_survives_blocking(nd_shape, target, physical, blocked_shape, ascend_backend):
+    span = ir.Span.unknown()
+    parent = ir.Var("parent", ir.TensorType(nd_shape, DataType.FP16), span)
+    alias = tensor_ops.view(parent, target, layout=ir.TensorLayout.NZ)
+    alias_type = alias.type
+    assert isinstance(alias_type, ir.TensorType) and alias_type.tensor_view is not None
+    assert alias_type.tensor_view.nz_blocked == physical
+    fn = ir.Function(
+        "main", [parent], [alias.type], ir.ReturnStmt([alias], span), span, ir.FunctionType.InCore
+    )
+    program = ir.Program([fn], "alias", span)
+    for source in (program, pl.parse_program(program.as_python())):
+        blocked = passes.block_nz_tensor_views()(source)
+        function = blocked.get_function("main")
+        assert function is not None
+        result = function.return_types[0]
+        assert isinstance(result, ir.TensorType) and result.tensor_view is not None
+        assert result.tensor_view.nz_blocked
+        assert _shape_values(result) == blocked_shape
 
 
 if __name__ == "__main__":

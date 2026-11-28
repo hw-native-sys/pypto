@@ -80,3 +80,27 @@ target_include_directories(pypto_sync_isa_macro_resources_test PRIVATE
 target_link_libraries(pypto_sync_isa_macro_resources_test PRIVATE libbacktrace)
 target_compile_options(pypto_sync_isa_macro_resources_test PRIVATE -UNDEBUG)
 add_test(NAME pypto_sync_isa_macro_resources_test COMMAND pypto_sync_isa_macro_resources_test)
+
+# Standalone test for the C++ AutoLayout model and treewidth-DP/greedy solver.
+add_executable(pypto_auto_layout_solver_test
+    auto_layout_solver_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/backtrace.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+    ${CMAKE_SOURCE_DIR}/src/ir/core.cpp
+    ${CMAKE_SOURCE_DIR}/src/ir/expr.cpp
+    ${CMAKE_SOURCE_DIR}/src/ir/type.cpp
+    ${CMAKE_SOURCE_DIR}/src/ir/transforms/auto_layout/model.cpp
+    ${CMAKE_SOURCE_DIR}/src/ir/transforms/auto_layout/solver.cpp
+)
+target_include_directories(pypto_auto_layout_solver_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(pypto_auto_layout_solver_test PRIVATE libbacktrace)
+target_compile_options(pypto_auto_layout_solver_test PRIVATE -UNDEBUG)
+add_test(NAME pypto_auto_layout_solver_test COMMAND pypto_auto_layout_solver_test)
+
+add_executable(pypto_auto_layout_pass_test auto_layout_pass_test.cpp)
+target_link_libraries(pypto_auto_layout_pass_test PRIVATE pypto_native)
+target_compile_options(pypto_auto_layout_pass_test PRIVATE -UNDEBUG)
+add_test(NAME pypto_auto_layout_pass_test COMMAND pypto_auto_layout_pass_test)
+
+add_executable(auto_layout_solver EXCLUDE_FROM_ALL ../../benchmarks/auto_layout_solver.cpp)
+target_link_libraries(auto_layout_solver PRIVATE pypto_native msgpackc-cxx)

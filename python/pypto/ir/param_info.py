@@ -179,6 +179,18 @@ def block_nz_shape(shape: Sequence[int], dtype: torch.dtype | DataType) -> list[
     return [batch, cols // c0, rows // _NZ_FRACTAL_ROWS, _NZ_FRACTAL_ROWS, c0]
 
 
+def _reorder_nd_nz(tensor: torch.Tensor, source: str, target: str) -> torch.Tensor:
+    """Reorder whole trailing matrices while retaining the logical transport shape."""
+    if source == target:
+        return tensor.contiguous()
+    batch, blocks, groups, rows, cols = block_nz_shape(tensor.shape, tensor.dtype)
+    if source == "ND":
+        ordered = tensor.reshape(batch, groups, rows, blocks, cols).permute(0, 3, 1, 2, 4)
+    else:
+        ordered = tensor.reshape(batch, blocks, groups, rows, cols).permute(0, 2, 3, 1, 4)
+    return ordered.contiguous().reshape(tensor.shape)
+
+
 def arg_shape_as_declared(arg_shape: Sequence[int], info: _ParamInfo) -> list[int]:
     """*arg_shape* in the parameter's own terms, ready to compare with ``info.shape``.
 
@@ -246,6 +258,7 @@ def bind_complete_args(
 # the listing keeps pyright's unused-function check satisfied.
 __all__ = [
     "_matches_torch_dtype",
+    "_reorder_nd_nz",
     "_to_torch_dtype",
     "_param_info_to_dict",
     "_param_info_from_dict",

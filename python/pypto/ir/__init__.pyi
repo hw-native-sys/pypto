@@ -39,6 +39,7 @@ from pypto.pypto_core.passes import (
 
 from . import directions as directions
 from . import op as op
+from ._distributed_input_layout import DistributedInputLayout, PreparedDistributedInput
 from .builder import IRBuilder
 from .compile import compile
 from .compiled_program import CompiledProgram
@@ -46,7 +47,7 @@ from .directions import make_call
 from .distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 from .instruments import make_roundtrip_instrument
 from .op_conversion import ConversionContext, op_conversion, register_op_conversion
-from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
+from .pass_manager import InputLayoutPolicy, OptimizationStrategy, PassDumpLevel, PassManager
 from .printer import python_print
 
 # Per-call-site direction aliases re-exported at the top level.
@@ -95,8 +96,11 @@ __all__ = [
     "CompiledProgram",
     "DistributedCompiledProgram",
     "DistributedConfig",
+    "DistributedInputLayout",
+    "PreparedDistributedInput",
     "PassManager",
     "OptimizationStrategy",
+    "InputLayoutPolicy",
     "PassDumpLevel",
     "VerificationMode",
     "VerificationLevel",

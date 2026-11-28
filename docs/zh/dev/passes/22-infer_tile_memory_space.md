@@ -276,3 +276,70 @@ tile *参数* 在阶段 1 起始处按函数类型分别处理：
 | `AIC` / `AIV` | 接受，并作为分析的**种子** | 二者是由混合 kernel 调用的 sub-worker，tile 参数正是常规的跨核交接 |
 
 参数的 space 属于签名的一部分 —— 由调用方决定该 tile 位于何处 —— 因此本 pass 从不推断它。`AIC` / `AIV` 的 tile 参数若省略 space，属于用户错误，报错会给出应补充的标注。
+
+## 原生流水线中的可选布局选择
+
+`InferTileMemorySpace` 之后，可调用 C++ pass `pypto::ir::pass::AutoLayout()` 为 GM 张量和片上 tile 选择布局。随后再次运行 `BlockNzTensorViews()`，降低新标注的 NZ 张量，再继续后端布局合法化。
+
+求解器先比较建模的回写约束违反数量，再比较估算周期。例如，加载器只为某个 GM 输入提供一种物理布局时，所有读取该输入的算子都必须能使用该布局。即使可行方案的估算周期很高，也须满足此约束。不可变值的使用方共享对应值和目标布局的一次转换。对可变 Vec 存储的每次读取分别计入所需的转换成本。自动求解器对满足宽度和求值预算的连通分量使用精确动态规划，对过宽的分量使用局部搜索。共享一个值的算子在求解图中构成团，因此即使 kernel 较浅，扇出较大的张量也可能达到宽度上限。
+
+稠密最小填充（min-fill）分解只处理最多包含 256 个可移动算子的分量。自动求解对更大的分量使用局部搜索，仍可精确求解独立的小分量。显式请求 `treewidth_dp` 时，若有可移动分量超出分解上限，求解器会报错。全图最小填充诊断适用于总算子数不超过 256 的问题。超出这一限制时，原生求解结果省略可选诊断报告，并将两个宽度记为 `-1`。
+
+在 Ascend910 上，如果 NZ 格式的 GM 到 Mat 加载的源间隔超过 DMA 的 16 位步长字段，后端可以分多次突发传输。代价模型对两条路径使用相同的 NZ 带宽。要估计分次传输的开销，还需要单独进行计时标定。
+
+回退求解先用单算子移动评估贪心方案，再从原始拓扑方案出发运行 Fiduccia–Mattheyses（FM）搜索。两个阶段共用同一个评估预算。只有成本更低的 FM 方案才会替换贪心方案，其他分量的精确解保持有效。每个分量首轮从提取顺序中均匀选取最多四个可移动算子。后续轮次轮换取样位置，搜索停滞时可将样本扩大到最多十六个算子。如果保留的前缀为空，下一轮可选取扩展过程中收益最大的扇出移动的一个消费者作为起点，使该组在成员被其他移动锁定前参与比较。
+
+从第一次决策起，FM 就比较更改一个活跃算子的配置，以及让与活跃算子相连的共享值的消费者一起切换到相同的输入布局。每次移动锁定所有被更改的算子，并通过输入和输出值激活相邻算子。每轮保留总成本最低的完整移动前缀，即使评估预算中途用尽也如此。回滚后，FM 在继续搜索或返回前对该分量运行贪心扫描，重新检查已解锁的算子并改进保留的方案。如果已完成的贪心扫描确认该方案没有能降低成本的单算子移动，则复用这一结果。`fm_no_improving_prefix` 表示已尝试的轮次未找到进一步改善。
+
+默认保留外部参数声明的布局。提取器沿 SSA 赋值和已证实的调用结果别名跟踪每次内部分配。写回时按调用点和 SSA 定义识别每个 tile。即使打印名称相同，两个 tile 也可以使用不同布局，特化的辅助函数也遵循此规则。传给不透明外部内核的缓冲区保留该内核声明的表示。只有当调用方能按所选物理布局提供数据时，才应设置 `options.cost_model.allow_external_input_relayout`。边界打包由调用方负责。在 `options.reusable_tensors` 中标注权重可摊销打包成本。自动提升为 DN 仅适用于符合条件的内部缓冲区。要在写回前检查分配及其转换需求，可调用 `auto_layout::ExtractLayoutInstance` 和 `auto_layout::SolveAutoLayout`。
+
+比较同一份模型源码时，使用 `OptimizationStrategy.Default` 和 `OptimizationStrategy.AutoLayoutIntermediates`。后者保留入口输入、输出、InOut 状态和返回缓冲区的物理布局。辅助函数参数也可能指向私有中间缓冲区，其资格由实际存储决定。该策略同时选择私有 GM 分配支持的 ND、DN、逻辑 NZ 布局以及片上 tile 布局。不透明调用、视图语义和后端要求仍然约束候选。当内部缓冲区标注逻辑 NZ 时可推迟分块。 零拷贝展平后的矩阵若按逻辑元素顺序读取，底层存储须保留原布局。若展平结果仅用于同一函数中的原始字节预取，则仍可选择 NZ。
+
+加载器可用 `ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), expected_uses=100)`
+声明只读入口参数允许使用 ND 或 NZ。将其作为 `input_layout_policy` 传给启用 AutoLayout 的
+`ir.compile` 或 `RunConfig`，并将权重声明为普通的逻辑 ND 输入。对于 ND 矩阵组，编译器接受隐式步长和显式连续行主序步长，包括完整矩阵切片推导出的步长。提取器在求解前将入口参数绑定到实际存储，
+其他外部缓冲区保留声明的布局。复用次数只影响打包成本。单芯片程序接受采用声明布局的权重，
+并在分派前打包布局发生变化的输入。重新加载编译产物后也遵循相同规则。
+使用 `compiled.prepare_inputs({"w": logical_w})["w"]` 可一次准备权重并在多次调用中复用。
+直接传入返回的张量可保留其布局标记。若已有保留原始逻辑形状的 NZ 缓冲区，
+准备时可指定 `source_layouts={"w": "NZ"}`。驻留的 `DeviceTensor` 必须已采用编译选定的布局。
+
+如果加载器只准备一次权重，并让权重在多次前向执行期间保持驻留，可使用
+`ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), steady_state=True)`。
+稳态目标按一次前向执行计费，省去同时列在两个元组中且符合条件的输入的一次性 ND 到 NZ 打包成本。
+每次执行所需的加载、计算、存储和布局转换仍按原规则计费，并计入循环次数和分派次数。
+布局候选的资格条件及外部 ABI 规则保持一致。设置 `steady_state=True` 时，`expected_uses` 须保持默认值 `1`。
+默认的有限次数目标计入打包成本，并按 `expected_uses` 次前向执行计费。
+
+对于单设备 HOST 入口，策略也可为整块传入设备的稠密只读 `[M, N]` 权重选择 ND 或 NZ。加载器上传一个矩阵，并向核函数传递单个设备张量。
+
+对于分布式 HOST 入口，策略可为形状为 `[rank, M, N]` 或 `[rank, layer, M, N]` 的稠密只读权重提供布局选择，首维长度须等于配置的设备数。HOST 沿输入或其 SSA 别名的首维索引一次，取得完整分片。设备端消费者读取完整矩阵。HOST 索引保留逻辑形状。NZ 按 rank 和 layer 分别打包每个矩阵，每个行块包含 16 行，C0 宽度为 `32 / sizeof(dtype)` 个元素。编译产物记录每个提供选择的参数槽位的布局、逻辑形状、物理形状和数据类型。编译要求原生求解器为每个所选槽位给出存储决策。
+
+对于按名称提供选择的 HOST 输入，AutoLayout 使用编译时 `DistributedConfig.device_ids` 中的设备数估算 `pld.world_size()` 循环的迭代次数。直接调用 PassManager 时可用 `host_world_size` 提供此估计。静态循环仍使用其自身边界，估计不限制产物重新加载时的设备选择。
+
+单次调用 `DistributedCompiledProgram` 时，提供选择的槽位接受逻辑 ND 张量。使用 `compiled.prepare_input(slot, tensor)` 可准备不可变快照并在多次调用中复用。若源数据已按规范打包为 NZ 且仍以原逻辑形状承载，可指定 `source_layout="NZ"`。若要在可复用 worker 上将快照作为主机参数传入，须在创建 worker 前调用 `prepare_input(..., shared=True)`，并将快照列入 `compiled.prepare(inherited_host_tensors=[snapshot])`。
+
+驻留权重使用 `worker.alloc_input_tensor(compiled, slot, tensor)`，也可将已准备好的快照作为最后一个参数。worker 仅上传一次每个分片，并在分派时验证布局来源。若要更新权重，请准备或上传新版本。通过 `DistributedCompiledProgram.from_dir()` 重新加载后继续使用相同的元数据和加载逻辑。可以重新映射设备 ID，但须保留编译时的 rank 数量。未提供选择的参数保留原有 ABI，包括预先打包的权重、量化比例、输出和可变状态。
+
+Python pass 工厂支持相同的输入打包选项，例如 `passes.auto_layout(allow_external_input_relayout=True, reusable_tensors=["w"], expected_uses=100)`。这允许符合条件的 ND 输入采用 NZ。若要从 ND 起点评估原先按 NZ 打包的权重，请先提供逻辑 ND 声明和数据，再根据编译后的布局元数据准备上传的缓冲区。
+
+稳态目标可通过 `passes.auto_layout(nz_inputs=["w"], reusable_tensors=["w"], steady_state=True)` 启用。
+对应的 C++ 字段为 `options.nz_inputs`、`options.reusable_tensors` 和 `options.cost_model.steady_state`。
+
+对于稠密平坦的 Vec 矩阵，当形状和数据类型支持物理转置时，可以在行主序和列主序之间转换。写回阶段发出一次转置和一个零拷贝转置视图。保留较大底层跨距的切片维持原有表示；行主序切片若保留完整行宽则仍可转置。改变形状的 reshape 保持原有逻辑元素顺序，位打包的谓词保留原有布局。
+
+可通过别名写入的 Vec tile 保留原有的底层存储布局。读取需要不同布局时，写回阶段在读取前创建专用副本。例如，位于原地 `tile.assemble` 两侧的两个 store 即使读取同一个 SSA 变量，也会各自转置执行时的数据。
+
+提取器估算各内核调用点存活的 Vec 存储。在执行相应指令时，估算中会计入 cast、CI 和 sort32 的隐式工作区。切片和其他零拷贝视图使底层分配保持存活，直到视图的最后一次使用。多个视图共享同一底层分配时只计算一次。整块转置执行时需要临时 tile，目标 tile 则保持存活直到最后一次使用。行广播的目标每行需要一个 32 字节块，仅调整元数据的 reshape 复用现有存储。估算时计入预留的 Vec 缓冲区。若循环前定义的 tile 会在后续迭代中读取，该 tile 及跨迭代复用的转换副本均保持存活，直到循环结束。求解器检查所选转换的目标与其他转换目标及原有分配重叠时的占用量。若超过容量，求解器可在评估预算内提高冲突转换的代价并重新求解。降低和内存复用完成后，分配器检查最终占用量。动态规划的最优性保证只适用于本轮候选范围内的代价问题。容量修复可能缩小候选范围，返回建模代价更高的可行解。
+
+For 和 While 循环在初始化、实际 yield 和退出时都使用 Vec 循环携带值的声明布局。一次迭代内的使用方可共享不可变循环参数的转换结果，循环外的使用方可共享不可变循环结果的转换。循环前定义的不可变值可在生产者处转换并共享。对于边界静态已知的 For，模型使用精确迭代次数（包括零），嵌套循环的次数相乘。动态 For 边界沿用标量估计，无法估计时按一次迭代计。次数未知的 While 也按一次迭代估算。循环体未执行时，循环按携带布局返回初始值。
+
+在标准 PyPTO 编译器中，可通过 `ir.compile(program, strategy=...)` 或 `RunConfig(strategy=...)` 选择 `ir.OptimizationStrategy.AutoLayout`。该策略在内存推断之后运行原生布局选择并再次降低 NZ 布局，保留调用方缓冲区的既有布局。如果无法写回所选方案，编译会报错。可使用默认策略进行对照测试。
+
+无论是否启用 Python 绑定，CMake 都会注册这两个原生 AutoLayout 测试。独立构建 C++ 库时，先初始化子模块，再在仓库根目录运行以下命令。
+
+```bash
+cmake -S . -B build -DPYPTO_BUILD_PYTHON_BINDINGS=OFF
+cmake --build build --target pypto_auto_layout_solver_test pypto_auto_layout_pass_test --parallel 1
+ctest --test-dir build -R '^pypto_auto_layout_' --output-on-failure
+```

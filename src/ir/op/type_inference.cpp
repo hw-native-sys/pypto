@@ -873,7 +873,7 @@ bool HasRectangularSliceStrides(const TensorTypePtr& parent, size_t window_rank,
     return false;
   }
   const auto& view = *parent->tensor_view_;
-  return (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN) &&
+  return (view.layout == TensorLayout::ND || view.layout == TensorLayout::DN || view.nz_blocked) &&
          view.stride.size() == window_rank;
 }
 

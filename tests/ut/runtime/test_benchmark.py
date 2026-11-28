@@ -27,7 +27,11 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from pypto.ir import DistributedInputLayout
 from pypto.ir import distributed_compiled_program as dcp_mod
+from pypto.ir.compiled_program import CompiledProgram, _SubChipCallable
+from pypto.pypto_core import DataType
 from pypto.runtime import RunConfig
 from pypto.runtime.bench import (
     _L3_SWIMLANE_GRAPH_BEGIN,
@@ -1072,6 +1076,7 @@ def _run_benchmark(
     rounds: int,
     warmup: int,
     artifact_enable_sdma: bool = False,
+    compiled: MagicMock | None = None,
     **kwargs: Any,
 ):
     """Run ``benchmark`` with the worker, log-level, and parse seams patched."""
@@ -1084,7 +1089,7 @@ def _run_benchmark(
         patch("pypto.runtime.bench._parse_stats_from_strace", return_value=sentinel) as parse,
     ):
         stats = benchmark(
-            _compiled_mock(enable_sdma=artifact_enable_sdma),
+            _compiled_mock(enable_sdma=artifact_enable_sdma) if compiled is None else compiled,
             [MagicMock(name="arg")],
             rounds=rounds,
             warmup=warmup,
@@ -1101,6 +1106,17 @@ def test_benchmark_registers_once_and_loops_warmup_plus_rounds():
     # L2/L3 selector (a plain CompiledProgram mock -> distributed=False).
     assert parse.call_args.kwargs == {"rounds": 3, "warmup": 2, "distributed": False}
     assert stats.rounds == 3
+
+
+@pytest.mark.parametrize("artifact_type", [CompiledProgram, _SubChipCallable])
+def test_benchmark_prepares_weights_once_for_each_l2_entry(artifact_type):
+    artifact = MagicMock(spec=artifact_type)
+    artifact.platform = "a2a3sim"
+    prepared = object()
+    artifact._prepare_benchmark_args.return_value = [prepared]
+    _, worker, _, _, _ = _run_benchmark(rounds=2, warmup=1, compiled=artifact)
+    artifact._prepare_benchmark_args.assert_called_once()
+    assert [call.args for call in worker.handle.call_args_list] == [(prepared,)] * 3
 
 
 def test_benchmark_captures_markers_drained_during_worker_teardown():
@@ -1214,6 +1230,9 @@ class _FakeDistributedCompiled:
         self.prepare_config: Any = "unset"
         self.prepare_kwargs: dict[str, Any] = {}
 
+    def _prepare_benchmark_inputs(self, args):
+        return list(args), []
+
     def prepare(self, config: Any = None, **kwargs: Any) -> _FakeDistributedWorker:
         self.prepare_config = config
         self.prepare_kwargs = kwargs
@@ -1248,10 +1267,49 @@ def test_benchmark_l3_dispatches_via_distributed_worker():
     assert compiled.prepare_kwargs == {
         "persistent": False,
         "reset_persistent_windows": None,
+        "inherited_host_tensors": [],
     }
     # The parser is told this is a distributed run.
     assert parse.call_args.kwargs == {"rounds": 2, "warmup": 1, "distributed": True}
     assert stats.rounds == 2
+
+
+@pytest.mark.parametrize("layout", ["ND", "NZ"])
+@pytest.mark.parametrize("carrier", ["logical", "snapshot", "shared_snapshot"])
+def test_benchmark_l3_inherits_selected_weight_once(tmp_path, layout, carrier):
+    logical = torch.arange(32 * 64, dtype=torch.float32).reshape(32, 64)
+    output = torch.zeros_like(logical).share_memory_()
+    physical_shape = (1, 8, 2, 16, 8) if layout == "NZ" else (32, 64)
+    contract = DistributedInputLayout(1, "weight", DataType.FP32, (32, 64), physical_shape, layout)
+    compiled = dcp_mod.DistributedCompiledProgram(
+        None,
+        str(tmp_path),
+        distributed_config=dcp_mod.DistributedConfig(device_ids=[0]),
+        _input_layouts={1: contract},
+        _input_layout_world_size=1,
+    )
+    weight = (
+        logical
+        if carrier == "logical"
+        else compiled.prepare_input(1, logical, shared=carrier == "shared_snapshot")
+    )
+    rt = _FakeDistributedWorker()
+    with (
+        patch.object(compiled, "prepare", return_value=rt) as prepare,
+        patch("pypto.runtime.bench.configure_log"),
+        patch("pypto.runtime.bench.current_level", return_value=20),
+        patch("pypto.runtime.bench._parse_stats_from_strace"),
+    ):
+        benchmark(compiled, [output, weight], warmup=1, rounds=2)
+
+    (snapshot,) = prepare.call_args.kwargs["inherited_host_tensors"]
+    assert snapshot._tensor.is_shared()
+    if carrier == "shared_snapshot":
+        assert snapshot is weight
+    expected = logical if layout == "ND" else logical.reshape(2, 16, 8, 8).permute(2, 0, 1, 3).reshape(32, 64)
+    assert torch.equal(snapshot._tensor, expected)
+    assert rt.handle.call_count == 3
+    assert all(call.args[0] is output and call.args[1] is snapshot for call in rt.handle.call_args_list)
 
 
 def test_benchmark_l3_forwards_persistent_options():
@@ -1281,6 +1339,7 @@ def test_benchmark_l3_forwards_persistent_options():
     assert compiled.prepare_kwargs == {
         "persistent": True,
         "reset_persistent_windows": False,
+        "inherited_host_tensors": [],
     }
 
 

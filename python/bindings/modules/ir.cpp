@@ -602,18 +602,19 @@ void BindIR(nb::module_& m) {
   nb::class_<TensorView>(ir, "TensorView",
                          "Tensor view representation with stride, layout, valid shape, and pad mode")
       .def(nb::init<>(), "Create an empty tensor view")
-      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&, PadValue>(),
+      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&, PadValue, bool>(),
            nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<ExprPtr>{},
-           nb::arg("pad") = PadValue::null,
+           nb::arg("pad") = PadValue::null, nb::arg("nz_blocked") = false,
            "Create a tensor view with stride, layout, optional valid shape, and optional pad")
-      .def(nb::init<const std::vector<int64_t>&, TensorLayout, const std::vector<int64_t>&, PadValue>(),
+      .def(nb::init<const std::vector<int64_t>&, TensorLayout, const std::vector<int64_t>&, PadValue, bool>(),
            nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<int64_t>{},
-           nb::arg("pad") = PadValue::null,
+           nb::arg("pad") = PadValue::null, nb::arg("nz_blocked") = false,
            "Create a tensor view with integer stride, layout, optional integer valid shape, and optional pad")
       .def_rw("stride", &TensorView::stride, "Stride for each dimension")
       .def_rw("layout", &TensorView::layout, "Tensor layout type")
       .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension")
-      .def_rw("pad", &TensorView::pad, "Pad mode for out-of-valid-shape accesses");
+      .def_rw("pad", &TensorView::pad, "Pad mode for out-of-valid-shape accesses")
+      .def_rw("nz_blocked", &TensorView::nz_blocked, "Whether NZ uses physical fractal coordinates");
 
   // ---------------------------------------------------------------------------
   // tensor_view_semantics free functions (RFC #1300 §2.2/§2.3)

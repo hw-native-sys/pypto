@@ -20,6 +20,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, BinaryIO, TypeGuard
 
 import torch
@@ -33,7 +34,7 @@ from pypto._target import (
     _warn_deprecated_platform,
 )
 from pypto.backend import BackendType
-from pypto.pypto_core.ir import ParamDirection, Program, Role, level_to_linqu_level
+from pypto.pypto_core.ir import ParamDirection, Program
 from pypto.runtime.device_tensor import DeviceTensor, StackedDeviceTensor
 
 from ._artifact_metadata import (
@@ -43,6 +44,15 @@ from ._artifact_metadata import (
     _meta_error,
     _remove_meta,
     _write_meta_atomically,
+)
+from ._distributed_input_layout import (
+    DistributedInputLayout,
+    PreparedDistributedInput,
+    _check_artifact_marker,
+    _host_entries,
+    _layout_records,
+    _read_input_layouts,
+    _validate_layout_topology,
 )
 from .compiled_program import (
     CallArg,
@@ -62,7 +72,7 @@ from .param_info import bind_complete_args, collect_output_values
 # ``_artifact_metadata`` (both feed the build-kind marker table there) and is
 # re-exported here, where the rest of the L3 metadata contract lives. Bump
 # ``_META_SCHEMA`` on any incompatible format change.
-_META_SCHEMA = 3
+_META_SCHEMA = 4
 
 if TYPE_CHECKING:
     from pypto.runtime._artifact_runtime import ArtifactRuntime
@@ -224,6 +234,8 @@ class DistributedCompiledProgram:
         _output_indices: list[int] | None = None,
         _return_types: list[Any] | None = None,
         _execution_capabilities: ExecutionCapabilities = ExecutionCapabilities(),
+        _input_layouts: Mapping[int, DistributedInputLayout] | None = None,
+        _input_layout_world_size: int | None = None,
     ) -> None:
         # ``program`` is the post-pass IR. The runtime needs post-pass IR for
         # orchestrator metadata (post-SSA names that match the generated
@@ -249,6 +261,9 @@ class DistributedCompiledProgram:
         self._param_infos = _param_infos
         self._output_indices = _output_indices
         self._return_types = _return_types
+        self._input_layouts = MappingProxyType(dict(_input_layouts or {}))
+        self._input_layout_world_size = _input_layout_world_size
+        self._validate_layout_world_size(len(self._distributed_config.device_ids))
 
         # Only the fresh-compile path (live IR) writes artifacts. The reload
         # path must not clobber a user's hand-edited debug/run.py or the
@@ -287,12 +302,16 @@ class DistributedCompiledProgram:
             param_infos, _, return_types = self._get_metadata()
         except (ValueError, TypeError):
             _remove_meta(self._output_dir, _DISTRIBUTED_META_FILENAME)
+            if self._input_layouts:
+                raise
             return
         dc = self._distributed_config
+        self._validate_artifact_layouts(param_infos, world_size=len(dc.device_ids))
         meta = {
             "schema": _META_SCHEMA,
             "supported_execution_modes": self.execution_capabilities.record(),
             "params": [_param_info_to_dict(p) for p in param_infos],
+            "input_layouts": _layout_records(self._input_layouts),
             "num_return_types": len(return_types),
             "platform": self._platform,
             "backend_type": self._backend_type.name,
@@ -337,7 +356,9 @@ class DistributedCompiledProgram:
                 the persisted value. An override retains the saved execution mode
                 unless execution_mode or a legacy platform is also supplied.
             distributed_config: Override the persisted run config (e.g. to
-                replay on a different set of ``device_ids``). ``None`` rebuilds
+                replay on a different set of ``device_ids``). Artifacts with
+                selectable input layouts require the compiled rank count.
+                ``None`` rebuilds
                 the :class:`DistributedConfig` recorded at compile time.
 
         Returns:
@@ -363,7 +384,9 @@ class DistributedCompiledProgram:
         # JSON, bad params, a ``backend_type`` naming a class attribute instead
         # of an enum member -- surfaces as one ValueError naming the file and
         # the recompile fix, rather than whichever internal exception it raised.
-        meta = _load_meta(meta_path, filename=_DISTRIBUTED_META_FILENAME, schema=_META_SCHEMA)
+        meta = _load_meta(
+            meta_path, filename=_DISTRIBUTED_META_FILENAME, schema=_META_SCHEMA, legacy_schemas=(3,)
+        )
         platform = _reload_platform(
             meta["backend_type"],
             meta["platform"],
@@ -372,21 +395,34 @@ class DistributedCompiledProgram:
             platform=platform,
         )
         param_infos = meta["param_infos"]
+        try:
+            raw_layouts: object = [] if meta["raw"]["schema"] == 3 else meta["raw"].get("input_layouts")
+            input_layouts = _read_input_layouts(raw_layouts, param_infos)
+            persisted_dc = (
+                _distributed_config_from_dict(meta["raw"], meta_path)
+                if input_layouts or distributed_config is None
+                else None
+            )
+            world_size = len(persisted_dc.device_ids) if input_layouts and persisted_dc is not None else None
+            _check_artifact_marker(meta_path.parent, param_infos, input_layouts, world_size)
+        except (OSError, ValueError) as exc:
+            raise _meta_error(_DISTRIBUTED_META_FILENAME, meta_path, str(exc)) from exc
         output_indices = [i for i, p in enumerate(param_infos) if p.direction == ParamDirection.Out]
         # ``return_types`` contents are never inspected at runtime — only the
         # count matters (has_return = len(...) > 0), so placeholders suffice.
         return_types: list[Any] = [None] * meta["num_return_types"]
-        dc = distributed_config or _distributed_config_from_dict(meta["raw"], meta_path)
         return cls(
             None,
             str(output_dir),
             backend_type=backend_type or meta["backend_type"],
             platform=platform or meta["platform"],
-            distributed_config=dc,
+            distributed_config=distributed_config or persisted_dc,
             _param_infos=param_infos,
             _output_indices=output_indices,
             _return_types=return_types,
             _execution_capabilities=meta["execution_capabilities"],
+            _input_layouts=input_layouts,
+            _input_layout_world_size=world_size,
         )
 
     @property
@@ -437,20 +473,10 @@ class DistributedCompiledProgram:
                 )
             # Find the HOST orchestrator function (post-SSA names match the
             # generated Python code).
-            host_orch = None
-            for func in self._program.functions.values():
-                if (
-                    func.level is not None
-                    and level_to_linqu_level(func.level) >= 3
-                    and func.role is not None
-                    and func.role == Role.Orchestrator
-                ):
-                    host_orch = func
-                    break
-
-            if host_orch is not None:
+            host_entries = _host_entries(self._program)
+            if host_entries:
                 self._param_infos, self._output_indices, self._return_types = _extract_func_param_infos(
-                    host_orch
+                    host_entries[0]
                 )
             else:
                 self._param_infos, self._output_indices, self._return_types = _extract_param_infos(
@@ -459,9 +485,85 @@ class DistributedCompiledProgram:
         assert self._output_indices is not None and self._return_types is not None
         return self._param_infos, self._output_indices, self._return_types
 
+    @property
+    def input_layouts(self) -> Mapping[int, DistributedInputLayout]:
+        """Per-slot layout contracts for offered inputs, keyed by zero-based HOST parameter index."""
+        return self._input_layouts
+
+    def _validate_layout_world_size(self, world_size: int) -> None:
+        if self._input_layouts and self._input_layout_world_size != world_size:
+            raise ValueError(
+                f"Distributed input layout requires the compiled rank count "
+                f"{self._input_layout_world_size}, got {world_size} device IDs"
+            )
+        _validate_layout_topology(self._input_layouts, world_size)
+
+    def _validate_artifact_layouts(self, params: "Sequence[_ParamInfo]", *, world_size: int) -> None:
+        self._validate_layout_world_size(world_size)
+        _check_artifact_marker(self._output_dir, params, self._input_layouts, self._input_layout_world_size)
+
+    def prepare_input(
+        self,
+        param_index: int,
+        value: torch.Tensor,
+        *,
+        source_layout: str = "ND",
+        shared: bool = False,
+    ) -> PreparedDistributedInput:
+        """Snapshot an offered immutable weight once for the selected storage layout.
+
+        Supply logical ND data by default. Set ``source_layout="NZ"`` only when
+        the bytes are already in canonical NZ order for the declared dtype and
+        per-matrix geometry, carried in a contiguous logical-shaped tensor.
+        Set ``shared=True`` and list the result in
+        ``prepare(inherited_host_tensors=[...])`` to pass it to a prepared
+        worker as a reusable host argument.
+        """
+        layout = self._input_layouts.get(param_index) if type(param_index) is int else None
+        if layout is None:
+            raise ValueError(f"Distributed input slot {param_index!r} has no selectable layout")
+        packed = layout._materialize(value, source_layout)
+        # Converting ND/NZ normally allocates new storage. When no copy was
+        # needed, snapshot the source so subsequent caller writes affect only
+        # a new version. A reshape may introduce a view without new storage.
+        if packed.untyped_storage().data_ptr() == value.untyped_storage().data_ptr():
+            packed = packed.clone()
+        if shared:
+            packed.share_memory_()
+        return PreparedDistributedInput(layout, packed)
+
+    def _prepare_benchmark_inputs(
+        self, args: "Sequence[CallArg | PreparedDistributedInput]"
+    ) -> "tuple[list[CallArg | PreparedDistributedInput], list[PreparedDistributedInput]]":
+        """Prepare shared snapshots once, before the benchmark forks its worker."""
+        dispatch_args = list(args)
+        inherited: list[PreparedDistributedInput] = []
+        for index, arg in enumerate(args):
+            layout = self.input_layouts.get(index)
+            if layout is None:
+                continue
+            if isinstance(arg, PreparedDistributedInput):
+                physical = arg._for_layout(layout)
+                # An unshared snapshot already contains physical bytes. Copy it
+                # into shared storage without interpreting those bytes as ND.
+                snapshot = (
+                    arg
+                    if physical.is_shared()
+                    else self.prepare_input(index, physical, source_layout=layout.layout, shared=True)
+                )
+            elif isinstance(arg, torch.Tensor):
+                snapshot = self.prepare_input(index, arg, shared=True)
+            else:
+                raise TypeError(
+                    f"Benchmark weight {layout.name!r} requires a host tensor or a prepared input"
+                )
+            inherited.append(snapshot)
+            dispatch_args[index] = snapshot
+        return dispatch_args, inherited
+
     def __call__(
         self,
-        *args: CallArg,
+        *args: "CallArg | PreparedDistributedInput",
         config: "RunConfig | None" = None,
     ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
         """Execute the distributed program via simpler Worker(level=3).
@@ -479,7 +581,8 @@ class DistributedCompiledProgram:
         and do not restore mutable arguments between them. Other compile-side
         fields are not consumed on the dispatch path.
 
-        One-shot calls accept host ``torch.Tensor`` arguments only. A resident
+        One-shot calls accept host tensors. Offered slots accept logical ND
+        tensors or snapshots from :meth:`prepare_input`. A resident
         ``DeviceTensor`` needs the owner ``Buffer`` and provenance of the same
         live Worker; use :meth:`prepare`, allocate it through the returned
         ``DistributedWorker``, then call ``worker.run(...)``.
@@ -516,7 +619,14 @@ class DistributedCompiledProgram:
         # Validate and coerce one-shot host tensor args. Resident tensors are a
         # prepared-DistributedWorker-only calling convention (guarded above).
         coerced: list[torch.Tensor] = []
-        for info, arg in zip(param_infos, all_args, strict=True):
+        for index, (info, arg) in enumerate(zip(param_infos, all_args, strict=True)):
+            layout = self._input_layouts.get(index)
+            if isinstance(arg, PreparedDistributedInput):
+                if layout is None:
+                    raise ValueError(f"Parameter {info.name!r} has no selectable input layout")
+                arg = arg._for_layout(layout)
+            elif layout is not None and isinstance(arg, torch.Tensor):
+                arg = self.prepare_input(index, arg)._tensor
             if not isinstance(arg, torch.Tensor):
                 raise TypeError(
                     f"One-shot distributed programs only support host torch.Tensor parameters. "
@@ -538,7 +648,8 @@ class DistributedCompiledProgram:
         window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
-        inherited_host_tensors: "Sequence[torch.Tensor | ReadOnlyHostTensor] | None" = None,
+        inherited_host_tensors: Sequence["torch.Tensor | ReadOnlyHostTensor | PreparedDistributedInput"]
+        | None = None,
         startup_timeout_s: float | None = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
@@ -611,7 +722,9 @@ class DistributedCompiledProgram:
                 be confirmed. An entry may be wrapped in
                 :class:`~pypto.runtime.ReadOnlyHostTensor` when the backing is
                 shared but not writable, which makes ``copy_from`` into it raise
-                instead of faulting in the forked child.
+                instead of faulting in the forked child. Include a snapshot
+                made with ``prepare_input(..., shared=True)`` here to reuse it
+                as a host argument to ``worker.run``.
             startup_timeout_s: Optional positive finite bound, in seconds, for
                 the forked worker hierarchy to report startup readiness. ``None``
                 keeps Simpler's default timeout.
@@ -636,12 +749,12 @@ class DistributedCompiledProgram:
 
     @staticmethod
     def _build_full_args(
-        input_args: tuple[CallArg, ...],
+        input_args: "tuple[CallArg | PreparedDistributedInput, ...]",
         param_infos: list[_ParamInfo],
         output_indices: list[int],
-    ) -> list[CallArg]:
+    ) -> "list[CallArg | PreparedDistributedInput]":
         output_set = set(output_indices)
-        all_tensors: list[CallArg] = []
+        all_tensors: list[CallArg | PreparedDistributedInput] = []
         input_idx = 0
 
         for i, info in enumerate(param_infos):

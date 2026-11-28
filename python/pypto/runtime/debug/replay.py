@@ -63,6 +63,7 @@ from pypto.runtime.runner import (
     _SWIMLANE_MAX_LEVEL,
     RunConfig,
     _execute_compiled,
+    _prepare_directory_args,
 )
 
 __all__ = ["replay", "invalidate_binary_cache"]
@@ -217,14 +218,25 @@ def replay(
         )
         compiled(*tensors, config=config)
     else:
-        _execute_compiled(
+        dispatch_args, reference_args = _prepare_directory_args(
             work_dir,
             list(tensors),
+            caller_name="replay()",
+            for_reference=validate,
+        )
+        _execute_compiled(
+            work_dir,
+            dispatch_args,
             platform=config.platform,
             device_id=config.device_id,
             dfx=config.dfx_options(),
             config=config,
         )
+        if named_tensors is not None:
+            named_tensors = [
+                (name, cast("torch.Tensor", reference))
+                for (name, _), reference in zip(named_tensors, reference_args, strict=True)
+            ]
 
     if named_tensors is not None:
         assert golden_module is not None

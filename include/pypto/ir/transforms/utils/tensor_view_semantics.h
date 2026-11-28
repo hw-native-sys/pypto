@@ -32,7 +32,19 @@
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
+namespace pypto::ir {
+class Program;
+}
+
 namespace pypto::ir::tensor_view_semantics {
+
+/// Restore per-view provenance in IR written before that metadata was stored.
+/// Only explicitly stamped legacy functions supply evidence of blocked coordinates.
+std::shared_ptr<const Program> RestoreLegacyBlockedNzViews(const std::shared_ptr<const Program>& program);
+
+inline bool IsNzBlocked(const TensorType& tensor) {
+  return tensor.tensor_view_.has_value() && tensor.tensor_view_->nz_blocked;
+}
 
 /// Compute the product of static shape dimensions; returns -1 if any dim is dynamic.
 inline int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {

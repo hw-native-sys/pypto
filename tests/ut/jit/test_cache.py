@@ -22,7 +22,7 @@ from typing import Any
 
 import pypto.language as pl
 import pytest
-from pypto.ir import DistributedConfig, OptimizationStrategy
+from pypto.ir import DistributedConfig, InputLayoutPolicy, OptimizationStrategy
 from pypto.jit._persistent import _specialization_digest
 from pypto.jit._source import capture_namespaces, function_namespace
 from pypto.jit.cache import (
@@ -130,6 +130,7 @@ class TestMakeCacheKey:
         enable_pypto_l0c_double_buffer=False,
         tensor_layouts=None,
         dep_layouts=(),
+        input_layout_policy=None,
         runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER,
         enable_buffer_ir=False,
         enable_software_pipeline=False,
@@ -148,10 +149,22 @@ class TestMakeCacheKey:
             enable_pypto_l0c_double_buffer=enable_pypto_l0c_double_buffer,
             tensor_layouts=tensor_layouts,
             dep_layouts=dep_layouts,
+            input_layout_policy=input_layout_policy,
             runtime=runtime,
             enable_buffer_ir=enable_buffer_ir,
             enable_software_pipeline=enable_software_pipeline,
         )
+
+    def test_loader_permission_and_reuse_separate_jit_artifacts(self):
+        policies = (
+            None,
+            InputLayoutPolicy(("w",)),
+            InputLayoutPolicy(("x",)),
+            InputLayoutPolicy(("w",), ("w",), 100),
+        )
+        keys = [self._make_key(input_layout_policy=policy) for policy in policies]
+        assert len(set(keys)) == len(keys)
+        assert len({_specialization_digest(key) for key in keys}) == len(keys)
 
     def test_basic_key_structure(self):
         key = self._make_key(

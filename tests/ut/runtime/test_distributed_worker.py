@@ -34,7 +34,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from pypto.ir import DistributedConfig
+from pypto.ir import DistributedCompiledProgram, DistributedConfig
+from pypto.ir._distributed_input_layout import _artifact_marker, _make_layout
 from pypto.ir.compiled_program import _ParamInfo
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
@@ -72,6 +73,7 @@ def _fake_compiled(param_infos, output_indices):
     """A minimal stand-in for DistributedCompiledProgram used by DistributedWorker."""
     compiled = MagicMock(name="DistributedCompiledProgram")
     compiled._get_metadata.return_value = (param_infos, output_indices, [])
+    compiled.input_layouts = {}
     compiled._distributed_config = DistributedConfig()
     compiled.platform = "a2a3sim"
     return compiled
@@ -4982,6 +4984,158 @@ def test_persistent_domain_identity_includes_source_and_workspace():
     host = DistributedWorker._persistent_domain_spec({**base, "memory_source": "host"})
     urma = DistributedWorker._persistent_domain_spec({**base, "workspace_engines": ("urma",)})
     assert len({device, host, urma}) == 3
+
+
+def test_selected_weight_prepared_before_fork_and_uploaded_once(tmp_path, patched_setup):
+    shape = (2, 2, 32, 96)
+    info = _ParamInfo("w", ParamDirection.In, shape, DataType.BF16, "ND")
+    layout = _make_layout(0, "w", info, "NZ")
+    compiled = DistributedCompiledProgram(
+        None,
+        str(tmp_path),
+        distributed_config=DistributedConfig(device_ids=[0, 1]),
+        _param_infos=[info],
+        _output_indices=[],
+        _return_types=[],
+        _input_layouts={0: layout},
+        _input_layout_world_size=2,
+    )
+    host = tmp_path / "orchestration" / "host_orch.py"
+    host.parent.mkdir()
+    host.write_bytes(_artifact_marker([info], compiled.input_layouts, 2))
+
+    rows, cols = shape[-2:]
+    logical = (
+        ((torch.arange(rows)[:, None] * 7 + torch.arange(cols) * 11) + (torch.arange(4)[:, None, None] * 23))
+        .remainder(127)
+        .to(torch.bfloat16)
+        .reshape(shape)
+    )
+    expected = layout._materialize(logical, "ND")
+    snapshot = compiled.prepare_input(0, logical, shared=True)
+    unshared = compiled.prepare_input(0, logical)
+    assert snapshot._tensor.is_shared()
+    assert not unshared._tensor.is_shared()
+
+    compiled._distributed_config.device_ids.append(2)
+    with pytest.raises(ValueError, match="compiled rank count 2, got 3 device IDs"):
+        compiled(logical)
+    with pytest.raises(ValueError, match="compiled rank count 2, got 3 device IDs"):
+        compiled.prepare()
+    patched_setup["construct"].assert_not_called()
+    compiled._distributed_config.device_ids.pop()
+
+    worker = patched_setup["worker"]
+    shard_bytes = expected[0].numel() * expected.element_size()
+    buffers = {i: _FakeBuffer(0xA000 + i * 0x1000, shard_bytes, owner_worker_id=i) for i in range(2)}
+    _alloc_by_worker(worker, buffers)
+    uploaded = {}
+
+    def capture_upload(dst, src, *, dst_offset, src_offset, nbytes):
+        assert dst_offset == 0
+        assert src.access == "READ"
+        uploaded[dst.owner_worker_id] = ctypes.string_at(src.base + src_offset, nbytes)
+
+    worker.copy_to.side_effect = capture_upload
+
+    def check_before_fork(**_):
+        assert snapshot._tensor.is_shared()
+        assert torch.equal(snapshot._tensor, expected)
+
+    worker.init.side_effect = check_before_fork
+    with pytest.raises(ValueError, match="shared=True"):
+        compiled.prepare(inherited_host_tensors=[unshared])
+    worker.init.assert_not_called()
+
+    with compiled.prepare(inherited_host_tensors=[snapshot]) as rt:
+        worker.init.assert_called_once()
+        rt.run(compiled, snapshot)
+        with pytest.raises(ValueError, match="inherited before the worker fork"):
+            rt.run(compiled, compiled.prepare_input(0, logical, shared=True))
+        with pytest.raises(TypeError, match="alloc_input_tensor"):
+            rt.run(compiled, logical.share_memory_())
+
+        resident = rt.alloc_input_tensor(compiled, 0, snapshot)
+        assert isinstance(resident, StackedDeviceTensor)
+        assert uploaded == {i: expected[i].view(torch.uint8).numpy().tobytes() for i in range(2)}
+        rt.run(compiled, resident)
+        rt.run(compiled, resident)
+        assert worker.copy_to.call_count == 2
+        with pytest.raises(ValueError, match="Cannot overwrite"):
+            rt.copy_to(resident.shards[0].data_ptr, logical.data_ptr(), shard_bytes)
+        rt.free_stacked_tensor(resident)
+        with pytest.raises(ValueError, match="incompatible resident input layout provenance"):
+            rt.run(compiled, resident)
+        worker.copy_to.side_effect = None
+        unknown = rt.alloc_stacked_tensor(snapshot._tensor)
+        with pytest.raises(ValueError, match="incompatible resident input layout provenance"):
+            rt.run(compiled, unknown)
+
+
+def test_selected_matrix_uploads_and_dispatches_as_one_resident_tensor(tmp_path, patched_setup):
+    shape = (32, 96)
+    weight = _ParamInfo("weight", ParamDirection.In, shape, DataType.BF16, "ND")
+    output = _ParamInfo("output", ParamDirection.Out, shape, DataType.BF16, "ND")
+    params = [weight, output]
+    layout = _make_layout(0, "weight", weight, "NZ")
+    layouts = {0: layout}
+    compiled = DistributedCompiledProgram(
+        None,
+        str(tmp_path),
+        distributed_config=DistributedConfig(device_ids=[5]),
+        _param_infos=params,
+        _output_indices=[1],
+        _return_types=[],
+        _input_layouts=layouts,
+        _input_layout_world_size=1,
+    )
+    host = tmp_path / "orchestration" / "host_orch.py"
+    host.parent.mkdir()
+    host.write_bytes(_artifact_marker(params, layouts, 1))
+
+    logical = torch.arange(32 * 96).remainder(127).to(torch.bfloat16).reshape(shape)
+    snapshot = compiled.prepare_input(0, logical, shared=True)
+    out = torch.empty_like(logical).share_memory_()
+
+    worker = patched_setup["worker"]
+    nbytes = logical.numel() * logical.element_size()
+    device = _FakeBuffer(0xA000, nbytes, owner_worker_id=0)
+    _alloc_by_worker(worker, {0: device})
+    expected = snapshot._tensor.view(torch.uint8).numpy().tobytes()
+
+    def capture_upload(dst, src, *, dst_offset, src_offset, nbytes):
+        assert dst is device and dst_offset == 0
+        assert ctypes.string_at(src.base + src_offset, nbytes) == expected
+
+    worker.copy_to.side_effect = capture_upload
+    with compiled.prepare(inherited_host_tensors=[snapshot]) as rt:
+        with pytest.raises(ValueError, match=r"requires worker_ids=\[0\]"):
+            rt.alloc_input_tensor(compiled, 0, snapshot, worker_ids=[1])
+        worker.alloc_child_tensor.assert_not_called()
+        with pytest.raises(TypeError, match="alloc_input_tensor"):
+            rt.run(compiled, logical, out)
+        rt.run(compiled, snapshot, out)
+
+        resident = rt.alloc_input_tensor(compiled, 0, snapshot, worker_ids=[0])
+        assert isinstance(resident, DeviceTensor)
+        assert resident.shape == shape and resident.buffer is device
+        rt.run(compiled, resident, out)
+        rt.run(compiled, resident, out)
+        worker.alloc_child_tensor.assert_called_once()
+        worker.copy_to.assert_called_once()
+
+        view = rt.view_tensor(resident, shape)
+        with pytest.raises(ValueError, match="incompatible resident input layout provenance"):
+            rt.run(compiled, view, out)
+        with pytest.raises(ValueError, match="incompatible resident input layout provenance"):
+            rt.run(compiled, snapshot, resident)
+        with pytest.raises(ValueError, match="Cannot overwrite"):
+            rt.copy_to(resident.data_ptr, logical.data_ptr(), nbytes)
+
+        rt.free_tensor(resident)
+        worker.free.assert_called_once_with(device)
+        with pytest.raises(TypeError, match="alloc_input_tensor"):
+            rt.run(compiled, resident, out)
 
 
 if __name__ == "__main__":

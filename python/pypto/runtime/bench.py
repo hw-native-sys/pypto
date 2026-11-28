@@ -1342,12 +1342,13 @@ def benchmark(
             :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`
             (L3) from ``ir.compile``. Multi-orch L2
             programs must pass ``compiled[<name>]``.
-        args: Positional dispatch args, same as ``compiled(*args)``. **L3
-            requires shared-memory host** ``torch.Tensor`` **args** (allocated
-            with ``.share_memory_()`` and reused in place). This helper creates
-            its own prepared Worker, so it cannot accept a DeviceTensor owned by
-            another Worker; benchmark resident tensors with an explicit
-            ``compiled.prepare()`` dispatch loop.
+        args: Positional dispatch arguments. For L3, pass one argument per
+            parameter, including outputs. Use shared-memory host tensors for
+            ordinary tensor slots. Offered weights accept logical ND host tensors
+            or prepared snapshots and are prepared in shared memory once before
+            warmup. This helper creates its own prepared Worker. To benchmark
+            resident DeviceTensors, run the dispatch loop with the Worker that
+            owns them using ``compiled.prepare()``.
         rounds: Number of measured launches. Must be positive.
         warmup: Number of leading launches discarded before measurement
             (page-in / cache warm). Total launches = ``warmup + rounds``.
@@ -1421,6 +1422,7 @@ def benchmark(
         raise ValueError(f"warmup must be non-negative, got {warmup}")
 
     # L3 distributed programs run through DistributedWorker, not ChipWorker.
+    from pypto.ir.compiled_program import _RuntimeFacade  # noqa: PLC0415
     from pypto.ir.distributed_compiled_program import (  # noqa: PLC0415
         DistributedCompiledProgram,
     )
@@ -1466,10 +1468,12 @@ def benchmark(
                     with _capture_fd_stderr(log_path):
                         # Pass the dispatch config so prepare() prewarms the ring
                         # sizing the loop below actually dispatches with.
+                        args, inherited = compiled._prepare_benchmark_inputs(args)
                         with compiled.prepare(
                             config,
                             persistent=persistent,
                             reset_persistent_windows=reset_persistent_windows,
+                            inherited_host_tensors=inherited,
                         ) as rt:
                             handle = rt.register(compiled)  # register once (cid=0)
                             _dispatch_loop(handle, args, rounds=rounds, warmup=warmup, dispatch_config=config)
@@ -1494,6 +1498,8 @@ def benchmark(
                         ChipWorker(rc, runtime=compiled.runtime_name, enable_sdma=enable_sdma) as worker,
                     ):
                         handle = worker.register(compiled)  # register once; cid cached
+                        if isinstance(compiled, _RuntimeFacade):
+                            args = compiled._prepare_benchmark_args(args)
                         _dispatch_loop(handle, args, rounds=rounds, warmup=warmup, dispatch_config=rc)
             except Exception:
                 _replay_captured_stderr(log_path)

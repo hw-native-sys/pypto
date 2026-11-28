@@ -25,13 +25,14 @@
  * whether or not the logical tensor has a leading axis. A logical rank-2
  * ``[N, K]`` weight therefore blocks to ``[1, K/c0, N/16, 16, c0]``, with the
  * batch materialised as 1 — blocking it to rank 4 instead produces a view PTOAS
- * refuses ("user-specified layout=nz requires a rank-5 view"). Logical rank 4+
- * has no canonical form yet and is rejected in ``CheckNzLogicalRank``.
+ * refuses ("user-specified layout=nz requires a rank-5 view"). Higher logical
+ * ranks fold all leading axes into the single batch slot.
  *
  * This pass rewrites the IR into exactly that form:
  *
- *   Phase 1 — every TensorType tagged ``TensorLayout::NZ`` gets its shape
- *             replaced by ``BlockNzShape``. The stride slot is left empty for
+ *   Phase 1 — every logical NZ TensorType gets its shape replaced by
+ *             ``BlockNzShape``. Each rewritten view records its coordinate
+ *             representation, including across serialization. The stride slot is left empty for
  *             ``MaterializeTensorStrides`` (pass 33) to fill; because a blocked
  *             NZ shape's row-major strides *are* pto-isa's NZ strides, that
  *             pass needs no NZ-specific rule.
@@ -51,7 +52,7 @@
  * ``GetTensorViewTypeString`` and the ``tile.load`` ``partition_view`` emitter
  * each read the rank independently and must agree.
  *
- * Ordering constraints (see docs/en/dev/passes/16-block_nz_tensor_views.md):
+ * Ordering constraints (see docs/en/dev/passes/17-block_nz_tensor_views.md):
  *   * after ConvertTensorToTileOps / LowerCompositeOps — the ``tile.load`` ops
  *     Phase 2 rewrites must already exist;
  *   * after FlattenTileNdTo2D — declared as a ``TileOps2D`` requirement. The
@@ -72,7 +73,7 @@
  * See ``BlockTileStoreArgs`` for both contracts.
  */
 
-#include <any>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -103,6 +104,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
+#include "pypto/ir/transforms/auto_layout/extractor.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -118,14 +120,6 @@ namespace ir {
 
 namespace {
 
-/// Function-level stamp marking that Phase 1 already ran on this function.
-///
-/// Blocking is *not* idempotent — running it twice would block an already
-/// blocked shape — and the structural ``IsBlockedNzShape`` test cannot tell a
-/// blocked shape from a logical one that merely ends in ``[16, c0]``. The stamp
-/// makes re-entry a no-op without relying on that ambiguity.
-constexpr const char* kNzBlockedAttr = "nz_tensor_views_blocked";
-
 /// True when a tensor-like type carries an NZ TensorView.
 bool IsNzTensorType(const TypePtr& type) {
   auto tensor_type = AsTensorTypeLike(type);
@@ -136,56 +130,72 @@ bool IsNzTensorType(const TypePtr& type) {
   return view.has_value() && view->layout == TensorLayout::NZ;
 }
 
-/// Rewrite an NZ-tagged TensorType / DistributedTensorType to its blocked
-/// shape, recursing into TupleType. Returns the input unchanged when there is
-/// nothing to block (identity-comparable by the caller).
-TypePtr BlockNzType(const TypePtr& type, const Span& span) {
-  if (!type) return type;
+/// A cache belongs to one function because the legacy stamp scopes the meaning
+/// of an unmarked type to its original function, even when functions share it.
+class NzTypeRewriter {
+ public:
+  explicit NzTypeRewriter(bool legacy_blocked) : legacy_blocked_(legacy_blocked) {}
 
-  if (auto tuple_type = As<TupleType>(type)) {
-    std::vector<TypePtr> new_elements;
-    new_elements.reserve(tuple_type->types_.size());
-    bool changed = false;
-    for (const auto& element : tuple_type->types_) {
-      auto new_element = BlockNzType(element, span);
-      if (new_element.get() != element.get()) changed = true;
-      new_elements.push_back(std::move(new_element));
+  TypePtr Rewrite(const TypePtr& type, const Span& span) {
+    if (!type) return type;
+    if (auto it = cache_.find(type); it != cache_.end()) {
+      return it->second;
     }
-    if (!changed) return type;
-    return std::make_shared<TupleType>(std::move(new_elements));
+    auto rewritten = RewriteType(type, span);
+    cache_.emplace(type, rewritten);
+    return rewritten;
   }
 
-  if (auto dist_type = As<DistributedTensorType>(type)) {
-    if (!IsNzTensorType(type)) return type;
-    // A distributed NZ tensor would additionally need remote_load blocking,
-    // which milestone 1 does not implement; remote_load.cpp rejects it. Refuse
-    // here too so the diagnostic names the annotation rather than surfacing
-    // later as an opaque layout error.
-    CHECK_SPAN(false, span) << "NZ layout is not supported on a distributed tensor yet. "
-                            << "Annotate the tensor as pl.ND or pl.DN.";
+ private:
+  TypePtr RewriteType(const TypePtr& type, const Span& span) {
+    if (auto tuple = As<TupleType>(type)) {
+      std::vector<TypePtr> types;
+      types.reserve(tuple->types_.size());
+      bool changed = false;
+      for (const auto& element : tuple->types_) {
+        auto rewritten = Rewrite(element, span);
+        changed |= rewritten.get() != element.get();
+        types.push_back(std::move(rewritten));
+      }
+      return changed ? std::make_shared<TupleType>(std::move(types)) : type;
+    }
+
+    auto tensor = AsTensorTypeLike(type);
+    if (!tensor || !IsNzTensorType(type)) return type;
+    CHECK_SPAN(!IsA<DistributedTensorType>(type), span)
+        << "NZ layout is not supported on a distributed tensor yet. Annotate the tensor as pl.ND or pl.DN.";
+    const auto& original_view = tensor->tensor_view_;
+    if (!original_view) return type;
+    if (original_view->nz_blocked) {
+      CHECK_SPAN(tensor_view_semantics::IsBlockedNzShape(tensor->shape_, tensor->dtype_), span)
+          << "nz_blocked=True requires a physical rank-5 NZ shape with trailing dimensions [16, c0] "
+             "for the tensor's dtype. Omit nz_blocked for logical shapes.";
+      return type;
+    }
+
+    std::vector<ExprPtr> shape;
+    if (legacy_blocked_) {
+      // Here the function stamp is evidence of blocking. Validate its shape
+      // as an invariant rather than using the shape to infer provenance.
+      INTERNAL_CHECK_SPAN(tensor_view_semantics::IsBlockedNzShape(tensor->shape_, tensor->dtype_), span)
+          << "Internal error: a legacy BlockNzTensorViews stamp requires blocked NZ coordinates";
+      shape = tensor->shape_;
+    } else {
+      shape = tensor_view_semantics::BlockNzShape(tensor->shape_, tensor->dtype_, span);
+      CHECK_SPAN(original_view->valid_shape.empty(), span)
+          << "NZ layout does not support a partial valid_shape yet; the whole tensor must be valid.";
+      CHECK_SPAN(original_view->stride.empty(), span)
+          << "NZ layout does not support an explicit stride yet: the blocked NZ stride is derived from "
+          << "the shape. Drop the stride annotation.";
+    }
+    auto view = *original_view;
+    view.nz_blocked = true;
+    return std::make_shared<TensorType>(std::move(shape), tensor->dtype_, tensor->memref_, std::move(view));
   }
 
-  if (auto tensor_type = As<TensorType>(type)) {
-    if (!IsNzTensorType(type)) return type;
-    // ``IsNzTensorType`` already established the view exists, but that is not
-    // locally provable, so repeat the test where the optional is dereferenced.
-    const auto& maybe_view = tensor_type->tensor_view_;
-    if (!maybe_view.has_value()) return type;
-    auto blocked_shape = tensor_view_semantics::BlockNzShape(tensor_type->shape_, tensor_type->dtype_, span);
-    // valid_shape is a per-dim companion of the logical shape; a partial NZ
-    // region has no blocked representation in milestone 1.
-    const TensorView& view = *maybe_view;
-    CHECK_SPAN(view.valid_shape.empty(), span)
-        << "NZ layout does not support a partial valid_shape yet; the whole tensor must be valid.";
-    CHECK_SPAN(view.stride.empty(), span)
-        << "NZ layout does not support an explicit stride yet: the blocked NZ stride is derived from "
-        << "the shape. Drop the stride annotation.";
-    return std::make_shared<TensorType>(std::move(blocked_shape), tensor_type->dtype_, tensor_type->memref_,
-                                        view);
-  }
-
-  return type;
-}
+  bool legacy_blocked_;
+  std::unordered_map<TypePtr, TypePtr> cache_;
+};
 
 /// Whether ``op`` is a ``tensor.reshape`` that flattens the whole NZ tensor into
 /// a single rank-1 view of every element.
@@ -302,39 +312,9 @@ constexpr size_t kNzRowFractalDim = 2;
 /// ``srcStride`` operand is a 16-bit field counting 32-byte blocks.
 constexpr int64_t kNzMaxGmGapBlocks = 65535;
 
-/// TEMPORARY correctness guard for an upstream pto-isa defect — delete this
-/// function and its call site once hw-native-sys/pto-isa#317 lands.
-///
-/// ``TLoadGm2L1Nz2nz`` computes the GM gap between consecutive column blocks as
-/// a ``uint32_t`` and hands it to ``TLoadInstrGm2L1``'s ``uint16_t gmGap`` with
-/// no range test, so a gap above ``kNzMaxGmGapBlocks`` wraps and the load reads
-/// the wrong fractals. Nothing below this pass notices: PTOAS assembles it, the
-/// CCE compiler accepts it, and the kernel returns wrong numbers with no error.
-/// This pass is the only layer that still knows which ``pl.NZ`` annotation in
-/// the user's own source is responsible, which is why the guard lives here.
-///
-/// For a blocked view the gap reduces to the row extent the load leaves behind:
-///
-/// ```text
-///   gmGap = (gStride1 - gShape2*gShape3*gShape4) * sizeof(T) / 32
-///         = (R/16 - TR/16) * 16 * c0 * sizeof(T) / 32
-///         = R - TR                                      (32-byte blocks)
-/// ```
-///
-/// because ``c0 * sizeof(T) == 32`` holds for every NZ view by construction —
-/// so the bound is dtype-independent, and a *wider* row tile is what lowers the
-/// gap, not a narrower one.
-///
-/// The gap is the stride *between* bursts, and ``nBurst`` is the load's own
-/// column-block extent, so a single-column-block load never consumes it — it
-/// is exempt no matter how large the gap computes to.
-///
-/// ``blocked_partition`` must be the tuple codegen turns into the
-/// ``pto.partition_view`` — ``valid_shape`` when the load carries one, else
-/// ``shapes`` (``src/backend/common/pto_ops_memory.cpp``). That view *is*
-/// pto-isa's ``gShape``, so reading ``shapes`` unconditionally would measure a
-/// window the hardware never sees: a narrowed ``valid_shape`` loads *fewer*
-/// row fractals and therefore leaves a *larger* gap behind.
+/// A2/A3 can advance full-width addresses between individual column-block
+/// bursts. For other targets, require the source gap to fit the strided DMA.
+/// In a dense NZ view one logical row occupies one 32-byte block per C0.
 void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, const ExprPtr& blocked_partition,
                                  const Span& span) {
   auto sizes = As<MakeTuple>(blocked_partition);
@@ -370,17 +350,9 @@ void CheckNzGmGapFitsBurstStride(const std::vector<ExprPtr>& blocked_shape, cons
   const int64_t loaded_rows = loaded ? loaded->value_ * tensor_view_semantics::kNzFractalRow : 0;
   const int64_t gap = whole_rows - loaded_rows;
   CHECK_SPAN(gap <= kNzMaxGmGapBlocks, span)
-      << "NZ layout: this tile.load is refused because it would silently return wrong data. Its GM row "
-      << "gap is " << gap << " 32-byte blocks (" << whole_rows << " tensor rows - " << loaded_rows
-      << " loaded rows), above the " << kNzMaxGmGapBlocks
-      << " that the hardware's strided GM->L1 copy can encode. pto-isa's TLoadGm2L1Nz2nz truncates that "
-      << "gap to 16 bits with no range check, so the load would read the wrong fractals and the kernel "
-      << "would return wrong numbers with no error at run time.\n"
-      << "This is NOT an expected pl.NZ limitation: it is a temporary correctness guard, and it is "
-      << "removed once pto-isa fixes the truncation (hw-native-sys/pto-isa#317).\n"
-      << "Workarounds: load a taller row tile -- the gap is (rows - loaded rows), so it shrinks as the "
-      << "tile grows -- or annotate the tensor rank-3 with the stacked axis as the batch "
-      << "([LAYERS, K, N]), whose extent then rides the batch stride instead of the burst gap.";
+      << "NZ layout: the multi-burst tile.load requires a GM row gap of " << gap
+      << " 32-byte blocks, exceeding the 16-bit stride supported for this target."
+      << " Load more rows per tile or keep the weight in ND.";
 }
 
 /// Rewrite the elements of a ``MakeTuple`` coordinate argument into blocked NZ
@@ -398,7 +370,8 @@ ExprPtr BlockTupleArg(const ExprPtr& arg, const std::vector<ExprPtr>& parent_sha
 
 class BlockNzMutator : public IRMutator {
  public:
-  explicit BlockNzMutator(tensor_view_semantics::NzOffsetFacts facts) : facts_(std::move(facts)) {}
+  BlockNzMutator(tensor_view_semantics::NzOffsetFacts facts, NzTypeRewriter& types, bool legacy_blocked)
+      : facts_(std::move(facts)), types_(types), legacy_blocked_(legacy_blocked) {}
 
   void AddSubstitution(const VarPtr& old_var, const VarPtr& new_var) { var_cache_[old_var] = new_var; }
 
@@ -406,7 +379,7 @@ class BlockNzMutator : public IRMutator {
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = var_cache_.find(op);
     if (it != var_cache_.end()) return it->second;
-    auto new_type = BlockNzType(op->GetType(), op->span_);
+    auto new_type = types_.Rewrite(op->GetType(), op->span_);
     if (new_type.get() == op->GetType().get()) {
       var_cache_[op] = op;
       return op;
@@ -420,7 +393,7 @@ class BlockNzMutator : public IRMutator {
     auto it = var_cache_.find(op);
     if (it != var_cache_.end()) return it->second;
     auto new_init = IRMutator::VisitExpr(op->initValue_);
-    auto new_type = BlockNzType(op->GetType(), op->span_);
+    auto new_type = types_.Rewrite(op->GetType(), op->span_);
     if (new_init.get() == op->initValue_.get() && new_type.get() == op->GetType().get()) {
       var_cache_[op] = op;
       return op;
@@ -438,15 +411,15 @@ class BlockNzMutator : public IRMutator {
     std::vector<ExprPtr> new_args = visited->args_;
     bool args_changed = visited.get() != op.get();
 
-    // Scan *every* operand, not just the first. An NZ tensor can appear in any
-    // position — `tile.store`'s destination is argument 2 — and phase 1 has
-    // already blocked its type by the time we get here. An operand this pass
-    // does not recognise must be rejected rather than left with logical
-    // coordinates pointing into a blocked tensor.
+    // The original operand records the coordinates used by this call. After
+    // visiting, both old blocked values and fresh promotions have blocked types.
     std::vector<size_t> nz_args;
-    for (size_t i = 0; i < new_args.size(); ++i) {
-      auto tensor = AsVarLike(new_args[i]);
-      if (tensor && IsNzTensorType(tensor->GetType())) nz_args.push_back(i);
+    for (size_t i = 0; !legacy_blocked_ && i < op->args_.size(); ++i) {
+      const auto& type = op->args_[i]->GetType();
+      auto tensor = AsTensorTypeLike(type);
+      if (tensor && IsNzTensorType(type) && !tensor_view_semantics::IsNzBlocked(*tensor)) {
+        nz_args.push_back(i);
+      }
     }
 
     // A call to another function just forwards the tensor; the callee's own
@@ -457,19 +430,22 @@ class BlockNzMutator : public IRMutator {
       const bool is_load = IsOp(op, "tile.load");
       const bool is_slice = IsOp(op, "tensor.slice");
       const bool is_flatten = IsWholeTensorFlatten(op);
-      CHECK_SPAN(is_store || ((is_load || is_slice || is_flatten) && nz_args.size() == 1 && nz_args[0] == 0),
+      const bool is_backing_alias =
+          IsOp(op, "tensor.view") && nz_args.size() == 1 && nz_args[0] == 0 && !IsNzTensorType(op->GetType());
+      CHECK_SPAN(is_store || ((is_load || is_slice || is_flatten || is_backing_alias) &&
+                              nz_args.size() == 1 && nz_args[0] == 0),
                  op->span_)
           << "NZ layout currently supports only 'tile.load' and 'tensor.slice' reading the tensor as "
-          << "their source, a whole-tensor 'tensor.reshape' flatten, and supported 'tile.store' "
-          << "destinations, but it is used by '" << op->op_->name_ << "' at argument " << nz_args[0]
-          << ". Use pl.ND for unsupported NZ consumers or writers.";
+          << "their source, a whole-tensor 'tensor.reshape' flatten, a 'tensor.view' backing alias, "
+          << "and supported 'tile.store' destinations, but it is used by '" << op->op_->name_
+          << "' at argument " << nz_args[0] << ". Use pl.ND for unsupported NZ consumers or writers.";
       auto logical_type = AsTensorTypeLike(op->args_[is_store ? 2 : 0]->GetType());
       INTERNAL_CHECK_SPAN(logical_type, op->span_)
           << "Internal error: the NZ source of '" << op->op_->name_ << "' must be a tensor";
       const std::vector<ExprPtr>& logical_shape = logical_type->shape_;
-      // The flatten keeps its arguments: the element count is layout-invariant
-      // and the result is already ND.
-      if (!is_flatten) {
+      // The flatten and ND backing alias keep their arguments: the element
+      // count / backing geometry are already in target coordinates.
+      if (!is_flatten && !is_backing_alias) {
         args_changed = true;
         if (is_store) {
           new_args = BlockTileStoreArgs(op, std::move(new_args), logical_shape);
@@ -480,8 +456,25 @@ class BlockNzMutator : public IRMutator {
       }
     }
 
-    auto new_return_type = BlockNzType(visited->GetType(), op->span_);
+    auto new_return_type = types_.Rewrite(visited->GetType(), op->span_);
     const bool type_changed = new_return_type.get() != op->GetType().get();
+    if (type_changed && !legacy_blocked_ && IsOp(op, "tensor.create") && !new_args.empty()) {
+      // Keep tensor.create's shape argument aligned with its blocked return type
+      // so text serialization / RoundtripInstrument re-deduces the rank-5 shape.
+      if (auto blocked_tensor = AsTensorTypeLike(new_return_type)) {
+        auto shape_span = new_args[0] ? new_args[0]->span_ : op->span_;
+        new_args[0] = std::make_shared<MakeTuple>(blocked_tensor->shape_, shape_span);
+        args_changed = true;
+      }
+    }
+    if (type_changed && !legacy_blocked_ && IsOp(op, "tensor.view") && new_args.size() >= 2) {
+      if (auto blocked_tensor = AsTensorTypeLike(new_return_type);
+          blocked_tensor && IsNzTensorType(new_return_type)) {
+        auto shape_span = new_args[1] ? new_args[1]->span_ : op->span_;
+        new_args[1] = std::make_shared<MakeTuple>(blocked_tensor->shape_, shape_span);
+        args_changed = true;
+      }
+    }
     if (!args_changed && !type_changed) return op;
 
     // Direct ctor, not OpRegistry::Create: re-deducing ``tile.load``'s type
@@ -497,7 +490,7 @@ class BlockNzMutator : public IRMutator {
     // its geometry, including the tensor elements before the TaskId suffix.
     auto visited = As<Submit>(IRMutator::VisitExpr_(op));
     INTERNAL_CHECK_SPAN(visited, op->span_) << "Internal error: Submit mutation must preserve its kind";
-    auto new_type = BlockNzType(visited->GetType(), op->span_);
+    auto new_type = types_.Rewrite(visited->GetType(), op->span_);
     if (new_type.get() == visited->GetType().get()) return visited;
     return std::make_shared<Submit>(visited->op_, visited->args_, visited->deps_, visited->kwargs_,
                                     visited->attrs_, std::move(new_type), visited->span_, visited->core_num_,
@@ -514,6 +507,12 @@ class BlockNzMutator : public IRMutator {
   }
 
  private:
+  static const backend::BackendHandler* GetConfiguredHandler() {
+    if (!backend::BackendConfig::IsConfigured()) return nullptr;
+    const auto* ctx = PassContext::Current();
+    return ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
+  }
+
   /// Lower a proven Acc or supported Vec -> NZ store. Reuse the existing fourth operand
   /// for the physical partition; deriving it in the emitter from the 2-D tile
   /// would lose the NZ column-block / row-fractal axes.
@@ -521,11 +520,7 @@ class BlockNzMutator : public IRMutator {
                                           const std::vector<ExprPtr>& logical_shape) {
     INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, op->span_)
         << "Internal error: tile.store expects (tile, offsets, tensor[, shapes])";
-    const auto* ctx = PassContext::Current();
-    const backend::BackendHandler* handler = nullptr;
-    if (backend::BackendConfig::IsConfigured()) {
-      handler = ctx ? ctx->GetBackendHandler() : backend::BackendConfig::GetBackend()->GetHandler();
-    }
+    const auto* handler = GetConfiguredHandler();
     auto tile = As<TileType>(op->args_[0]->GetType());
     auto tensor = AsTensorTypeLike(op->args_[2]->GetType());
     INTERNAL_CHECK_SPAN(tile && tensor, op->span_)
@@ -807,25 +802,30 @@ class BlockNzMutator : public IRMutator {
     // otherwise (``src/backend/common/pto_ops_memory.cpp``). Measure the same
     // tuple: a narrowed valid_shape loads fewer row fractals and leaves a
     // larger gap than shapes alone would suggest.
-    CheckNzGmGapFitsBurstStride(tensor_type->shape_, args.size() >= 4 ? args[3] : args[2], op->span_);
+    const auto* handler = GetConfiguredHandler();
+    if (!handler || !handler->SupportsWideNzLoadGap()) {
+      CheckNzGmGapFitsBurstStride(tensor_type->shape_, args.size() >= 4 ? args[3] : args[2], op->span_);
+    }
     return args;
   }
 
   tensor_view_semantics::NzOffsetFacts facts_;
+  NzTypeRewriter& types_;
+  bool legacy_blocked_;
   std::unordered_map<VarPtr, VarPtr> var_cache_;
 };
 
 /// Block one function: params, return types, body. Returns the input unchanged
 /// when the function carries no NZ tensor.
 FunctionPtr TransformFunction(const FunctionPtr& func) {
-  if (func->HasAttr(kNzBlockedAttr)) return func;
-
+  const bool legacy_blocked = func->GetAttr<bool>(kAttrNzTensorViewsBlocked, false);
+  NzTypeRewriter types(legacy_blocked);
   bool params_changed = false;
   std::vector<VarPtr> new_params;
   new_params.reserve(func->params_.size());
   std::unordered_map<VarPtr, VarPtr> param_substitutions;
   for (const auto& old_param : func->params_) {
-    auto new_type = BlockNzType(old_param->GetType(), old_param->span_);
+    auto new_type = types.Rewrite(old_param->GetType(), old_param->span_);
     if (new_type.get() == old_param->GetType().get()) {
       new_params.push_back(old_param);
       continue;
@@ -840,14 +840,14 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   std::vector<TypePtr> new_return_types;
   new_return_types.reserve(func->return_types_.size());
   for (const auto& rt : func->return_types_) {
-    auto new_rt = BlockNzType(rt, func->span_);
+    auto new_rt = types.Rewrite(rt, func->span_);
     if (new_rt.get() != rt.get()) returns_changed = true;
     new_return_types.push_back(std::move(new_rt));
   }
 
   // The store owns the maps the facts read, so it must outlive the mutator.
-  NzOffsetFactStore fact_store(func->body_);
-  BlockNzMutator mutator(fact_store.Facts());
+  NzOffsetFactStore fact_store(legacy_blocked ? nullptr : func->body_);
+  BlockNzMutator mutator(fact_store.Facts(), types, legacy_blocked);
   for (const auto& [old_var, new_var] : param_substitutions) {
     mutator.AddSubstitution(old_var, new_var);
   }
@@ -855,7 +855,7 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
   if (func->body_) new_body = mutator.VisitStmt(func->body_);
   const bool body_changed = new_body.get() != func->body_.get();
 
-  if (!params_changed && !returns_changed && !body_changed) return func;
+  if (!legacy_blocked && !params_changed && !returns_changed && !body_changed) return func;
 
   auto new_func = MutableCopy(func);
   if (params_changed) new_func->params_ = std::move(new_params);
@@ -869,8 +869,41 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
       value = std::move(*remapped);
     }
   }
-  new_func->attrs_.emplace_back(kNzBlockedAttr, std::any(true));
+  if (legacy_blocked) {
+    auto& attrs = new_func->attrs_;
+    attrs.erase(std::remove_if(attrs.begin(), attrs.end(),
+                               [](const auto& attr) { return attr.first == kAttrNzTensorViewsBlocked; }),
+                attrs.end());
+  }
   return new_func;
+}
+
+}  // namespace
+
+ProgramPtr tensor_view_semantics::RestoreLegacyBlockedNzViews(const ProgramPtr& program) {
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions;
+  bool changed = false;
+  for (const auto& [gv, func] : program->functions_) {
+    auto restored = func->GetAttr<bool>(kAttrNzTensorViewsBlocked, false) ? TransformFunction(func) : func;
+    changed |= restored.get() != func.get();
+    functions.emplace(gv, std::move(restored));
+  }
+  if (!changed) return program;
+  return std::make_shared<Program>(std::move(functions), program->name_, program->span_);
+}
+
+namespace {
+
+ProgramPtr BlockProgramNzViews(const ProgramPtr& program) {
+  bool modified = false;
+  std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
+  for (const auto& [gvar, func] : program->functions_) {
+    auto new_func = TransformFunction(func);
+    if (new_func.get() != func.get()) modified = true;
+    new_functions[gvar] = std::move(new_func);
+  }
+  if (!modified) return program;
+  return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
 }
 
 }  // namespace
@@ -878,18 +911,34 @@ FunctionPtr TransformFunction(const FunctionPtr& func) {
 namespace pass {
 
 Pass BlockNzTensorViews() {
-  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    bool modified = false;
-    std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
-    for (const auto& [gvar, func] : program->functions_) {
-      auto new_func = TransformFunction(func);
-      if (new_func.get() != func.get()) modified = true;
-      new_functions[gvar] = std::move(new_func);
+  return CreateProgramPass(BlockProgramNzViews, "BlockNzTensorViews", kBlockNzTensorViewsProperties);
+}
+
+Pass PrepareIntermediateTensorLayouts() {
+  auto prepare = [](const ProgramPtr& program) -> ProgramPtr {
+    const auto storage = auto_layout::AnalyzeOrchestration(program);
+    const auto has_private_nz = [&](const auto& names) {
+      return std::any_of(names.begin(), names.end(), [&](const auto& binding) {
+        const auto& [var, name] = binding;
+        if (!storage.internal_buffers.count(name) || storage.external_outputs.count(name) ||
+            storage.nz_ineligible_names.count(name)) {
+          return false;
+        }
+        const auto tensor = As<TensorType>(var->GetType());
+        return tensor && IsNzTensorType(tensor) && !tensor_view_semantics::IsNzBlocked(*tensor);
+      });
+    };
+    // A callee can be shared by an external and a private buffer, so keep
+    // logical coordinates across the call graph until AutoLayout specializes it.
+    if (has_private_nz(storage.gm_names)) return program;
+    for (const auto& [_, sites] : storage.call_sites) {
+      for (const auto& site : sites) {
+        if (has_private_nz(site.gm_names)) return program;
+      }
     }
-    if (!modified) return program;
-    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
+    return BlockProgramNzViews(program);
   };
-  return CreateProgramPass(pass_func, "BlockNzTensorViews", kBlockNzTensorViewsProperties);
+  return CreateProgramPass(prepare, "PrepareIntermediateTensorLayouts", kBlockNzTensorViewsProperties);
 }
 
 }  // namespace pass

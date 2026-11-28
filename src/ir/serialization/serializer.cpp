@@ -428,6 +428,8 @@ class IRSerializer::Impl {
     }
     tv_map["pad"] = msgpack::object(pad_str, zone);
 
+    if (tensor_view->nz_blocked) tv_map["nz_blocked"] = msgpack::object(true);
+
     return msgpack::object(tv_map, zone);
   }
 

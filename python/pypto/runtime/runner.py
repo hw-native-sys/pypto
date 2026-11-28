@@ -46,7 +46,7 @@ from ctypes import _SimpleCData
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import torch
 
@@ -59,7 +59,7 @@ from pypto._target import (
     _warn_deprecated_platform,
 )
 from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
+from pypto.ir.pass_manager import InputLayoutPolicy, OptimizationStrategy, PassDumpLevel
 from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
 
 from .device_tensor import DeviceTensor
@@ -399,6 +399,7 @@ class RunConfig:
     cache_config: CacheConfig | None = None
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
+    input_layout_policy: InputLayoutPolicy | None = field(default=None, kw_only=True)
     memory_planner: MemoryPlanner | None = None
     dump_ptoas_passes: bool = False
     enable_software_pipeline: bool | None = None
@@ -447,6 +448,7 @@ class RunConfig:
             cache_config: CacheConfig | None = ...,
             distributed_config: "DistributedConfig | None" = ...,
             analyze_auto_scopes_for_deps: bool = ...,
+            input_layout_policy: InputLayoutPolicy | None = ...,
             memory_planner: MemoryPlanner | None = ...,
             dump_ptoas_passes: bool = ...,
             enable_software_pipeline: bool | None = ...,
@@ -597,6 +599,7 @@ class RunConfig:
             backend_type=self.backend_type,
             execution_mode=self.execution_mode,
             strategy=self.strategy,
+            input_layout_policy=self.input_layout_policy,
             dump_passes=self.dump_passes,
             dump_ptoas_passes=self.dump_ptoas_passes,
             profiling=self.compile_profiling,
@@ -916,6 +919,7 @@ class CompileOptions:
     diagnostic_phase: DiagnosticPhase | None = None
     disabled_diagnostics: DiagnosticCheckSet | None = None
     analyze_auto_scopes_for_deps: bool = False
+    input_layout_policy: InputLayoutPolicy | None = field(default=None, kw_only=True)
     # Absent rather than ``None`` in ``as_compile_kwargs`` when unset, so
     # ``ir.compile``'s own default applies. That is load-bearing for
     # ``memory_planner`` and ``enable_software_pipeline``: explicit values are
@@ -950,7 +954,13 @@ class CompileOptions:
             "disabled_diagnostics": self.disabled_diagnostics,
             "analyze_auto_scopes_for_deps": self.analyze_auto_scopes_for_deps,
         }
-        for name in ("output_dir", "memory_planner", "distributed_config", "enable_software_pipeline"):
+        for name in (
+            "input_layout_policy",
+            "output_dir",
+            "memory_planner",
+            "distributed_config",
+            "enable_software_pipeline",
+        ):
             value = getattr(self, name)
             if value is not None:
                 kwargs[name] = value
@@ -1318,6 +1328,55 @@ def _build_call_config(  # pyright: ignore[reportUnusedFunction]
     return cfg
 
 
+_DirectoryArgs: TypeAlias = "list[torch.Tensor | DeviceTensor | _SimpleCData[Any]]"
+
+
+def _prepare_directory_args(
+    work_dir: Path,
+    args: _DirectoryArgs,
+    *,
+    caller_name: str,
+    for_reference: bool = False,
+) -> tuple[_DirectoryArgs, _DirectoryArgs]:
+    """Bind full PROGRAM args from the sidecar and retain authored inputs for golden."""
+    from pypto.ir._artifact_metadata import _COMPILED_META_FILENAME, ArtifactMetadata  # noqa: PLC0415
+    from pypto.ir.compiled_program import (  # noqa: PLC0415
+        _coerce_args,
+        _input_requires_packing,
+        _prepare_weight_tensor,
+    )
+
+    if not (work_dir / _COMPILED_META_FILENAME).exists():
+        return args, args
+    metadata = ArtifactMetadata.read(work_dir)
+    changed = [
+        (slot, param)
+        for slot, (param, lowered) in enumerate(zip(metadata.parameters, metadata.lowered_parameters))
+        if _input_requires_packing(param, lowered)
+    ]
+    if not changed:
+        return args, args
+
+    dispatch, _ = _coerce_args(
+        tuple(args),
+        list(metadata.parameters),
+        [],
+        [],
+        caller_name=caller_name,
+        lowered_param_infos=metadata.lowered_parameters,
+    )
+    reference = args
+    if for_reference:
+        reference = args.copy()
+        for slot, param in changed:
+            arg = args[slot]
+            if isinstance(arg, torch.Tensor):
+                reference[slot] = _prepare_weight_tensor(
+                    arg, param, param.layout, default_source=param.layout
+                )
+    return dispatch, reference
+
+
 # Reached only through function-scope lazy imports (pyright's unused analysis
 # discounts cross-module references to private symbols).
 def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
@@ -1374,12 +1433,23 @@ def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
     result = golden_module.generate_inputs(params)
 
     output_names = set(getattr(golden_module, "__outputs__", []))
-    orch_args, _all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
+    orch_args, all_tensors, inputs, outputs = build_orch_args_from_inputs(result, output_names)
 
-    # Load pre-computed golden from data/out/ if available
+    # Load pre-computed golden from data/out/ if available.
     out_dir = golden_path.parent / "data" / "out"
     golden_out = _load_golden_from_data_dir(out_dir, output_names)
+    dispatch_args, reference_args = _prepare_directory_args(
+        work_dir,
+        orch_args,
+        caller_name="golden.py",
+        for_reference=golden_out is None,
+    )
     if golden_out is None:
+        if reference_args is not orch_args:
+            for name, arg in zip(all_tensors, reference_args, strict=True):
+                if name in inputs:
+                    assert isinstance(arg, torch.Tensor)
+                    inputs[name] = arg
         golden_out = {k: v.clone() for k, v in outputs.items()}
         golden_with_inputs = {**inputs, **golden_out}
         golden_module.compute_golden(golden_with_inputs, params)
@@ -1393,7 +1463,7 @@ def _execute_golden_case(  # pyright: ignore[reportUnusedFunction]
     def _run_pass(pass_dfx: "DfxOptions") -> None:
         _execute_on_device(
             chip_callable,
-            orch_args,
+            dispatch_args,
             platform,
             runtime_name,
             device_id,
@@ -1921,13 +1991,14 @@ def execute_compiled(  # noqa: PLR0913
     *without* a config.
 
     Emits a :class:`DeprecationWarning` and forwards to the same implementation
-    the artifact path uses. Behaviour of this function is unchanged; only the
-    name is going away.
+    the artifact path uses. Artifacts with a changed input layout accept the
+    same logical or prepared host tensors as the compiled program.
     """
     warnings.warn(_EXECUTE_COMPILED_DEPRECATION, DeprecationWarning, stacklevel=2)
+    dispatch_args, _ = _prepare_directory_args(Path(work_dir), args, caller_name="execute_compiled()")
     _execute_compiled(
         work_dir,
-        args,
+        dispatch_args,
         platform=platform,
         device_id=device_id,
         dfx=dfx,

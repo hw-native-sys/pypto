@@ -96,6 +96,7 @@ void ClearRedundantFullValidShape(std::vector<ExprPtr>& valid_shape, const std::
 }
 
 void ValidateTensorViewValues(const TensorView& view) {
+  CHECK(!view.nz_blocked || view.layout == TensorLayout::NZ) << "nz_blocked requires an NZ TensorView";
   detail::CheckValueOperands(view.stride, Span::unknown(), "TensorView stride");
   detail::CheckValueOperands(view.valid_shape, Span::unknown(), "TensorView valid_shape");
 }
@@ -386,20 +387,25 @@ ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::o
     : ShapedType(dtype, MakeShapeExprs(shape), std::move(memref)) {}
 
 TensorView::TensorView(std::vector<ExprPtr> stride_, TensorLayout layout_, std::vector<ExprPtr> valid_shape_,
-                       PadValue pad_)
-    : stride(std::move(stride_)), layout(layout_), valid_shape(std::move(valid_shape_)), pad(pad_) {
+                       PadValue pad_, bool nz_blocked_)
+    : stride(std::move(stride_)),
+      layout(layout_),
+      valid_shape(std::move(valid_shape_)),
+      pad(pad_),
+      nz_blocked(nz_blocked_) {
   ValidateTensorViewValues(*this);
 }
 
 TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout layout_,
-                       const std::vector<int64_t>& valid_shape_ints, PadValue pad_)
-    : layout(layout_), pad(pad_) {
+                       const std::vector<int64_t>& valid_shape_ints, PadValue pad_, bool nz_blocked_)
+    : layout(layout_), pad(pad_), nz_blocked(nz_blocked_) {
   for (int64_t s : stride_ints) {
     stride.push_back(std::make_shared<ConstInt>(s, DataType::INDEX, Span::unknown()));
   }
   for (int64_t v : valid_shape_ints) {
     valid_shape.push_back(std::make_shared<ConstInt>(v, DataType::INDEX, Span::unknown()));
   }
+  ValidateTensorViewValues(*this);
 }
 
 TileView::TileView(std::vector<ExprPtr> valid_shape_, std::vector<ExprPtr> stride_, ExprPtr start_offset_,

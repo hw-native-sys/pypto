@@ -11,6 +11,7 @@
 
 import logging
 import os
+import shutil
 import tempfile
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
@@ -35,14 +36,15 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core import log_debug as _log_debug
 from pypto.pypto_core import passes as _passes
 
-from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
+from .pass_manager import InputLayoutPolicy, OptimizationStrategy, PassDumpLevel, PassManager
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from ._distributed_input_layout import DistributedInputLayout
     from .compiled_artifact import CompiledArtifact
     from .compiled_program import CompiledProgram
-    from .distributed_compiled_program import DistributedCompiledProgram
+    from .distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
     from .param_info import ParamInfo
 
 
@@ -140,6 +142,7 @@ class _CompilationResult(NamedTuple):
     logical_parameters: "list[ParamInfo] | None"
     return_aliases: tuple[int, ...] | None
     runtime_name: str
+    distributed_input_layouts: "dict[int, DistributedInputLayout]"
 
 
 def _is_distributed(program: _ir_core.Program) -> bool:
@@ -147,6 +150,21 @@ def _is_distributed(program: _ir_core.Program) -> bool:
         f.level is not None and _ir_core.level_to_linqu_level(f.level) >= 3
         for f in program.functions.values()
     )
+
+
+def _host_input_layout_config(
+    program: _ir_core.Program,
+    policy: InputLayoutPolicy | None,
+    config: "DistributedConfig | None",
+) -> "DistributedConfig | None":
+    """Snapshot the topology used to select named HOST input layouts."""
+    if policy is None or not policy.nz_inputs or not _is_distributed(program):
+        return None
+    if config is None:
+        from .distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        return DistributedConfig()
+    return replace(config, device_ids=list(config.device_ids))
 
 
 def _select_backend(*, backend_type: BackendType, platform: str | None) -> BackendType:
@@ -210,6 +228,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
     enable_software_pipeline: bool | None = None,
     runtime: _passes.RuntimeKind | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    input_layout_policy: InputLayoutPolicy | None = None,
+    host_world_size: int | None = None,
     extra_instruments: tuple[_passes.PassInstrument, ...] = (),
     inherit_outer_report_instruments: bool = True,
     dump_passes: bool | PassDumpLevel = False,
@@ -285,6 +305,8 @@ def _run_pass_pipeline(  # noqa: PLR0913
         pm = PassManager.get_strategy(
             strategy,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            input_layout_policy=input_layout_policy,
+            host_world_size=host_world_size,
         )
         with passes_stage:
             transformed_program = pm.run_passes(
@@ -341,6 +363,7 @@ def compile(  # noqa: PLR0913
     execution_mode: ExecutionMode | None = None,
     distributed_config: Any = None,
     analyze_auto_scopes_for_deps: bool = False,
+    input_layout_policy: InputLayoutPolicy | None = None,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
@@ -426,6 +449,10 @@ def compile(  # noqa: PLR0913
         execution_mode: Simulator or onboard execution. Defaults to SIM when
             platform is absent, otherwise inherits the legacy platform. An
             explicit mode must agree with an explicit platform.
+        input_layout_policy: Per-input ND/NZ permissions for AutoLayout. A
+            distributed policy requires static read-only HOST weight banks or
+            complete matrices on a single device, and a native decision for
+            every offered slot.
         distributed_config: Optional :class:`DistributedConfig` for L3+
             distributed programs.  When ``None`` (default), auto-detected
             from the program: if L3+ functions are found, a default
@@ -468,6 +495,10 @@ def compile(  # noqa: PLR0913
 
     if platform is not None:
         _warn_deprecated_platform("ir.compile")
+    layout_config = _host_input_layout_config(program, input_layout_policy, distributed_config)
+    host_world_size = len(layout_config.device_ids) if layout_config is not None else None
+    if layout_config is not None:
+        distributed_config = layout_config
     result = _compile_to_files(
         program,
         contract=ArtifactExecutionMode.PROGRAM,
@@ -486,6 +517,8 @@ def compile(  # noqa: PLR0913
         platform=platform,
         execution_mode=execution_mode,
         analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+        input_layout_policy=input_layout_policy,
+        host_world_size=host_world_size,
         emit_source_loc=emit_source_loc,
         dump_ptoas_passes=dump_ptoas_passes,
         runtime=runtime,
@@ -508,6 +541,8 @@ def compile(  # noqa: PLR0913
                 distributed_config if distributed_config is not None else DistributedConfig(),
                 runtime=result.runtime_name,
             ),
+            _input_layouts=result.distributed_input_layouts,
+            _input_layout_world_size=host_world_size if result.distributed_input_layouts else None,
         )
 
     names = multi_chip_orch_names(lowered_program)
@@ -602,17 +637,26 @@ def _compile_to_files(  # noqa: PLR0913
     platform: str | None = None,
     execution_mode: ExecutionMode | None = None,
     analyze_auto_scopes_for_deps: bool = False,
+    input_layout_policy: InputLayoutPolicy | None = None,
+    host_world_size: int | None = None,
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
 ) -> _CompilationResult:
     """Run shared contract analysis, passes and codegen without execution wrappers."""
+    from ._artifact_metadata import _DISTRIBUTED_META_FILENAME, _remove_meta  # noqa: PLC0415
     from ._compile_contract import (  # noqa: PLC0415
         analyze_contract,
         entry_function,
         external_parameter_names,
         validate_kernel_host_access,
         validate_lowered_signature,
+    )
+    from ._distributed_input_layout import (  # noqa: PLC0415
+        _HOST_PATH,
+        _bind_layout_entry,
+        _invalidate_layout_entry,
+        _validate_input_layouts,
     )
     from .param_info import _extract_func_param_infos  # noqa: PLC0415
 
@@ -643,7 +687,16 @@ def _compile_to_files(  # noqa: PLR0913
         prof.__enter__()
         owns_profiler = True
 
-    report_dir = os.path.join(output_dir, "report")
+    offered = () if input_layout_policy is None else input_layout_policy.nz_inputs
+    # Keep pass diagnostics beside the destination until a requested layout is
+    # proven. A failed policy validation can then leave an existing build intact.
+    staging = (
+        tempfile.TemporaryDirectory(prefix=".input-layout-", dir=Path(output_dir).resolve().parent)
+        if offered and _is_distributed(program)
+        else None
+    )
+    pass_output = staging.name if staging is not None else output_dir
+    report_dir = os.path.join(pass_output, "report")
     os.makedirs(report_dir, exist_ok=True)
     report_instrument = _passes.ReportInstrument(report_dir)
 
@@ -667,11 +720,21 @@ def _compile_to_files(  # noqa: PLR0913
             enable_software_pipeline=enable_software_pipeline,
             runtime=runtime,
             analyze_auto_scopes_for_deps=analyze_auto_scopes_for_deps,
+            input_layout_policy=input_layout_policy,
+            host_world_size=host_world_size,
             extra_instruments=(report_instrument,),
             dump_passes=dump_passes,
-            passes_dump_dir=os.path.join(output_dir, "passes_dump"),
+            passes_dump_dir=os.path.join(pass_output, "passes_dump"),
         )
         transformed_program = pipeline.transformed_program
+        distributed_layouts = (
+            _validate_input_layouts(program, transformed_program, offered, host_world_size)
+            if _is_distributed(transformed_program)
+            else {}
+        )
+        if staging is not None:
+            shutil.copytree(pass_output, output_dir, dirs_exist_ok=True)
+            report_dir = os.path.join(output_dir, "report")
         mplan = pipeline.memory_planner
         effective_backend_type = pipeline.backend_type
         effective_runtime = pipeline.runtime
@@ -688,6 +751,10 @@ def _compile_to_files(  # noqa: PLR0913
 
         # Codegen target selection is owned by the per-backend BackendHandler;
         # any value of the ``BackendType`` enum is a valid PTO codegen target.
+        output_path = Path(output_dir)
+        invalidated_layout_entry = _invalidate_layout_entry(output_path, selected=bool(distributed_layouts))
+        if invalidated_layout_entry:
+            _remove_meta(output_path, _DISTRIBUTED_META_FILENAME)
         try:
             with _stage("codegen"):
                 files = generate(
@@ -701,14 +768,29 @@ def _compile_to_files(  # noqa: PLR0913
                     **({"kernel_entry_scalar_count": kernel_scalar_count} if kernel_scalar_count else {}),
                 )
         except PartialCodegenError as exc:
-            _write_files(exc.files, output_dir)
+            # Leave the invalidation marker in place if codegen emitted a
+            # partial HOST entry along with potentially incompatible kernels.
+            partial = dict(exc.files)
+            if invalidated_layout_entry:
+                partial.pop(_HOST_PATH, None)
+            _write_files(partial, output_dir)
             raise
+        _bind_layout_entry(
+            files,
+            output_path,
+            transformed_program,
+            distributed_layouts,
+            world_size=host_world_size,
+            invalidated=invalidated_layout_entry,
+        )
         _write_files(files, output_dir)
         _ensure_orchestration_headers(output_dir)
     finally:
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)
             prof.write_report(report_dir)
+        if staging is not None:
+            staging.cleanup()
 
     # Name the artifact root in resolved absolute form so a user at DEBUG can
     # open the generated .pto / kernels directly. realpath matches
@@ -725,6 +807,7 @@ def _compile_to_files(  # noqa: PLR0913
         logical,
         aliases,
         runtime_implementation_name(effective_runtime, platform),
+        distributed_layouts,
     )
 
 

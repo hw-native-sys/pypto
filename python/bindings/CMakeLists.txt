@@ -27,9 +27,6 @@ set(PYPTO_BINDING_SOURCES
 )
 
 # Make paths absolute
-list(TRANSFORM PYPTO_SOURCES PREPEND "${CMAKE_SOURCE_DIR}/")
-
-# Make paths absolute
 list(TRANSFORM PYPTO_BINDING_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 
 # Export to parent scope
@@ -41,7 +38,7 @@ set(PYPTO_BINDING_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR} PARENT_SCOPE)
 # Create the nanobind module
 nanobind_add_module(${LIBRARY_NAME}
     ${PYPTO_BINDING_SOURCES}
-    ${PYPTO_SOURCES}
+    $<TARGET_OBJECTS:pypto_native>
 )
 
 # Set visibility to hidden by default (best practice for Python modules)

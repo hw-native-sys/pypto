@@ -86,6 +86,7 @@ from .param_info import (  # noqa: F401  -- re-export
     _param_info_from_dict,
     _param_info_to_dict,
     _ParamInfo,
+    _reorder_nd_nz,
     _to_torch_dtype,
     bind_complete_args,
     collect_output_values,
@@ -241,6 +242,53 @@ def _build_full_args(
     return all_tensors
 
 
+def _input_requires_packing(before: _ParamInfo, after: _ParamInfo) -> bool:
+    return before.direction == after.direction == ParamDirection.In and (before.layout, after.layout) in (
+        ("ND", "NZ"),
+        ("NZ", "ND"),
+    )
+
+
+def _prepare_weight_tensor(
+    tensor: torch.Tensor,
+    param: _ParamInfo,
+    target: str | None,
+    source: str | None = None,
+    *,
+    default_source: str | None = "ND",
+) -> torch.Tensor:
+    if (
+        param.shape is None
+        or not _matches_torch_dtype(param.dtype, tensor.dtype)
+        or len(param.shape) != tensor.ndim
+        or any(expected >= 0 and expected != actual for expected, actual in zip(param.shape, tensor.shape))
+    ):
+        raise ValueError(
+            f"{param.name!r} expects {param.dtype} {param.shape}, got {tensor.dtype} {tensor.shape}"
+        )
+
+    signature = (tuple(tensor.shape), tensor.dtype, tensor.storage_offset())
+    marker = getattr(tensor, "_pypto_prepared_input", None)
+    if source is None and marker is not None:
+        source, marked_signature = marker
+        if marked_signature != signature or not tensor.is_contiguous():
+            raise ValueError(f"Prepared input {param.name!r} has changed shape, dtype, or storage view")
+    source = default_source if source is None else source
+    if source not in ("ND", "NZ") or target not in ("ND", "NZ"):
+        raise ValueError(f"Unsupported input layout for {param.name!r}: {source} to {target}")
+
+    prepared = _reorder_nd_nz(tensor, source, target)
+    if target != param.layout or target == "NZ":
+        prepared_marker = (target, (tuple(prepared.shape), prepared.dtype, prepared.storage_offset()))
+        if prepared is tensor:
+            if marker == prepared_marker:
+                return prepared
+            # Attest the returned carrier without changing the caller's tensor.
+            prepared = prepared.view_as(prepared)
+        prepared._pypto_prepared_input = prepared_marker  # type: ignore[reportAttributeAccessIssue]
+    return prepared
+
+
 def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/tensor coercion
     args: tuple["CallArg", ...],
     param_infos: list[_ParamInfo],
@@ -280,13 +328,27 @@ def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/
 
     coerced: list[torch.Tensor | DeviceTensor | ctypes._SimpleCData[Any]] = []
     for index, (info, arg) in enumerate(zip(param_infos, all_args, strict=True)):
+        lowered = None
+        if lowered_param_infos is not None and index < len(lowered_param_infos):
+            lowered = lowered_param_infos[index]
+        if lowered is not None and _input_requires_packing(info, lowered):
+            if (lowered.name, lowered.dtype) != (info.name, info.dtype):
+                raise ValueError(f"Incompatible lowered metadata for {info.name!r}")
+            if isinstance(arg, torch.Tensor):
+                coerced.append(_prepare_weight_tensor(arg, info, lowered.layout, default_source=info.layout))
+                continue
+            if isinstance(arg, DeviceTensor):
+                _validate_device_tensor(arg, replace(info, layout="ND"))
+                _validate_device_tensor(arg, lowered)
+                coerced.append(arg)
+                continue
         if info.layout == "NZ" and lowered_param_infos is not None:
             # Binding and output allocation above use the caller signature.
             # NZ validation blocks the argument, so its expected shape must
             # come from the same external slot in the lowered signature.
-            if index >= len(lowered_param_infos) or lowered_param_infos[index].name != info.name:
+            if lowered is None or lowered.name != info.name:
                 raise ValueError(f"Missing lowered NZ parameter {info.name!r}; recompile via ir.compile()")
-            info = replace(info, shape=lowered_param_infos[index].shape)
+            info = replace(info, shape=lowered.shape)
         if info.shape is None:
             if isinstance(arg, torch.Tensor):
                 raise TypeError(f"Parameter {info.name!r} is a scalar ({info.dtype}); got torch.Tensor")
@@ -544,6 +606,63 @@ class _RuntimeFacade:
         """Assembly signature used for NZ argument shape validation."""
         assert self._artifact.metadata is not None
         return self._artifact.metadata.lowered_parameters
+
+    def _prepare_benchmark_args(self, args: Sequence[CallArg]) -> Sequence[CallArg]:
+        """Prepare immutable weights ahead of the benchmark dispatch loop."""
+        params, outputs, returns = self._get_metadata()
+        lowered = self._lowered_param_infos
+        if not any(_input_requires_packing(before, after) for before, after in zip(params, lowered)):
+            return args
+        # Benchmark dispatches reuse the same argument list. The coerced list
+        # owns its packed inputs and any output buffers allocated for return style.
+        coerced, _ = _coerce_args(
+            tuple(args), params, outputs, returns, caller_name="benchmark()", lowered_param_infos=lowered
+        )
+        return coerced
+
+    def prepare_inputs(
+        self, weights: dict[str, torch.Tensor], *, source_layouts: dict[str, str] | None = None
+    ) -> dict[str, torch.Tensor]:
+        """Prepare named read-only weights for the compiled ABI once, for reuse across calls.
+
+        Supply logical ND tensors, or specify the physical order of saved inputs in
+        source_layouts. Prepared tensors retain their logical shape and carry
+        a layout marker on the returned object. Pass that object directly to
+        this program or to a worker. For a copy or view that drops the marker,
+        specify its physical layout when preparing it again.
+        Every slot relaid out by the compiler must appear in weights.
+        """
+        params, _, _ = self._get_metadata()
+        source_layouts = source_layouts or {}
+        if source_layouts.keys() - weights.keys():
+            raise ValueError("Source layouts must name supplied weights")
+        prepared: dict[str, torch.Tensor] = {}
+        for param, lowered in zip(params, self._lowered_param_infos, strict=True):
+            name = param.name
+            if name != lowered.name or lowered.dtype != param.dtype:
+                raise ValueError(f"Incompatible lowered metadata for {name!r}")
+            if name not in weights:
+                # Lowering can discover writes to a tensor or reads of an
+                # authored output. It must preserve existing write access.
+                if lowered.direction != param.direction and (
+                    param.shape is None
+                    or (param.direction != ParamDirection.In and lowered.direction != ParamDirection.InOut)
+                ):
+                    raise ValueError(f"Incompatible lowered direction for {name!r}")
+                if param.layout != lowered.layout:
+                    raise ValueError(f"Input layout policy does not permit changing {name!r}")
+                continue
+            tensor = weights[name]
+            if (
+                param.direction != ParamDirection.In
+                or lowered.direction != ParamDirection.In
+                or param.shape is None
+            ):
+                raise ValueError(f"{name!r} must be a read-only tensor")
+            prepared[name] = _prepare_weight_tensor(tensor, param, lowered.layout, source_layouts.get(name))
+        if missing := weights.keys() - prepared.keys():
+            raise ValueError(f"Unknown entry weights: {sorted(missing)}")
+        return prepared
 
     @property
     def param_names(self) -> list[str]:
@@ -1157,6 +1276,10 @@ class CompiledProgram(_RuntimeFacade):
 
         Scalar parameters (``pl.Scalar[...]``) accept Python ``int``,
         ``float``, ``bool``, or ``ctypes`` scalar values.
+        For read-only parameters relaid out by AutoLayout, pass tensors in the
+        layout declared by the program or the reusable buffers returned by
+        :meth:`prepare_inputs`. DeviceTensor arguments already use the compiled
+        layout because their storage is managed by the caller.
 
         Args:
             *args: Positional arguments — ``torch.Tensor`` for tensor

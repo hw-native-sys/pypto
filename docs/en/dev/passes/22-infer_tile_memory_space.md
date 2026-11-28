@@ -277,3 +277,105 @@ Tile *parameters* are handled by function type, at the start of Phase 1:
 | `AIC` / `AIV` | Accepted, and **seeds** the analysis | These are sub-workers entered from a mixed kernel, so a tile parameter is the ordinary cross-core handoff |
 
 A parameter's space is part of the signature — the caller decides where the tile lives — so this pass never infers it. An `AIC`/`AIV` tile parameter that omits its space is a user error, reported with the annotation to add.
+
+## Optional layout selection in a native pipeline
+
+After `InferTileMemorySpace`, the C++ pass `pypto::ir::pass::AutoLayout()` can select layouts for GM tensors and on-chip tiles. Run `BlockNzTensorViews()` again after selection to lower newly annotated NZ tensors, then continue to backend layout legalization.
+
+The solver ranks assignments by the number of modeled writeback violations, then by estimated cycles. For example, a GM input that the loader supplies in one physical layout must satisfy all its readers. A larger cycle estimate for the feasible assignment does not override that requirement. Consumers of immutable values share one conversion per value and requested layout. Each read of mutable Vec storage pays for its own required conversion. The automatic solver uses exact dynamic programming for connected components within the configured width and evaluation budgets. Wider components use local search. Operators sharing a value form a clique in the solver graph, so a tensor with many consumers can reach the width limit even in a shallow kernel.
+
+Dense min-fill runs on movable components of up to 256 operators. Automatic solving uses local search for larger components and can still solve smaller independent components exactly. An explicit `treewidth_dp` request reports an error if a movable component exceeds the decomposition limit. Whole-graph min-fill diagnostics are available for problems of up to 256 total operators. Above that limit the native result omits the optional report and records both widths as `-1`.
+
+On Ascend910, the backend can issue separate bursts for an NZ GM-to-Mat load whose source gap exceeds the 16-bit DMA stride field. The model uses the same NZ bandwidth for both paths. A separate timing calibration is needed to estimate the cost of the split bursts.
+
+The fallback first scores a greedy assignment with single-operator moves, then tries Fiduccia–Mattheyses (FM) from the original topological assignment. Both searches share the same evaluation budget. Only a better FM assignment replaces the greedy incumbent, and exact solutions for other components stay in place. Each component starts with up to four movable operators spaced across extraction order. Later passes rotate the sample and can widen it to at most sixteen operators when the search stalls. After an empty prefix, the next sample can include a consumer from the best profitable fan-out found during expansion. This gives the group a chance to compete before other moves lock its members.
+
+From its first decision, FM compares changing one active operator with switching the consumers of an incident shared value to a common input layout. Each move locks the operators it changes and activates their neighbors through shared inputs and outputs. The pass retains the lowest-cost prefix of whole moves, including when the budget interrupts the search. After rollback, greedy sweeps can improve the retained assignment by revisiting unlocked operators in the component before FM runs again or returns. The solver reuses a completed greedy sweep if it already established that the assignment offered no improving single-operator move. The status `fm_no_improving_prefix` means the passes tried found no further improvement.
+
+By default, external arguments keep their declared layout. The extractor tracks each internal allocation through SSA assignments and proven call-result aliases. Writeback identifies each tile by its SSA definition at the call site. Two tiles with the same printed name can therefore receive different layouts, including in specialized helpers. Buffers passed to opaque external kernels retain the representation declared by the kernel. Set `options.cost_model.allow_external_input_relayout` only when the caller can supply the selected physical representation. The caller owns boundary packing. Marking a weight in `options.reusable_tensors` amortizes the packing cost. Automatic DN promotion is restricted to eligible internal buffers. To inspect an assignment and its conversion requirements before applying it, use `auto_layout::ExtractLayoutInstance` and `auto_layout::SolveAutoLayout`.
+
+For a paired comparison on the same authored source, use `OptimizationStrategy.Default` and `OptimizationStrategy.AutoLayoutIntermediates`. The latter keeps the physical layout of entry inputs, outputs, InOut state and returned storage. A helper parameter can refer to a private intermediate. Its storage identity determines eligibility. The strategy reconsiders supported ND, DN and logical NZ layouts of private GM allocations together with on-chip tiles. A zero-copy matrix flatten consumed in logical element order keeps the backing representation fixed. A flatten used only for a raw prefetch within the same function can keep the NZ candidate. Opaque calls and backend layout requirements also constrain the candidates. NZ blocking can be deferred when an internal allocation has a logical NZ layout.
+
+A loader can offer ND or NZ for individual read-only entry tensors. For example,
+`policy = ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), expected_uses=100)`
+can be passed as `input_layout_policy=policy` to `ir.compile` or `RunConfig` with an AutoLayout
+strategy. Declare the logical weight as an ordinary dense input. For ND matrix banks, the compiler
+accepts both implicit strides and explicit contiguous row-major strides, including those inferred
+for a complete layer slice. The native extractor resolves
+the named entry parameter to its storage before solving. Other external buffers retain their
+declared representations. Reuse only changes the price of packing. A single-chip program
+accepts weights in their authored layout and packs changed inputs before dispatch, including
+after artifact reload. Call `compiled.prepare_inputs({"w": logical_w})["w"]` to prepare
+the weight once for repeated calls. Pass the returned tensor directly to retain its layout marker.
+For an existing NZ buffer with the original logical shape, specify
+`source_layouts={"w": "NZ"}` when preparing it. A resident `DeviceTensor` must already
+use the compiled layout.
+
+When the loader prepares a weight once and keeps it resident across forwards, use
+`ir.InputLayoutPolicy(nz_inputs=("w",), reusable_tensors=("w",), steady_state=True)`.
+The objective scores one forward and excludes the one-time ND-to-NZ packing cost for
+eligible inputs named in both tuples. Recurring loads, computation, stores and layout
+conversions keep their normal costs, including loop and dispatch multiplicities. The same
+layout eligibility and external ABI rules apply. Leave `expected_uses` at `1` with
+`steady_state=True`. The default finite objective includes the pack and scores
+`expected_uses` forwards.
+
+On a single-device HOST entry, the policy may also select ND or NZ for a dense,
+read-only `[M, N]` weight passed whole to the device. The loader uploads one
+matrix and supplies the kernel with a single device tensor.
+
+For a distributed HOST entry, the policy can offer a dense read-only weight of shape
+`[rank, M, N]` or `[rank, layer, M, N]` when the leading extent matches the configured
+device count. HOST selects a whole shard with one leading-axis index on the input or
+an SSA alias. Device-side consumers read whole matrices. HOST indexing retains the logical shape. NZ
+packing uses independent matrices at each rank and layer, with 16-row blocks
+and a C0 width of `32 / sizeof(dtype)` elements. The artifact records the
+selected layout, logical shape, physical shape, and dtype for every offered
+slot. Compilation requires a native storage decision for each slot.
+
+For named HOST inputs, AutoLayout estimates loops over `pld.world_size()`
+using the compile-time `DistributedConfig.device_ids`. Pass-manager callers
+can supply the same estimate as `host_world_size`. Static loop bounds retain
+their own counts. The estimate does not bind artifact replay to those devices.
+
+A one-shot `DistributedCompiledProgram` call accepts logical ND tensors at
+offered slots. Use `compiled.prepare_input(slot, tensor)` to prepare an immutable
+snapshot once and pass it to repeated calls. Use `source_layout="NZ"` when the
+source is already canonically packed and carried in the original logical
+shape. If dispatching a snapshot as a host argument on a reusable worker, use
+`prepare_input(..., shared=True)` before creating the worker and include the
+snapshot in `compiled.prepare(inherited_host_tensors=[snapshot])`.
+
+For resident weights, use `worker.alloc_input_tensor(compiled, slot, tensor)`
+or pass an existing snapshot as the last argument. The worker uploads the
+selected representation once per shard and verifies its provenance at dispatch.
+To supply a new weight version, prepare or upload a new input. The same
+metadata and loader apply after `DistributedCompiledProgram.from_dir()`.
+Device IDs can be remapped while preserving the compiled rank count.
+All unoffered parameters retain the authored ABI, including prepacked weights,
+quantization scales, outputs and mutable state.
+
+The Python pass factory accepts the same input-packing options through keyword arguments, for example `passes.auto_layout(allow_external_input_relayout=True, reusable_tensors=["w"], expected_uses=100)`. This allows eligible ND inputs to become NZ. To evaluate a previously NZ-packed weight from an ND starting point, first supply its logical ND declaration and bytes. Use the compiled layout metadata to prepare each upload.
+
+For the steady-state objective, call
+`passes.auto_layout(nz_inputs=["w"], reusable_tensors=["w"], steady_state=True)`.
+The corresponding C++ fields are `options.nz_inputs`, `options.reusable_tensors`,
+and `options.cost_model.steady_state`.
+
+A dense flat Vec matrix can switch between row-major and column-major when its geometry and dtype support a physical transpose. Writeback emits a transpose and a zero-copy transpose view. Narrowed-pitch slices retain their original representation; an equal-pitch row-major slice can still be transposed. Shape-changing reshapes preserve their original logical element order, and packed predicates keep their original lane geometry.
+
+Vec tiles that can be written through another alias keep their original backing layouts. When a read needs a different layout, writeback creates a private copy immediately before that read. For example, two stores surrounding an in-place `tile.assemble` each transpose the data present at that store, even when both stores read the same SSA variable.
+
+The extractor estimates live Vec storage within each kernel call site. Implicit cast, CI and sort32 workspaces contribute to Vec pressure during the instruction that uses them. Slices and other zero-copy views keep their backing allocation live through their last use. Several views of the same backing count that storage once. A full-tile transpose needs a scratch tile while it runs and a destination that stays live through its last use. A row broadcast uses one 32-byte block per row for its destination, and a metadata-only reshape uses the existing storage. The estimate includes reserved Vec buffers. A tile defined before a loop and read on subsequent iterations stays live across the loop backedge, as does a converted copy reused there. The solver checks how selected destinations overlap each other and the original allocations. If they exceed capacity, it can retry within its evaluation budget with the conflicting conversions penalized. The allocator checks the final footprint after lowering and reuse. The DP optimality guarantee applies to the cost problem on the domains of that solve. Capacity repair can restrict those domains and return a feasible assignment with a higher modeled cost.
+
+For and While loops keep the declared layout of each Vec carry at initialization, at the actual yield, and on exit. Consumers of an immutable loop argument can share a copy within one iteration, and consumers of an immutable loop result can share a copy outside the loop. Conversions of immutable values defined before the loop can be shared at their producer. The model uses exact trip counts for statically known For bounds, including zero, and multiplies the counts of nested loops. Dynamic For bounds use the existing scalar estimates and fall back to one iteration when no estimate is available. An unknown While count uses one iteration as an estimate. Exiting either loop without executing its body returns the initializer in the carried layout.
+
+In the standard PyPTO compiler, select `ir.OptimizationStrategy.AutoLayout` with `ir.compile(program, strategy=...)` or `RunConfig(strategy=...)`. The strategy runs the native pass immediately after memory inference and re-runs NZ lowering. It preserves caller-owned layouts and reports a compilation error if the solver selects an assignment that the writer cannot materialize. The default strategy remains available for paired comparisons.
+
+Both native AutoLayout tests run in CMake builds with Python bindings enabled or disabled. For a standalone C++ build, initialize the submodules and run these commands from the repository root.
+
+```bash
+cmake -S . -B build -DPYPTO_BUILD_PYTHON_BINDINGS=OFF
+cmake --build build --target pypto_auto_layout_solver_test pypto_auto_layout_pass_test --parallel 1
+ctest --test-dir build -R '^pypto_auto_layout_' --output-on-failure
+```

@@ -31,6 +31,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "pypto/backend/common/backend.h"
@@ -41,7 +42,6 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
-#include "pypto/ir/cast_saturation.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/implicit_vec_scratch.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -332,10 +333,6 @@ std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const Shap
 // Compiler-owned PTO level3 scratch
 // ============================================================================
 
-// Compiler-owned PTO level3 scratch (A2/A3 under PyPTO/DSA-RP planners only).
-constexpr int64_t kA2A3CiScratchColsInt32 = 192;
-constexpr int64_t kA2A3CiScratchColsInt16 = 448;
-
 ExprPtr MakeStaticShape(const std::vector<int64_t>& dims, const Span& span) {
   std::vector<ExprPtr> elements;
   elements.reserve(dims.size());
@@ -408,7 +405,7 @@ class MaterializePtoScratchMutator : public IRMutator {
  public:
   explicit MaterializePtoScratchMutator(const backend::Backend* target,
                                         const StmtPtr& addressless_body = nullptr)
-      : backend_(target), materialize_a2a3_scratch_(target->GetHandler()->RequiresLevel3TmpScratch()) {
+      : backend_(target) {
     if (addressless_body) private_scratch_.emplace(addressless_body);
   }
 
@@ -459,50 +456,17 @@ class MaterializePtoScratchMutator : public IRMutator {
       }
       return PtoScratchSpec{MakeStaticShape(workspace->shape_, span), DataType::UINT8, "gather", 2};
     }
-    if (IsOp(call, "tile.ci") && call->args_.size() == 2) {
-      if (!materialize_a2a3_scratch_) return std::nullopt;
-      auto result_type = As<TileType>(call->GetType());
-      INTERNAL_CHECK_SPAN(result_type, span) << "tile.ci result must be TileType before InitMemRef";
-      // PTOAS v0.60 level3 TCI tmp width: 192 FP32 cols for 32-bit dst, 448 for 16-bit dst.
-      const int64_t cols =
-          result_type->dtype_.GetBit() == 32 ? kA2A3CiScratchColsInt32 : kA2A3CiScratchColsInt16;
-      return PtoScratchSpec{MakeStaticShape({1, cols}, span), DataType::FP32, "ci"};
+    const auto query = QueryImplicitVecScratch(call, *backend_);
+    CHECK_SPAN(!std::holds_alternative<std::string>(query), span)
+        << "InitMemRef: " << std::get<std::string>(query);
+    if (const auto* spec = std::get_if<ImplicitVecScratch>(&query)) {
+      return PtoScratchSpec{std::make_shared<MakeTuple>(spec->shape, span), spec->dtype, spec->name};
     }
-
-    if (IsOp(call, "tile.cast") && call->args_.size() == 1) {
-      auto src_type = As<TileType>(call->args_[0]->GetType());
-      INTERNAL_CHECK_SPAN(src_type, span) << "tile.cast source must be TileType before InitMemRef";
-      const DataType dst = call->GetKwarg<DataType>("target_type");
-      // Ask the backend whether this conversion needs scratch. Caller-provided
-      // scratch is preserved because this arm only handles one-argument casts.
-      const bool saturating = GetEmittedSaturationMode(call) == static_cast<int>(SaturationMode::kOn);
-      const auto plan =
-          backend_->PlanOpScratch("tile.cast", {src_type->dtype_, std::nullopt, dst, saturating, src_type});
-      INTERNAL_CHECK_SPAN(plan, span) << "Internal error: tile.cast scratch rule is not registered";
-      if (plan->status == backend::OpScratchStatus::NotRequired) return std::nullopt;
-      CHECK_SPAN(plan->status == backend::OpScratchStatus::Required, span) << "InitMemRef: " << plan->reason;
-      INTERNAL_CHECK_SPAN(plan->spec, span) << "Internal error: required cast scratch has no spec";
-      const auto& spec = *plan->spec;
-      return PtoScratchSpec{MakeStaticShape({spec.rows, spec.cols}, span), spec.dtype, "tcvt"};
-    }
-
-    if (IsOp(call, "tile.sort32") && call->args_.size() == 2) {
-      auto src_type = As<TileType>(call->args_[0]->GetType());
-      INTERNAL_CHECK_SPAN(src_type, span) << "tile.sort32 source must be TileType before InitMemRef";
-      const auto valid_shape = GetValidShape(src_type);
-      INTERNAL_CHECK_SPAN(valid_shape.size() == 2, span)
-          << "tile.sort32 source must have a 2D valid_shape before InitMemRef";
-      auto valid_cols = As<ConstInt>(valid_shape[1]);
-      if (valid_cols && valid_cols->value_ % 32 == 0) return std::nullopt;
-      return PtoScratchSpec{std::make_shared<MakeTuple>(src_type->shape_, span), src_type->dtype_, "sort32"};
-    }
-
     return std::nullopt;
   }
 
   const backend::Backend* backend_;
   std::optional<PrivateScratchAnalysis> private_scratch_;
-  bool materialize_a2a3_scratch_ = false;
   std::size_t scratch_counter_ = 0;
 };
 

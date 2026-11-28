@@ -28,7 +28,7 @@ import weakref
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
@@ -42,6 +42,7 @@ from .window_sources import normalize_window_sources
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from pypto.ir._distributed_input_layout import DistributedInputLayout, PreparedDistributedInput
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
     from .runner import RunConfig
@@ -618,6 +619,11 @@ def _load_required_callbacks(output_dir: Path) -> set[str]:
     if not manifest.exists():
         return set()
     return set(json.loads(manifest.read_text()))
+
+
+def _snapshot_device_config(dc: DistributedConfig) -> DistributedConfig:
+    """Snapshot live config so the checked rank list also reaches Worker construction."""
+    return replace(dc, device_ids=list(dc.device_ids))
 
 
 def _construct_worker(
@@ -1699,14 +1705,17 @@ def _execute_distributed(  # pyright: ignore[reportUnusedFunction]
     claim_program_mode()
 
     dc = compiled._distributed_config
+    if compiled.input_layouts:
+        dc = _snapshot_device_config(dc)
     output_dir = compiled.output_dir
 
+    param_infos, _, _ = compiled._get_metadata()
+    compiled._validate_artifact_layouts(param_infos, world_size=len(dc.device_ids))
     chip_callables, runtime_name, enable_sdma = _assemble_chip_callables(compiled)
     entry_fn, alloc_fn = _load_orch_entry(output_dir)
 
     # Build tensor mapping from parameter names. One-shot inputs are host
     # torch.Tensor objects and must be in shared memory before the fork.
-    param_infos, _, _ = compiled._get_metadata()
     tensors: dict[str, torch.Tensor | DeviceTensor | StackedDeviceTensor] = {}
     for info, arg in zip(param_infos, host_args, strict=True):
         if not arg.is_shared():
@@ -1886,6 +1895,24 @@ class ReadOnlyHostTensor:
     tensor: torch.Tensor
 
 
+def _inherited_input_ranges(
+    tensors: Sequence[torch.Tensor | ReadOnlyHostTensor | PreparedDistributedInput] | None,
+) -> tuple[list[torch.Tensor | ReadOnlyHostTensor], set[PreparedDistributedInput]]:
+    from pypto.ir._distributed_input_layout import PreparedDistributedInput  # noqa: PLC0415
+
+    host_ranges: list[torch.Tensor | ReadOnlyHostTensor] = []
+    prepared: set[PreparedDistributedInput] = set()
+    for tensor in tensors or ():
+        if isinstance(tensor, PreparedDistributedInput):
+            if not tensor._tensor.is_shared():
+                raise ValueError("Inherited prepared inputs require prepare_input(..., shared=True)")
+            prepared.add(tensor)
+            host_ranges.append(ReadOnlyHostTensor(tensor._tensor))
+        else:
+            host_ranges.append(tensor)
+    return host_ranges, prepared
+
+
 class DistributedWorker(Worker):
     """L3 distributed execution handle: prepare once, dispatch many.
 
@@ -1986,7 +2013,8 @@ class DistributedWorker(Worker):
         window_sources: Mapping[str, Sequence[BinaryIO | torch.Tensor]] | None = None,
         callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
-        inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor] | None = None,
+        inherited_host_tensors: Sequence[torch.Tensor | ReadOnlyHostTensor | PreparedDistributedInput]
+        | None = None,
         startup_timeout_s: float | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
@@ -1995,25 +2023,16 @@ class DistributedWorker(Worker):
         # table at every control-plane operation. The retained handle is also
         # attached to DeviceTensor for address-free wire TaskArgs.
         self._device_buffers: dict[tuple[int, int], Any] = {}
+        self._resident_inputs: dict[
+            tuple[int, int], tuple[DeviceTensor | StackedDeviceTensor, DistributedInputLayout]
+        ] = {}
         callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
         window_sources = normalize_window_sources(window_sources)
         reset_persistent_windows = _resolve_persistent_window_reset(persistent, reset_persistent_windows)
-        inherited, self._inherited_host_spans = self._resolve_inherited_host_tensors(inherited_host_tensors)
-        self._inherited_host_tensors = inherited
-        # `is_shared()` is kept as a one-way signal: True confirms a torch-managed shared
-        # backing, False is inconclusive. Warn once rather than per tensor, and never
-        # reject or silently fall back to staging — falling back would hide the cost this
-        # facility exists to remove, and rejecting would refuse the valid external mapping.
-        unverifiable = sum(1 for tensor in inherited if not tensor.is_shared())
-        if unverifiable:
-            warnings.warn(
-                f"DistributedWorker: {unverifiable} of {len(inherited)} inherited_host_tensors "
-                "cannot be verified as cross-process visible (torch.is_shared() is False, which "
-                "is inconclusive for external MAP_SHARED mappings). Naming them relies on the "
-                "caller's guarantee; a MAP_PRIVATE backing yields stale or incorrect data.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+        host_ranges, self._inherited_inputs = _inherited_input_ranges(inherited_host_tensors)
+        self._inherited_host_tensors, self._inherited_host_spans = self._resolve_inherited_host_tensors(
+            host_ranges
+        )
         self._buffer_owner_id: bytes | None = None
         self._buffer_id_seq = 0
         # One Buffer object per canonical inherited host span, not per copy. Reusing only its
@@ -2049,7 +2068,11 @@ class DistributedWorker(Worker):
             raise ValueError("DistributedWorker requires at least one compiled program")
 
         primary = programs[0]
-        self.dc = primary._distributed_config
+        self.dc = (
+            _snapshot_device_config(primary._distributed_config)
+            if any(p.input_layouts for p in programs)
+            else primary._distributed_config
+        )
         self._compiled = primary  # primary program: dispatched by ``rt(*args)``
         # In multi-program mode ``rt(*args)`` is ambiguous (which program?), so it
         # is disabled — callers must pick explicitly via ``rt.run(compiled, ...)``.
@@ -2085,7 +2108,9 @@ class DistributedWorker(Worker):
             consumed: set[str] = set()
             consumed_sources: set[str] = set()
             for program_index, prog in enumerate(programs):
-                self._check_compatible(prog, primary)
+                self._check_compatible(prog, primary, self.dc)
+                param_infos = tuple(prog._get_metadata()[0])
+                prog._validate_artifact_layouts(param_infos, world_size=len(self.dc.device_ids))
                 chip_callables, prog_runtime, prog_enable_sdma = _assemble_chip_callables(prog)
                 runtime_name = self._unify_runtime(runtime_name, prog_runtime)
                 enable_sdma = enable_sdma or prog_enable_sdma
@@ -2106,17 +2131,15 @@ class DistributedWorker(Worker):
                 for _frame in self._dispatch_frames:
                     base_tensors: dict[str, Any] = {}
                     if alloc_fn is not None:
-                        _call_alloc_intermediates(
-                            alloc_fn, base_tensors, len(prog._distributed_config.device_ids)
-                        )
+                        _call_alloc_intermediates(alloc_fn, base_tensors, len(self.dc.device_ids))
                     base_tensor_frames.append(base_tensors)
                 self._states[prog] = {
                     "entry_fn": entry_fn,
                     "window_sources": {key: window_sources[key] for key in source_keys},
                     "base_tensor_frames": tuple(base_tensor_frames),
                     "call_config": _make_call_config(prog._distributed_config),
-                    "param_infos": tuple(prog._get_metadata()[0]),
-                    "device_nums": len(prog._distributed_config.device_ids),
+                    "param_infos": param_infos,
+                    "device_nums": len(self.dc.device_ids),
                     "persistent_id": f"p{program_index}",
                 }
                 if self._persistent and "_domain_provider" not in inspect.signature(entry_fn).parameters:
@@ -2188,14 +2211,16 @@ class DistributedWorker(Worker):
         self._handles: weakref.WeakSet[Any] = weakref.WeakSet()
 
     @staticmethod
-    def _check_compatible(prog: DistributedCompiledProgram, primary: DistributedCompiledProgram) -> None:
+    def _check_compatible(
+        prog: DistributedCompiledProgram, primary: DistributedCompiledProgram, dc: DistributedConfig
+    ) -> None:
         """Reject programs that cannot share one L3 worker with *primary*."""
         if prog.platform != primary.platform:
             raise ValueError(
                 "DistributedWorker multi-program mode requires the same platform: "
                 f"{primary.platform!r} != {prog.platform!r}"
             )
-        primary_ids = list(primary._distributed_config.device_ids)
+        primary_ids = list(dc.device_ids)
         if list(prog._distributed_config.device_ids) != primary_ids:
             raise ValueError(
                 "DistributedWorker multi-program mode requires the same device_ids: "
@@ -2678,6 +2703,7 @@ class DistributedWorker(Worker):
         handle = self._device_buffer(ptr, worker_id, "free")
         self._w.free(handle)
         del self._device_buffers[(worker_id, ptr)]
+        self._resident_inputs.pop((worker_id, ptr), None)
 
     def committed_device_memory(self, worker_id: int = 0) -> int:
         """Total device HBM (bytes) committed by chip *worker_id*'s ``MemoryAllocator``
@@ -2786,6 +2812,20 @@ class DistributedWorker(Worker):
                     "listed both read-only and writable; one allocation has one access mode."
                 )
             span_read_only[span] = is_marked
+        # `is_shared()` is kept as a one-way signal: True confirms a torch-managed shared
+        # backing, False is inconclusive. Warn once rather than per tensor, and never
+        # reject or silently fall back to staging — falling back would hide the cost this
+        # facility exists to remove, and rejecting would refuse the valid external mapping.
+        unverifiable = sum(1 for tensor in tensors if not tensor.is_shared())
+        if unverifiable:
+            warnings.warn(
+                f"DistributedWorker: {unverifiable} of {len(tensors)} inherited_host_tensors "
+                "cannot be verified as cross-process visible (torch.is_shared() is False, which "
+                "is inconclusive for external MAP_SHARED mappings). Naming them relies on the "
+                "caller's guarantee; a MAP_PRIVATE backing yields stale or incorrect data.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
         return tuple(tensors), tuple(sorted(span_read_only.items()))
 
     def _named_buffer_for_span(self, host_ptr: int, nbytes: int, *, read_only: bool) -> Any:
@@ -2872,6 +2912,8 @@ class DistributedWorker(Worker):
         """H2D copy: ``nbytes`` from ``src_host_ptr + src_offset`` to ``dst_dev_ptr + dst_offset``."""
         self._require_open("copy_to")
         dst = self._device_buffer(dst_dev_ptr, worker_id, "copy_to")
+        if (worker_id, dst_dev_ptr) in self._resident_inputs:
+            raise ValueError("Cannot overwrite a resident prepared input; upload a new weight version")
         if type(dst_offset) is not int or dst_offset < 0:
             raise ValueError(f"dst_offset must be a non-negative int, got {dst_offset!r}")
         if type(src_offset) is not int or src_offset < 0:
@@ -3100,6 +3142,56 @@ class DistributedWorker(Worker):
             raise
         return StackedDeviceTensor(shards, tuple(host.shape), tuple(ids))
 
+    def alloc_input_tensor(
+        self,
+        compiled: DistributedCompiledProgram,
+        param_index: int,
+        init: torch.Tensor | PreparedDistributedInput,
+        *,
+        worker_ids: Sequence[int] | None = None,
+        source_layout: str = "ND",
+    ) -> DeviceTensor | StackedDeviceTensor:
+        """Prepare and upload an offered weight as an immutable resident input.
+
+        The tensor is interpreted as logical ND by default. For explicitly
+        packed bytes, use ``source_layout="NZ"`` with the original HOST shape,
+        or pass a snapshot from ``compiled.prepare_input``. The snapshot already
+        carries the chosen physical order and requires no further packing.
+        A complete rank-2 matrix is placed on worker 0 and returns a
+        :class:`DeviceTensor` for use with :meth:`free_tensor`. Omit
+        ``worker_ids`` or pass ``[0]`` in that case. A stacked input uses the
+        placement contract of :meth:`alloc_stacked_tensor` and returns a
+        :class:`StackedDeviceTensor` for use with :meth:`free_stacked_tensor`.
+        """
+        from pypto.ir._distributed_input_layout import PreparedDistributedInput  # noqa: PLC0415
+
+        self._require_open("alloc_input_tensor")
+        if compiled not in self._states:
+            raise ValueError("alloc_input_tensor requires a program prepared on this worker")
+        layout = compiled.input_layouts.get(param_index) if type(param_index) is int else None
+        if layout is None:
+            raise ValueError(f"Distributed input slot {param_index!r} has no selectable layout")
+        if layout._is_single_matrix and worker_ids is not None:
+            ids = tuple(worker_ids)
+            if ids != (0,) or type(ids[0]) is not int:
+                raise ValueError(
+                    f"Rank-2 distributed input {layout.name!r} requires worker_ids=[0], got {ids}"
+                )
+        if isinstance(init, PreparedDistributedInput):
+            if source_layout != "ND":
+                raise ValueError("A prepared distributed input already carries its source layout")
+            physical = init._for_layout(layout)
+        else:
+            physical = layout._materialize(init, source_layout)
+        if layout._is_single_matrix:
+            tensor = self.alloc_tensor(layout.logical_shape, physical.dtype, init=physical, worker_id=0)
+            self._resident_inputs[(0, tensor.data_ptr)] = (tensor, layout)
+            return tensor
+        stacked = self.alloc_stacked_tensor(physical, worker_ids=worker_ids)
+        for worker_id, shard in zip(stacked.worker_ids, stacked.shards, strict=True):
+            self._resident_inputs[(worker_id, shard.data_ptr)] = (stacked, layout)
+        return stacked
+
     def free_stacked_tensor(self, stacked: StackedDeviceTensor) -> None:
         """Release every shard of *stacked* against its owning worker. Idempotent."""
         for shard, w in zip(stacked.shards, stacked.worker_ids, strict=True):
@@ -3114,6 +3206,7 @@ class DistributedWorker(Worker):
         """
         self._require_open("release_inherited_host_tensor_refs")
         self._inherited_host_tensors = ()
+        self._inherited_inputs.clear()
         # No later copy may name these ranges: the parent has dropped its references, so a
         # copy after this point stages rather than wrapping memory nobody vouches for.
         self._inherited_host_spans = ()
@@ -3241,6 +3334,46 @@ class DistributedWorker(Worker):
                 f"StackedDeviceTensor, or a simpler Tensor."
             )
 
+    def _resolve_input_argument(self, info: Any, arg: Any, layout: DistributedInputLayout | None) -> Any:
+        from pypto.ir._distributed_input_layout import PreparedDistributedInput  # noqa: PLC0415
+
+        if isinstance(arg, PreparedDistributedInput):
+            if layout is None or arg not in self._inherited_inputs:
+                raise ValueError(
+                    f"Parameter {info.name!r} needs a matching prepared input "
+                    "inherited before the worker fork"
+                )
+            return arg._for_layout(layout)
+        if isinstance(arg, StackedDeviceTensor):
+            records = [
+                self._resident_inputs.get((worker_id, shard.data_ptr - shard.byte_offset))
+                for worker_id, shard in zip(arg.worker_ids, arg.shards, strict=True)
+            ]
+            if layout is not None and all(
+                recorded is not None and recorded[0] is arg and recorded[1] == layout for recorded in records
+            ):
+                return arg
+            if layout is not None or any(recorded is not None for recorded in records):
+                raise ValueError(f"Parameter {info.name!r} has incompatible resident input layout provenance")
+        if isinstance(arg, DeviceTensor) and arg.buffer is not None:
+            base = arg.data_ptr - arg.byte_offset
+            worker_id = getattr(arg.buffer, "owner_worker_id", None)
+            if worker_id is None:
+                record = next((r for (_, ptr), r in self._resident_inputs.items() if ptr == base), None)
+            else:
+                record = self._resident_inputs.get((worker_id, base))
+            if record is not None:
+                if record[0] is arg and record[1] == layout:
+                    return arg
+                raise ValueError(f"Parameter {info.name!r} has incompatible resident input layout provenance")
+        if layout is not None:
+            resident = "a tensor" if layout._is_single_matrix else "a stack"
+            raise TypeError(
+                f"Parameter {info.name!r} requires an inherited prepared input or {resident} "
+                "created by alloc_input_tensor()"
+            )
+        return arg
+
     def _submit_compiled(
         self, compiled: DistributedCompiledProgram, *args: Any, config: RunConfig | None = None
     ) -> DistributedRunHandle:
@@ -3283,7 +3416,8 @@ class DistributedWorker(Worker):
             tensors.update(state["base_tensor_frames"][frame.slot_id])
             frame.keepalive.clear()
             frame.keepalive.extend((compiled, call_config, config, *args))
-            for info, arg in zip(param_infos, args, strict=True):
+            for index, (info, arg) in enumerate(zip(param_infos, args, strict=True)):
+                arg = self._resolve_input_argument(info, arg, compiled.input_layouts.get(index))
                 if info.shape is None:
                     # Scalar parameter (e.g. seq_len): forwarded as-is to the entry.
                     tensors[info.name] = arg
@@ -3463,6 +3597,8 @@ class DistributedWorker(Worker):
                 self._close_swimlane_session()
             finally:
                 self._inherited_host_tensors = ()
+                self._inherited_inputs.clear()
+                self._resident_inputs.clear()
                 self._inherited_host_spans = ()
                 with self._named_host_buffer_mu:
                     self._named_host_buffers.clear()

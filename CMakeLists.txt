@@ -90,9 +90,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-fdebug-prefix-map=${CMAKE_SOURCE_DIR}=.)
 endif()
 
-# Find Python and nanobind
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
-find_package(nanobind CONFIG REQUIRED)
+option(PYPTO_BUILD_PYTHON_BINDINGS "Build the PyPTO Python extension" ON)
+if(PYPTO_BUILD_PYTHON_BINDINGS)
+    find_package(Python COMPONENTS Interpreter Development REQUIRED)
+    find_package(nanobind CONFIG REQUIRED)
+elseif(SKBUILD_MODE)
+    message(FATAL_ERROR "Building a PyPTO wheel requires PYPTO_BUILD_PYTHON_BINDINGS=ON")
+endif()
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
@@ -298,6 +302,11 @@ set(PYPTO_SOURCES
     src/ir/transforms/flatten_tile_nd_to_2d/rewrite_utils.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/transpose.cpp
     src/ir/transforms/flatten_tile_nd_to_2d/verification.cpp
+    src/ir/transforms/auto_layout/auto_layout_pass.cpp
+    src/ir/transforms/auto_layout/extractor.cpp
+    src/ir/transforms/auto_layout/model.cpp
+    src/ir/transforms/auto_layout/solver.cpp
+    src/ir/transforms/auto_layout/writer.cpp
     src/ir/transforms/legalize_tile_cast_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
@@ -466,11 +475,31 @@ set(PYPTO_SOURCES
     src/sync/resource_catalog.cpp
 )
 
-# Include Python bindings
-add_subdirectory(python/bindings)
+if(PYPTO_BUILD_PYTHON_BINDINGS)
+    # Embed all core objects in the module and the native test so both retain
+    # the static initializers that register operators and backends.
+    add_library(pypto_native OBJECT ${PYPTO_SOURCES})
+    set_target_properties(pypto_native PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+else()
+    # Keep the standalone shared library available in bindings-free builds.
+    add_library(pypto_native SHARED ${PYPTO_SOURCES})
+endif()
+target_include_directories(pypto_native PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/runtime/src/common)
+target_link_libraries(pypto_native PUBLIC libbacktrace PRIVATE msgpackc-cxx)
 
-# The IR-free DSA-RP solver has a small native test that does not require the
-# Python extension or a device runtime. Skip it when building a wheel.
+if(PYPTO_BUILD_PYTHON_BINDINGS)
+    add_subdirectory(python/bindings)
+    # Keep nanobind's optimization and section flags for the core sources
+    # previously compiled as part of the module.
+    target_compile_options(pypto_native PRIVATE $<TARGET_PROPERTY:${LIBRARY_NAME},COMPILE_OPTIONS>)
+endif()
+
+# Native unit tests are available in standalone CMake builds.
 include(CTest)
 if(BUILD_TESTING AND NOT SKBUILD_MODE)
     add_subdirectory(tests/ut/cpp)

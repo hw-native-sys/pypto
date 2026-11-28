@@ -75,17 +75,18 @@ def _build_argspec_orch_args(args_spec: list[dict[str, Any]]) -> list[Any]:
     return coerced
 
 
-def _build_golden_orch_args(golden_path: Path) -> list[Any]:
+def _build_golden_orch_args(golden_path: Path, work_dir: Path) -> list[Any]:
     """Regenerate ordered args from ``golden.py``'s ``generate_inputs``."""
     from .device_runner import build_orch_args_from_inputs  # noqa: PLC0415
-    from .runner import _load_golden_module  # noqa: PLC0415
+    from .runner import _load_golden_module, _prepare_directory_args  # noqa: PLC0415
 
     golden_module = _load_golden_module(golden_path, module_name="_golden_dep_gen")
 
     result = golden_module.generate_inputs({"name": "Default"})
     output_names = set(getattr(golden_module, "__outputs__", []))
     orch_args, _, _, _ = build_orch_args_from_inputs(result, output_names)
-    return orch_args
+    dispatch_args, _ = _prepare_directory_args(work_dir, orch_args, caller_name="golden.py")
+    return dispatch_args
 
 
 def main(argv: list[str]) -> int:
@@ -121,7 +122,7 @@ def main(argv: list[str]) -> int:
     enable_sdma = bool(runtime_config.get("enable_sdma", False))
 
     if spec["mode"] == "golden":
-        orch_args = _build_golden_orch_args(Path(spec["golden_path"]))
+        orch_args = _build_golden_orch_args(Path(spec["golden_path"]), work_dir)
     elif spec["mode"] == "argspec":
         orch_args = _build_argspec_orch_args(spec["args"])
     else:

@@ -11,8 +11,11 @@
 
 import os
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
+
+from .auto_layout_test_utils import run_through_auto_layout
 
 TENSOR_ONLY_PASSES = [
     "OutlineHierarchyScopes",
@@ -106,6 +109,71 @@ class TestPassManagerBasics:
         assert pm is not None
         assert pm.strategy == ir.OptimizationStrategy.Default
         assert pm.pass_names == TENSOR_OPTIMIZATION_PASSES
+
+    def test_auto_layout_strategy(self):
+        baseline = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default).pass_names
+        selected = ir.PassManager.get_strategy(ir.OptimizationStrategy.AutoLayout).pass_names
+        pos = baseline.index("InferTileMemorySpace") + 1
+        assert selected == baseline[:pos] + ["AutoLayout", "BlockNzTensorViews"] + baseline[pos:]
+
+    def test_auto_layout_keeps_shared_compact_row(self, ascend_backend):
+        @pl.program
+        class SharedRow:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[32, 64], pl.FP32],
+                y: pl.Tensor[[32, 64], pl.FP32],
+                out_x: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+                out_y: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
+            ) -> pl.Tuple[pl.Tensor[[32, 64], pl.FP32], pl.Tensor[[32, 64], pl.FP32]]:
+                tx = pl.load(x, [0, 0], [32, 64], target_memory=pl.Mem.Vec)
+                ty = pl.load(y, [0, 0], [32, 64], target_memory=pl.Mem.Vec)
+                tmp = pl.tile.create([32, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                row = pl.tile.row_sum(tx, tmp)
+                out_x = pl.store(pl.tile.row_expand_add(tx, row), [0, 0], out_x)
+                out_y = pl.store(pl.tile.row_expand_add(ty, row), [0, 0], out_y)
+                return out_x, out_y
+
+        printed = ir.python_print(run_through_auto_layout(SharedRow))
+        assert printed.count("pl.tile.row_expand_add(") == 2
+        assert "pl.tile.row_expand(" not in printed
+
+    def test_auto_layout_preserves_runtime_join(self, ascend_backend):
+        @pl.program
+        class Branch:
+            @pl.function(type=pl.FunctionType.InCore)
+            def reduce_or_add(
+                self,
+                flag: pl.Scalar[pl.BOOL],
+                x: pl.Tensor[[32, 32], pl.FP16],
+                y: pl.Tensor[[32, 1], pl.FP16],
+                z: pl.Tensor[[32, 1], pl.FP16],
+                out: pl.Out[pl.Tensor[[32, 1], pl.FP16]],
+            ) -> pl.Tensor[[32, 1], pl.FP16]:
+                tx = pl.load(x, [0, 0], [32, 32], target_memory=pl.Mem.Vec)
+                ty = pl.load(y, [0, 0], [32, 1], target_memory=pl.Mem.Vec)
+                tz = pl.load(z, [0, 0], [32, 1], target_memory=pl.Mem.Vec)
+                if flag:
+                    tmp = pl.tile.create([32, 32], dtype=pl.FP16, target_memory=pl.Mem.Vec)
+                    joined = pl.tile.row_max(tx, tmp)
+                else:
+                    joined = pl.tile.add(ty, tz)
+                out = pl.store(joined, [0, 0], out)
+                return out
+
+        result = run_through_auto_layout(Branch)
+        properties = passes.IRPropertySet()
+        for prop in (
+            passes.IRProperty.TypeChecked,
+            passes.IRProperty.UseAfterDef,
+            passes.IRProperty.AssignTypeSymmetry,
+        ):
+            properties.insert(prop)
+        passes.verify_properties(properties, result, "AutoLayout")
+        printed = ir.python_print(result)
+        assert "if " in printed and "tile.row_max" in printed and "tile.add" in printed
+        assert "tile.store" in printed
 
     def test_pass_manager_rejects_unknown_strategy(self):
         """An unsupported strategy value raises instead of silently running Default."""

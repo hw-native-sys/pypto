@@ -185,7 +185,10 @@ inline std::optional<TensorView> RemapTensorViewExprs(const std::optional<Tensor
     return tensor_view;
   }
   changed = true;
-  return TensorView(std::move(new_stride), tensor_view->layout, std::move(new_valid_shape), tensor_view->pad);
+  auto new_view = *tensor_view;
+  new_view.stride = std::move(new_stride);
+  new_view.valid_shape = std::move(new_valid_shape);
+  return new_view;
 }
 
 template <typename RemapExprFn>

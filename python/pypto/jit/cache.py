@@ -25,7 +25,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.passes import MemoryPlanner, RuntimeKind
 
 if TYPE_CHECKING:
-    from pypto.ir.pass_manager import OptimizationStrategy
+    from pypto.ir.pass_manager import InputLayoutPolicy, OptimizationStrategy
     from pypto.pypto_core.ir import TensorLayout
 
 # Stable PyPTO version stamp included in every cache key so that upgrading
@@ -143,6 +143,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     enable_buffer_ir: bool = True,
     enable_software_pipeline: bool = False,
+    input_layout_policy: "InputLayoutPolicy | None" = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -252,6 +253,8 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("gather_compare_scratch_version", 2),
         ("enable_software_pipeline", enable_software_pipeline),
     )
+    if input_layout_policy is not None:
+        compile_opts += (("input_layout_policy", _freeze(input_layout_policy)),)
     return CacheKey(
         source_hash,
         platform,

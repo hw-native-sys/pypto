@@ -608,6 +608,28 @@ inline constexpr const char* kAttrRequireContiguousOperands = "require_contiguou
 inline constexpr const char* kAttrAutoScope = "auto_scope";
 
 /**
+ * @brief Reserved Function attr key marking that ``BlockNzTensorViews`` has
+ * already converted logical NZ tensors in this function to blocked rank-5 form.
+ *
+ * Value type: ``bool`` (``true`` when stamped). Keeps old serialized passes
+ * recognizable so their blocked types can be annotated without changing their
+ * offsets a second time. New IR carries provenance on the TensorView itself.
+ */
+inline constexpr const char* kAttrNzTensorViewsBlocked = "nz_tensor_views_blocked";
+
+/**
+ * @brief Compiler-owned result of named HOST input layout selection.
+ *
+ * Value type: ``std::string``. AutoLayout writes ``v1;slot=ND;slot=NZ``
+ * after writeback, with one ascending, zero-based slot entry per requested
+ * input. ``UNSUPPORTED`` means the loader must reject the request. The HOST
+ * parameter types retain their logical transport descriptors. The distributed
+ * artifact builder consumes this attribute from the lowered entry, never from
+ * the authored function.
+ */
+inline constexpr const char* kAttrAutoLayoutHostInputs = "auto_layout_host_inputs";
+
+/**
  * @brief Function definition
  *
  * Represents a complete function definition with name, parameters, return types, and body.

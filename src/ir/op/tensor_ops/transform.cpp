@@ -614,16 +614,23 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   // NZ is a legal TensorType layout (in its blocked form), but tensor.view
   // reinterprets shape/strides, and a blocked NZ view's dims are a fractal
   // decomposition rather than free axes — re-viewing them would break the
-  // addressing. Milestone 1 therefore keeps NZ out of tensor.view entirely.
+  // addressing. Milestone 1 therefore keeps NZ out of tensor.view except for
+  // explicit backing-memory aliases between NZ and 2D ND ([B*(C/c0), R*c0]).
   // Source first: when the source is NZ, ``new_layout`` defaults to it, so
   // checking the destination first would report the derived symptom instead of
   // the annotation the user actually wrote.
-  CHECK(src_layout != TensorLayout::NZ)
-      << "tensor.view does not support an NZ source: its dims are a fractal decomposition, "
-      << "so re-viewing them would break the fractal addressing. Slice the NZ tensor directly.";
-  CHECK(new_layout != TensorLayout::NZ)
-      << "tensor.view cannot produce an NZ layout: the blocked NZ shape is derived from the "
-      << "source tensor by BlockNzTensorViews, not chosen at a view site";
+  const bool is_nz_backing_alias_candidate =
+      has_shape && requested_layout.has_value() &&
+      ((src_layout == TensorLayout::NZ && new_layout == TensorLayout::ND) ||
+       (src_layout == TensorLayout::ND && new_layout == TensorLayout::NZ));
+  if (!is_nz_backing_alias_candidate) {
+    CHECK(src_layout != TensorLayout::NZ)
+        << "tensor.view does not support an NZ source: its dims are a fractal decomposition, "
+        << "so re-viewing them would break the fractal addressing. Slice the NZ tensor directly.";
+    CHECK(new_layout != TensorLayout::NZ)
+        << "tensor.view cannot produce an NZ layout: the blocked NZ shape is derived from the "
+        << "source tensor by BlockNzTensorViews, not chosen at a view site";
+  }
 
   if (src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
     auto canon_check = tensor_view_semantics::CheckCanonicalView(
@@ -694,6 +701,60 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
   CHECK(new_layout != TensorLayout::DN || new_shape.size() >= 2)
       << "tensor.view: DN layout requires rank >= 2, got " << new_shape.size();
 
+  bool result_nz_blocked = false;
+  if (is_nz_backing_alias_candidate) {
+    const int64_t c0 = tensor_view_semantics::NzC0Elems(src_type->dtype_);
+    auto nz_plane = [&](const std::vector<ExprPtr>& shape,
+                        bool blocked) -> std::optional<std::pair<int64_t, int64_t>> {
+      if (blocked) {
+        if (!tensor_view_semantics::IsBlockedNzShape(shape, src_type->dtype_)) return std::nullopt;
+        auto batch = As<ConstInt>(shape[0]);
+        auto cols = As<ConstInt>(shape[1]);
+        auto rows = As<ConstInt>(shape[2]);
+        if (!batch || !cols || !rows || batch->value_ <= 0 || cols->value_ <= 0 || rows->value_ <= 0) {
+          return std::nullopt;
+        }
+        return std::make_pair(batch->value_ * cols->value_,
+                              rows->value_ * tensor_view_semantics::kNzFractalRow * c0);
+      }
+      if (shape.size() < 2) return std::nullopt;
+      int64_t batch = 1;
+      for (size_t i = 0; i + 2 < shape.size(); ++i) {
+        auto extent = As<ConstInt>(shape[i]);
+        if (!extent || extent->value_ <= 0 || __builtin_mul_overflow(batch, extent->value_, &batch)) {
+          return std::nullopt;
+        }
+      }
+      auto rows = As<ConstInt>(shape[shape.size() - 2]);
+      auto cols = As<ConstInt>(shape.back());
+      if (!rows || !cols || rows->value_ <= 0 || cols->value_ <= 0 ||
+          rows->value_ % tensor_view_semantics::kNzFractalRow != 0 || cols->value_ % c0 != 0) {
+        return std::nullopt;
+      }
+      return std::make_pair(batch * (cols->value_ / c0), rows->value_ * c0);
+    };
+    auto extract_nd_plane = [&](const std::vector<ExprPtr>& shape) -> std::pair<int64_t, int64_t> {
+      CHECK(shape.size() == 2) << "tensor.view: NZ backing ND alias must have rank 2, got " << shape.size();
+      auto p0 = As<ConstInt>(shape[0]);
+      auto p1 = As<ConstInt>(shape[1]);
+      CHECK(p0 && p1 && p0->value_ > 0 && p1->value_ > 0)
+          << "tensor.view: NZ backing ND alias requires static positive 2D shape";
+      return {p0->value_, p1->value_};
+    };
+    const bool nz_source = src_layout == TensorLayout::NZ;
+    const auto& nz_shape = nz_source ? src_type->shape_ : new_shape;
+    const auto nd_plane = extract_nd_plane(nz_source ? new_shape : src_type->shape_);
+    const bool known_blocked = nz_source && tensor_view_semantics::IsNzBlocked(*src_type);
+    const auto expected = nz_plane(nz_shape, known_blocked);
+    // The ND backing plane disambiguates a physical result from a logical
+    // rank-five shape when only the blocked interpretation matches.
+    const bool legacy_alias = !known_blocked && nz_plane(nz_shape, true) == nd_plane;
+    result_nz_blocked = !nz_source && expected != nd_plane && legacy_alias;
+    CHECK(expected == nd_plane || legacy_alias)
+        << "tensor.view: NZ<->ND backing alias requires 2D ND shape [B * (C / c0), R * c0], got ["
+        << nd_plane.first << ", " << nd_plane.second << "]";
+  }
+
   TensorView new_view;
   if (!has_shape && src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
     std::vector<ExprPtr> new_stride = src_type->tensor_view_->stride;
@@ -701,6 +762,11 @@ TypePtr DeduceTensorViewType(const std::vector<ExprPtr>& args,
       std::iter_swap(new_stride.end() - 2, new_stride.end() - 1);
     }
     new_view = TensorView(std::move(new_stride), new_layout);
+  } else if (new_layout == TensorLayout::NZ) {
+    // The physical descriptor is supplied by the blocker or a recorded
+    // result type. A rank-five shape alone may still be logical.
+    new_view = TensorView(std::vector<ExprPtr>{}, TensorLayout::NZ);
+    new_view.nz_blocked = result_nz_blocked;
   } else {
     new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
   }

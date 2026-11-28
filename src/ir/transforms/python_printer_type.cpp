@@ -534,6 +534,11 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
     }
   }
 
+  if (tensor_view.nz_blocked) {
+    maybe_comma();
+    oss << "nz_blocked=True";
+  }
+
   oss << ")";
   return oss.str();
 }
