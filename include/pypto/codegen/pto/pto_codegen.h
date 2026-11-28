@@ -636,6 +636,10 @@ class PTOCodegen : public CodegenBase {
   void RegisterSubviewMaterialization(const std::string& subview_ssa, const SubviewMaterializationInfo& info);
   SubviewMaterializationInfo* GetSubviewMaterialization(const std::string& subview_ssa);
   const SubviewMaterializationInfo* GetSubviewMaterialization(const std::string& subview_ssa) const;
+  /// Return a subview's descriptor even when the named SSA is a metadata-only
+  /// reshape of it. Use only for ancestor checks, not for materializing the
+  /// current shape: the descriptor records the ancestor's original geometry.
+  const SubviewMaterializationInfo* FindSubviewAncestor(const std::string& ssa_name) const;
 
   /**
    * @brief Record the SSA name of the __gm_pipe_buffer function parameter

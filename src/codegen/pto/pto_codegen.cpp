@@ -2872,6 +2872,17 @@ const PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterializat
   return it != fs_.subview_materializations.end() ? &it->second : nullptr;
 }
 
+const PTOCodegen::SubviewMaterializationInfo* PTOCodegen::FindSubviewAncestor(
+    const std::string& ssa_name) const {
+  if (const auto* view = GetSubviewMaterialization(ssa_name)) return view;
+  // RegisterTileViewName tracks the original SSA through zero-copy reshape
+  // chains, including fixed-address reshapes whose own alloc_tile is emitted.
+  // Keep the regular materialization lookup exact; consumers that need the
+  // ancestor's pitch must opt in to following this alias.
+  const auto origin = fs_.tile_view_names.find(ssa_name);
+  return origin == fs_.tile_view_names.end() ? nullptr : GetSubviewMaterialization(origin->second);
+}
+
 void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa, const DataType& dtype) {
   CHECK(dtype == DataType::FP32) << "__gm_pipe_buffer must use FP32 elements, got " << dtype.ToString();
   fs_.gm_slot_buffer_ssa = ssa;

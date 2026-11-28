@@ -151,6 +151,7 @@ from ._tile_memory import ci as ci
 from ._tile_memory import concat as concat
 from ._tile_memory import create as create
 from ._tile_memory import extract as extract
+from ._tile_memory import extract_into as extract_into
 from ._tile_memory import fillpad as fillpad
 from ._tile_memory import fillpad_expand as fillpad_expand
 from ._tile_memory import fillpad_inplace as fillpad_inplace
@@ -217,6 +218,7 @@ __all__ = [
     "gather_row",
     "mark_remote_written",
     "extract",
+    "extract_into",
     "scatter_update",
     "concat",
     "move",

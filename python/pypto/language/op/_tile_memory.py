@@ -472,6 +472,28 @@ def extract(
     return Tile(expr=call_expr)
 
 
+def extract_into(dst: Tile, src: Tile, index_row: IntLike, index_col: IntLike) -> Tile:
+    """Extract a Mat window directly into an existing L0 tile on A5.
+
+    Args:
+        dst: Existing dense, full-valid Left or Right tile, or a bound MX
+            scale tile. The destination determines the shape and memory space.
+        src: Source tile in Mat memory with the same dtype as dst.
+        index_row: Starting row offset in the source.
+        index_col: Starting column offset in the source.
+
+    Returns:
+        An SSA alias of dst containing the extracted window. Consume the
+        returned value; if the destination is a slice of a parent tile,
+        assemble the result back into the parent before consuming the parent.
+
+    This uses standard TEXTRACT, not a pitched partial write into a larger
+    destination.
+    """
+    row, col = _normalize_intlike([index_row, index_col])
+    return Tile(expr=_ir_ops.extract_into(dst.unwrap(), src.unwrap(), row, col))
+
+
 def concat(src0: Tile, src1: Tile) -> Tile:
     """Concatenate two tiles along the column dimension.
 

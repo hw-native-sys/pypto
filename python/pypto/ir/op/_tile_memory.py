@@ -940,7 +940,7 @@ def bind_scale_addr(
 def extract_into(
     dst: Expr, src: Expr, index_row: int | Expr, index_col: int | Expr, span: Span | None = None
 ) -> Call:
-    """Build the compiler-internal extraction into a bound MX scale tile."""
+    """Build destination-passing extraction into an existing L0 data or bound MX scale tile."""
     actual_span = _get_span_or_capture(span)
     row_expr = _normalize_expr(index_row, actual_span, int_dtype=DataType.INDEX)
     col_expr = _normalize_expr(index_col, actual_span, int_dtype=DataType.INDEX)

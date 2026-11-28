@@ -1419,6 +1419,9 @@ def _register_ops() -> None:  # noqa: PLR0915
     m["tile.move"] = _identity()
     m["tile.slice"] = _handle_slice
     m["tile.extract"] = _handle_tile_extract
+    m["tile.extract_into"] = lambda a, _kw: (
+        f"{a[0]}.copy_(_tensor_slice({a[1]}, [{a[2]}, {a[3]}], {a[0]}.shape))"
+    )
     m["tile.read"] = lambda a, _kw: f"{a[0]}[{a[1]}]"
     m["tile.write"] = lambda a, _kw: f"_write_and_return({a[0]}, {a[1]}, {a[2]})"
     m["tile.get_block_idx"] = lambda _a, _kw: "0"

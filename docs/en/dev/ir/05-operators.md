@@ -430,7 +430,7 @@ Tile `matmul_mx` supports all four FP8E4M3FN/FP8E5M2 pairs. Tensor `matmul_mx` s
 | `tensor.matmul_mx` | Static oriented 2D data, loaded to Mat before Left/Right staging. M/K/N align to 16/64/32 (FP4: 32/64/64). For FP4, the contiguous axis counts packed bytes: ND shapes `[M,K/2]` / `[K,N/2]`, DN `[M/2,K]` / `[K/2,N]`. Scales and FP32 output retain their logical shapes. The canonical M/K/N of 128/64/64 uses `[128,2]` / `[2,64]` scales in ZZ/NN for both FP8 and FP4. |
 | `tile.matmul_mx_acc` / `pl.matmul_mx_acc`, `tile.matmul_mx_bias` / `pl.matmul_mx_bias` | Acc prepends an accumulator and updates it in place via `set_output_reuses_input(0)`. Its physical and valid M/N must match the result. Bias appends an FP32 `[1,N]` operand. |
 | `tile.bind_scale_addr` | Creates an empty scale handle at the address derived from an MX payload. |
-| `tile.extract_into` | Writes a Mat scale window into the bound destination and returns its SSA alias. |
+| `tile.extract_into` | Writes a Mat window into a bound MX scale or dense, full-valid L0 data destination and returns its SSA alias. |
 | `tile.tget_scale_addr` | Internal DPS binding that updates `dst_scale` in place (`LeftScale↔Left`, `RightScale↔Right`). `InsertMxScaleAddr` inserts it after `InferTileMemorySpace`. |
 
 - MX-layout sources reject `tensor.slice`, `tensor.reshape`, `tensor.transpose`, `tensor.reinterpret_view`, ordinary `tensor.view`, `pld.tile.remote_load`, and tensor/tile `gather_row`. The subview path cannot represent a base offset. GM staging supports product-preserving FP8E8M0 shaped aliases between ND backing and `MX_A_ZZ` / `MX_B_NN`.

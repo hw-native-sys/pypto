@@ -276,7 +276,7 @@ output elements outside the valid rectangle.
 | pto.mscatter | MSCATTER | tile | ✅ | ✅ | ❌ | ✅ | — |  |
 | pto.treshape | TRESHAPE | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tinsert | TINSERT | tile | ✅ | ❌ | ❌ | ✅ | — | emitted by `tile.assemble` / automatic matmul lowering |
-| pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — |  |
+| pto.textract | TEXTRACT | tile | ✅ | ✅ | ❌ | ✅ | — | Includes A5 `tile.extract_into` with an explicit dense L0 destination (CPU codegen/BiSheng validation) |
 | pto.tfillpad | TFILLPAD | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_expand | TFILLPAD_EXPAND | tile+tensor | ✅ | ✅ | ✅ | ✅ | — |  |
 | pto.tfillpad_inplace | TFILLPAD_INPLACE | tile | ✅ | ✅ | ❌ | ❌ | — | emits `pto.tfillpad`; PTOAS planning preserves the destination pad/full validity with a `pto.treshape` alias; allocation-backed results retain runtime validity updates |

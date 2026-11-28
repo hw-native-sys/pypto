@@ -388,6 +388,13 @@ while producing it and on FIX while consuming it. The author controls token
 allocation, paired acquire/release, and all other pipe dependencies.
 Use `pl.range`, not `pl.pipeline`, for manually synchronized loops.
 
+For explicit L1→L0 storage assignment, `pl.tile.extract_into(dst, src, row, col)`
+(A5) writes a standard TEXTRACT directly into an existing full-valid Left or Right
+tile, including a contiguous physical slot view of a larger parent tile.
+Consume the returned SSA alias of `dst`; for a parent window, assemble that alias
+back into the parent. Use `pl.tile.extract` to allocate a new result.
+It does not implement a smaller half extract retaining a larger parent's pitch.
+
 For a pipeline barrier, use `pl.system.barrier(*, pipe)`. The required keyword
 accepts any `pl.PipeType` member. A single-pipe barrier orders preceding and
 following work on that pipeline, which is the cheap way to order a buffer reuse

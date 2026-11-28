@@ -545,6 +545,34 @@ def test_dsa_rp_unknown_mutating_operand_stays_unpenalized():
     assert _overlap(ranges["prior"], ranges["next_value"])
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+def test_dsa_rp_extract_into_unknown_access_poisons_source(ascend_backend):
+    """An explicit L0 write must not masquerade as a modeled terminal L1 read."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            input_a: pl.Tensor[[16, 16], pl.BF16],
+            input_b: pl.Tensor[[16, 16], pl.BF16],
+            rhs_input: pl.Tensor[[16, 16], pl.BF16],
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            prior = pl.load(input_a, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            left = pl.tile.create([16, 16], pl.BF16, target_memory=pl.Mem.Left)
+            prior_l0 = pl.tile.extract_into(left, prior, 0, 0)
+            _later = pl.load(input_b, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            rhs_l1 = pl.load(rhs_input, [0, 0], [16, 16], target_memory=pl.Mem.Mat)
+            rhs_l0 = pl.tile.move(rhs_l1, target_memory=pl.Mem.Right)
+            return pl.store(pl.matmul(prior_l0, rhs_l0), [0, 0], output)
+
+    assert testing.get_execution_memory_access_evidence("tile.extract_into") == "unknown"
+    # Unlike test_dsa_rp_recognizes_l1_to_l0_route's functional tile.move,
+    # this caller-owned destination write has no exact endpoint evidence.
+    assert frozenset(("prior", "_later")) not in _recognized_pairs(Before)
+
+
 def test_dsa_rp_scalar_subrange_read_stays_unpenalized():
     """A scalar tile.read does not masquerade as a whole-allocation terminal read."""
 

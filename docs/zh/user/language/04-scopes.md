@@ -343,6 +343,13 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 作者负责 token 分配、获取/释放配对以及其他流水线依赖。手工同步循环请用
 `pl.range`，而非 `pl.pipeline`。
 
+显式指定 L1→L0 写入位置时，A5 的
+`pl.tile.extract_into(dst, src, row, col)` 将标准 TEXTRACT 直接写入现有的
+全有效 Left 或 Right tile，包含较大父 tile 中连续的物理槽位视图。
+需消费返回的 `dst` SSA 别名；若写入父 tile 的窗口，可用 assemble 将别名更新回父 tile。
+如需新分配结果，请使用 `pl.tile.extract`。
+它不支持从较小半块写入且保留较大父 tile pitch 的特殊 extract。
+
 流水线屏障统一使用 `pl.system.barrier(*, pipe)`，必选关键字接受 `pl.PipeType`
 的任意成员。单流水线屏障为对应流水线的前后工作建立顺序，这是在不占用事件槽的
 前提下，把缓冲区复用与在途搬运定序的低成本写法。屏障排空的是**流水**而非某个
