@@ -1423,17 +1423,20 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
      protected:
       void VisitStmt_(const ir::AssignStmtPtr& stmt) override {
-        if (ir::IsOp(ir::As<ir::Call>(stmt->value_), "tile.extract")) {
-          extracts.insert(stmt->var_.get());
-        }
         auto call = As<ir::Call>(stmt->value_);
-        if (ir::IsOp(call, "tile.tget_scale_addr") || ir::IsOp(call, "tile.extract_into")) {
-          if (auto scale = ir::AsVarLike(call->args_[0])) {
+        auto tile = As<ir::TileType>(stmt->var_->GetType());
+        if (tile && (tile->GetMemorySpace() == ir::MemorySpace::LeftScale ||
+                     tile->GetMemorySpace() == ir::MemorySpace::RightScale)) {
+          if (ir::IsOp(call, "tile.extract")) extracts.insert(stmt->var_.get());
+          // Follow the registry's storage alias contract, including metadata
+          // updates and descriptor views. A late alias is not a new scale write.
+          if (auto scale = ir::AsVarLike(ir::op_predicates::GetBufferAliasSource(stmt->value_))) {
             scale_aliases.emplace(stmt->var_.get(), scale);
           }
-        } else if (ir::IsOp(call, "tile.bind_scale_addr")) {
-          if (auto data = ir::AsVarLike(call->args_[0])) {
-            all_bindings.emplace_back(stmt->var_, data);
+          if (ir::IsOp(call, "tile.bind_scale_addr")) {
+            if (auto data = ir::AsVarLike(call->args_[0])) {
+              all_bindings.emplace_back(stmt->var_, data);
+            }
           }
         }
         // Count only RHS uses; assignment targets are definitions.
@@ -1497,13 +1500,18 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     MxScaleBindingCollector collector;
     for (const auto& param : func->params_) collector.definitions[param.get()] = 0;
     collector.VisitStmt(func->body_);
+    // Direct extraction is supported only for its paired MX operands. Check
+    // every extracted scale, including one whose only binding is hidden behind
+    // an alias or a control-flow result, before filtering the binding map.
+    for (const auto* scale : collector.extracts) {
+      CHECK_SPAN(collector.uses[scale] == collector.binding_uses[scale], scale->span_)
+          << "MX scale TEXTRACT output must only be used by its paired MX matmul";
+    }
     // Only the producer's own destination can be rebound before TEXTRACT.
     for (auto it = collector.bindings.begin(); it != collector.bindings.end();) {
       if (!collector.extracts.count(it->first)) {
         it = collector.bindings.erase(it);
       } else {
-        CHECK_SPAN(collector.uses[it->first] == collector.binding_uses[it->first], it->first->span_)
-            << "MX scale TEXTRACT output must only be used by its paired MX matmul";
         CHECK_SPAN(it->second, it->first->span_)
             << "MX scale TEXTRACT requires a single corresponding data tile";
         const auto def = collector.definitions.find(it->second.get());

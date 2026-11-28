@@ -70,11 +70,12 @@ after = passes.insert_mx_scale_addr()(passes.infer_tile_memory_space()(program))
 `tget_scale_addr` 前移到这次写入之前。对于固定且对齐的 A5 L0 分配，codegen 直接
 指定 scale 地址（`data_byte_address / 16`），避免抽取之间的 scalar pipe 依赖。
 其他情况下，在对应 data tile 已定义后、抽取之前发射地址绑定。
-直接 scale 抽取要求先定义配对的 data tile，且 scale 结果仅由配对的 MX matmul 消费，
+直接 scale 抽取要求先定义配对的 data tile，且 scale 结果直接传给配对的 MX 绑定（中间不经过别名），
 使 scale 的生命周期不会超过其 L0 data 分配的生命周期。
 提前绑定的抽取 scale 与共享同一 L0 data 分配的其他 scale 生命周期不得重叠，
 包括 `bind_scale_addr` + `extract_into` 和 Mat 到 scale 的 `tmov` 生产者。
 对于控制流选择或循环携带的 scale，检查涵盖全部输入生产者的生命周期。
+元数据更新及其他保留 buffer 的别名会追溯到原始写入操作。
 应先消费第一个 scale，再写入下一个 scale。如果 data view 的 descriptor 定义支配
 抽取操作，也允许使用该 view。
 

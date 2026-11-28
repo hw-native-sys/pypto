@@ -375,13 +375,15 @@ class Program:
 
 
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
-@pytest.mark.parametrize("producer", ["bound-extract", "bound-extract-reuse", "move"])
+@pytest.mark.parametrize(
+    "producer", ["bound-extract", "bound-extract-reuse", "move", "move-alias", "extract-alias"]
+)
 @pytest.mark.parametrize("overlap", [False, True])
 def test_mx_scale_extract_interferes_with_other_scale_producers(planner, producer, overlap):
     # Consuming the last extract first lets InsertMxScaleAddr rewrite it to
     # bind_scale_addr + extract_into; the earlier extract still needs codegen's
     # early binding. A TMOV producer also writes to the paired hardware address.
-    if producer.startswith("bound-extract"):
+    if producer.startswith("bound-extract") or producer == "extract-alias":
         other = "sa1 = pl.tile.extract(sam, 0, 4, [64, 4], target_memory=pl.Mem.LeftScale)"
     else:
         other = "sa1 = pl.move(sam1, pl.Mem.LeftScale)"
@@ -396,6 +398,11 @@ def test_mx_scale_extract_interferes_with_other_scale_producers(planner, produce
         body = [direct, other, mma]
     else:
         body = [other, mma, direct] if first == "sa1" else [direct, mma, other]
+    if producer.endswith("-alias"):
+        # The descriptor is defined after the first consumer, but the write
+        # happened earlier. Its alias must not shorten the physical lifetime.
+        body.append("late = pl.set_validshape(sa1, 64, 4)")
+        second = "late"
     body_source = "\n        ".join(body)
     program = pl.parse_program(f"""
 @pl.program
@@ -421,7 +428,13 @@ class Program:
         acc = pl.matmul_mx_acc(acc, a0, {second}, b0, sb0)
         return pl.store(acc, [0, 0], out)
 """)
-    if overlap:
+    if producer == "extract-alias":
+        # Direct TEXTRACT must bind its original destination, not merely an
+        # alias defined after the write. Reject this unsupported escape even
+        # when the original extract has no direct tget_scale_addr use.
+        with pytest.raises(ValueError, match="MX scale TEXTRACT output must only be used"):
+            _emit_incore_mlir(program, planner=planner)
+    elif overlap:
         lowered = ir.python_print(_run_default_pipeline(program, planner=planner))
         if producer.startswith("bound-extract"):
             assert "tile.bind_scale_addr" in lowered and "tile.extract_into" in lowered
