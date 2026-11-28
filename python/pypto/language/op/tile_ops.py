@@ -173,6 +173,7 @@ from ._tile_memory import store as store
 from ._tile_memory import transpose as transpose
 from ._tile_memory import transpose_view as transpose_view
 from ._tile_memory import tri as tri
+from ._tile_memory import view as view
 from ._tile_memory import write as write
 from ._tile_reduction import col_argmax as col_argmax
 from ._tile_reduction import col_argmin as col_argmin
@@ -311,6 +312,7 @@ __all__ = [
     "max",
     "min",
     "slice",
+    "view",
     "reshape",
     "reinterpret_view",
     "transpose",

@@ -119,6 +119,7 @@ Tensor `pl.col_sum(x, is_binary=True)` selects binary-tree reduction with compil
 | [`reshape`][pypto.language.reshape] | `pl.` | Reinterpret dimensions |
 | [`transpose`][pypto.language.transpose] | `pl.` | Transpose |
 | [`slice`][pypto.language.slice] | `pl.` | Sub-region; also written `A[0:16, :]` |
+| [`view`][pypto.language.tile.view] | `pl.tile.` | Zero-copy tile window with static shape, static or runtime offsets, and inherited strides |
 | [`concat`][pypto.language.concat] | `pl.` | Join along an axis |
 | [`assemble`][pypto.language.tensor.assemble] | `pl.` | Write a sub-region back; also written `dst[i:i+16] = src` |
 | [`reinterpret_view`][pypto.language.reinterpret_view] | `pl.` | Reinterpret without moving data |

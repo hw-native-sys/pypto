@@ -154,6 +154,11 @@ On Ascend950, `quant_mx` and `matmul_mx` may share the same InCore mixed task.
 The compiler transports both quantized data and the FP8E8M0 scale directly over
 V2C while retaining the scale's logical fractal-32 layout.
 
+`pl.tile.view(src, shape, offsets=..., valid_shape=...)` constructs the existing
+`tile.slice` IR operation. It describes a static-size, unit-step window with
+possibly dynamic offsets and inherits the source's physical strides. Tile
+codegen emits `pto.subview`. Buffer IR first lowers the window to `buffer.subview`.
+
 `tile.reshape` preserves dtype, element count, and the source's valid region (see below); `tile.reinterpret_view(data, dtype, *, shape=None)` changes dtype while preserving exact byte size. Without `shape`, it scales the physically contiguous axis using the source/target dtype byte widths and tile layout. Under PTOAS memory planning, it lowers to the aliasing PTO `treshape` primitive for both same-shape and width-changing views, except packed FP4E2M1X2↔UINT8/INT8 aliases: PTOAS 0.65 rejects that dtype in `treshape`, so these pairs require PYPTO or DSA_RP.
 
 Packed `FP4E2M1X2` byte aliases require PYPTO or DSA_RP for tiles; PTOAS 0.65

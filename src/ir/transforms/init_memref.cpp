@@ -61,6 +61,7 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/l0c_footprint.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
@@ -263,7 +264,8 @@ std::optional<uint64_t> StaticTensorViewSpanBytes(const TensorTypePtr& tensor,
 /// L0C row padding belongs to the root allocation and must not be applied again
 /// to a view beginning part-way through that allocation.
 std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const ShapedTypePtr& parent,
-                                                 const ShapedTypePtr& view) {
+                                                 const ShapedTypePtr& view,
+                                                 std::optional<int64_t> inherited_row_stride) {
   if (!call || (!IsOp(call, "tensor.slice") && !IsOp(call, "tile.slice"))) return std::nullopt;
   if (!parent || !view || call->args_.size() < 3) return std::nullopt;
   // Use the requested pre-drop shape rather than the result rank so
@@ -319,8 +321,11 @@ std::optional<uint64_t> StaticSliceViewSpanBytes(const CallPtr& call, const Shap
     if (max_linear_offset > std::numeric_limits<uint64_t>::max() - contribution) return std::nullopt;
     max_linear_offset += contribution;
     if (rev + 1 < parent->shape_.size()) {
-      if (stride > std::numeric_limits<uint64_t>::max() / parent_extent) return std::nullopt;
-      stride *= parent_extent;
+      const auto physical_extent = inherited_row_stride && parent->shape_.size() == 2 && i == 1
+                                       ? static_cast<uint64_t>(*inherited_row_stride)
+                                       : parent_extent;
+      if (stride > std::numeric_limits<uint64_t>::max() / physical_extent) return std::nullopt;
+      stride *= physical_extent;
     }
   }
 
@@ -621,11 +626,12 @@ class DeclaredAllocCollector : public IRVisitor {
 class InitMemRefMutator : public IRMutator {
  public:
   InitMemRefMutator(const DeclaredAllocMap& declared_allocs, const backend::BackendHandler* handler,
-                    FunctionType func_type, ProgramPtr program)
+                    FunctionType func_type, ProgramPtr program, const StmtPtr& body)
       : declared_allocs_(declared_allocs),
         handler_(handler),
         func_type_(func_type),
-        program_(std::move(program)) {}
+        program_(std::move(program)),
+        views_(body) {}
 
   /// The MemRef a user binding asks for, sized to the slot it selects.
   /// Returns nullopt when `type` carries no binding.
@@ -913,8 +919,12 @@ class InitMemRefMutator : public IRMutator {
 
     // Compute additional byte offset from the view op (if applicable)
     ExprPtr additional_offset = MakeZeroByteOffset();
+    std::optional<int64_t> inherited_row_stride;
+    if (auto original_call = As<Call>(op->value_); original_call && IsOp(original_call, "tile.slice")) {
+      inherited_row_stride = views_.GetWindowRowStride(original_call->args_[0]);
+    }
     if (auto call = As<Call>(new_value)) {
-      additional_offset = ComputeViewByteOffset(call, source->GetType());
+      additional_offset = ComputeViewByteOffset(call, source->GetType(), inherited_row_stride);
     }
 
     auto source_ms = ExtractMemorySpaceFromType(source->GetType());
@@ -934,7 +944,8 @@ class InitMemRefMutator : public IRMutator {
       if (IsWindowTensorView(call)) {
         auto tensor = AsTensorTypeLike(op->var_->GetType());
         view_size = StaticTensorViewSpanBytes(tensor, tensor->shape_).value_or(0);
-      } else if (auto slice_span = StaticSliceViewSpanBytes(call, parent_shaped, out_shaped)) {
+      } else if (auto slice_span =
+                     StaticSliceViewSpanBytes(call, parent_shaped, out_shaped, inherited_row_stride)) {
         view_size = *slice_span;
       }
     }
@@ -1294,6 +1305,7 @@ class InitMemRefMutator : public IRMutator {
   const backend::BackendHandler* handler_ = nullptr;
   FunctionType func_type_ = FunctionType::InCore;
   ProgramPtr program_;
+  BufferViewAnalysis views_;
   TupleResultStorage tuple_results_;
   uint64_t next_id_ = 0;
 };
@@ -1371,7 +1383,8 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func, const ProgramPtr& progr
     }
   }
 
-  InitMemRefMutator mutator(declared_allocs, handler, normalized_func->func_type_, program);
+  InitMemRefMutator mutator(declared_allocs, handler, normalized_func->func_type_, program,
+                            normalized_func->body_);
 
   std::vector<VarPtr> new_params;
   new_params.reserve(normalized_func->params_.size());

@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/attrs.h"
+#include "pypto/ir/transforms/utils/buffer_view_analysis.h"
 #include "pypto/ir/transforms/utils/memref_collectors.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
@@ -185,6 +186,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
   YieldFixupMutator() = default;
 
   StmtPtr Run(const StmtPtr& body, const std::vector<VarPtr>& parameters) {
+    views_.Analyze(body);
     if (canonical_branch_storage_) names_.Collect(body, parameters);
     if (selections_) {
       for (const auto& [old_var, replacement] : selections_->tiles) {
@@ -241,7 +243,8 @@ class YieldFixupMutator : public StorageBoundaryMutator {
       // Recompute only its relative offset from the rewritten call, retaining its
       // own extent and inheriting the repaired source's allocation/slot identity.
       auto view_call = As<Call>(assignment->value_);
-      auto relative_offset = ComputeViewByteOffset(view_call, new_input_tile);
+      auto relative_offset =
+          ComputeViewByteOffset(view_call, new_input_tile, views_.GetWindowRowStride(input));
       target = MakeAliasingMemRef(target, relative_offset, GetDefinedMemRef(output_tile)->size_, op->span_);
     } else if (!SamePhysicalWindow(GetDefinedMemRef(output_tile), GetDefinedMemRef(input_tile))) {
       return result;
@@ -502,6 +505,7 @@ class YieldFixupMutator : public StorageBoundaryMutator {
 
  private:
   std::optional<StorageSelectionPlan> selections_;
+  BufferViewAnalysis views_;
 
   static StmtPtr SelectionBarrier(const Span& span) {
     return std::make_shared<EvalStmt>(OpRegistry::GetInstance().Create("system.bar_all", {}, {}, span), span);
@@ -1254,6 +1258,11 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
   explicit NormalizeIdentityCopyBuffersMutator(std::set<const Var*> unsettled)
       : unsettled_(std::move(unsettled)) {}
 
+  StmtPtr Run(const StmtPtr& body) {
+    views_.Analyze(body);
+    return VisitStmt(body);
+  }
+
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = subst_.find(op);
     return it != subst_.end() ? it->second : op;
@@ -1395,7 +1404,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
     if (!reuse_idx) {
       // Derive only the view-relative offset. A writeback's transfer offset
       // selects what it writes; its result still denotes the whole destination.
-      auto relative = ComputeViewByteOffset(call, new_in->GetType());
+      auto relative = ComputeViewByteOffset(call, new_in->GetType(), views_.GetWindowRowStride(in_var));
       target = MakeAliasingMemRef(target, relative, (*lhs->memref_)->size_, (*lhs->memref_)->span_);
     }
     if (SamePhysicalWindow(*lhs->memref_, target) && lhs->GetMemorySpace() == input->GetMemorySpace()) {
@@ -1411,6 +1420,7 @@ class NormalizeIdentityCopyBuffersMutator : public StorageBoundaryMutator {
 
   std::map<VarPtr, ExprPtr> subst_;
   std::set<const Var*> unsettled_;
+  BufferViewAnalysis views_;
 };
 
 /// Every IfStmt return_var (phi) reachable in a body.  These are the vars whose
@@ -1453,7 +1463,7 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Va
 StmtPtr NormalizeIdentityCopyBuffersBeforeYieldFixup(const StmtPtr& body) {
   IfPhiReturnVarCollector collector;
   collector.VisitStmt(body);
-  return NormalizeIdentityCopyBuffersMutator(std::move(collector.phis)).VisitStmt(body);
+  return NormalizeIdentityCopyBuffersMutator(std::move(collector.phis)).Run(body);
 }
 
 StmtPtr AlignLoopCarriesToInit(const StmtPtr& body) {
@@ -1461,7 +1471,7 @@ StmtPtr AlignLoopCarriesToInit(const StmtPtr& body) {
 }
 
 StmtPtr NormalizeIdentityCopyBuffers(const StmtPtr& body) {
-  return NormalizeIdentityCopyBuffersMutator().VisitStmt(body);
+  return NormalizeIdentityCopyBuffersMutator().Run(body);
 }
 
 StmtPtr FixupYields(const StmtPtr& body, const std::vector<VarPtr>& parameters, bool fixup_if_stmts,

@@ -110,6 +110,7 @@ Tensor 的 `pl.col_sum(x, is_binary=True)` 使用编译器分配的静态二维�
 | [`reshape`][pypto.language.reshape] | `pl.` | 重新解释维度 |
 | [`transpose`][pypto.language.transpose] | `pl.` | 转置 |
 | [`slice`][pypto.language.slice] | `pl.` | 子区域；也可写作 `A[0:16, :]` |
+| [`view`][pypto.language.tile.view] | `pl.tile.` | 片上零拷贝窗口，shape 静态，偏移可在运行时指定，继承源 stride |
 | [`concat`][pypto.language.concat] | `pl.` | 沿轴拼接 |
 | [`assemble`][pypto.language.tensor.assemble] | `pl.` | 把子区域写回；也可写作 `dst[i:i+16] = src` |
 | [`reinterpret_view`][pypto.language.reinterpret_view] | `pl.` | 不搬数据的重新解释 |

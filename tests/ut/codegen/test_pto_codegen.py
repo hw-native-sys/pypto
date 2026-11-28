@@ -3985,6 +3985,48 @@ def test_pto_codegen_slice_static_subwindow_binds_subview_result():
     assert len(tmov_lines) == 0, f"Static subwindow view should not materialize a pto.tmov, got: {tmov_lines}"
 
 
+@pytest.mark.parametrize("enable_buffer_ir", [False, True], ids=["tile-ir", "buffer-ir"])
+@pytest.mark.parametrize("explicit_valid", [False, True], ids=["implicit-valid", "explicit-valid"])
+def test_pto_codegen_tile_view_uses_slice_lowering(tmp_path, enable_buffer_ir, explicit_valid):
+    def make_program(window: str) -> ir.Program:
+        return pl.parse_program(f"""
+@pl.program
+class TileWindow:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64, 64], pl.FP32], row: pl.Scalar[pl.INDEX],
+               cols: pl.Scalar[pl.INDEX], out: pl.Out[pl.Tensor[[16, 32], pl.FP32]]
+               ) -> pl.Tensor[[16, 32], pl.FP32]:
+        tile = pl.load(x, [0, 0], [64, 64])
+        window = {window}
+        return pl.store(pl.add(window, window), [0, 0], out)
+""")
+
+    valid_shape = ", valid_shape=[16, cols]" if explicit_valid else ""
+    view = make_program(f"pl.tile.view(tile, [16, 32], offsets=[row, 0]{valid_shape})")
+    sliced = make_program(f"pl.tile.slice(tile, [16, 32], [row, 0]{valid_shape})")
+    ir.assert_structural_equal(view, sliced, enable_auto_mapping=True)
+
+    planner = passes.MemoryPlanner.PTOAS
+    with passes.PassContext([], memory_planner=planner, enable_buffer_ir=enable_buffer_ir):
+        lowered = _run_default_passes(view)
+        mlir = _get_mlir_code(PTOCodegen().generate(lowered, emit_tile_addr=False))
+
+    (kernel,) = lowered.functions.values()
+    assert (kernel.ir_stage == ir.FunctionIRStage.Buffer) == enable_buffer_ir
+    if enable_buffer_ir:
+        assert "buffer.subview" in ir.python_print(lowered)
+    # Buffer lowering can also create a view to narrow the arithmetic result.
+    (subview,) = [
+        line for line in _find_lines(_get_mlir_lines(mlir), "pto.subview") if "rows=64, cols=64" in line
+    ]
+    assert "sizes [16, 32]" in subview
+    if explicit_valid:
+        assert "valid [" in subview
+    assert "pto.tmov" not in mlir
+    if find_ptoas_binary() is not None:
+        pto_backend._compile_pto_module(mlir, "tile_view", str(tmp_path), memory_planner=planner)
+
+
 class TestColumnVectorCodegen:
     """[M, 1] column-vector tensors auto-emit DN layout in make_tensor_view."""
 

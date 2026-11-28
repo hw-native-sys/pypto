@@ -738,7 +738,8 @@ inline bool IsWindowTensorView(const CallPtr& call) {
 
 /// Compute additional byte offset for a view operation.
 /// Dispatches: slice ops → stride-based offset, others → zero offset.
-inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type) {
+inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_type,
+                                     std::optional<int64_t> inherited_row_stride = std::nullopt) {
   if (IsWindowTensorView(call)) {
     auto parent = AsTensorTypeLike(parent_type);
     INTERNAL_CHECK_SPAN(parent, call->span_) << "tensor.view window source must be a GM tensor";
@@ -779,7 +780,11 @@ inline ExprPtr ComputeViewByteOffset(const CallPtr& call, const TypePtr& parent_
     // their existing shape-based addressing.
     auto acc_geometry = GetSliceAccumulatorGeometry(call, parent_type);
 
-    return ComputeSliceByteOffset(offsets, shaped->shape_, shaped->dtype_, call->span_, acc_geometry);
+    auto parent_shape = shaped->shape_;
+    if (IsOp(call, "tile.slice") && inherited_row_stride && parent_shape.size() == 2) {
+      parent_shape[1] = MakeIndexConst(*inherited_row_stride, call->span_);
+    }
+    return ComputeSliceByteOffset(offsets, parent_shape, shaped->dtype_, call->span_, acc_geometry);
   }
 
   // Non-slice view ops (reshape, transpose, extract):
