@@ -47,6 +47,8 @@ __all__ = [
     "sync_dst",
     "set_flag",
     "wait_flag",
+    "get_buf",
+    "rls_buf",
     "sync_set",
     "sync_wait",
     "set_intra_block",
@@ -118,6 +120,23 @@ def wait_flag(
     """Block ``dst_pipe`` until the matching source event is signalled."""
     event = event_id.unwrap() if isinstance(event_id, Scalar) else event_id
     return _ir_ops.wait_flag(src_pipe, dst_pipe, event, core_type=core_type, span=span)
+
+
+def get_buf(buf_id: IntLike, *, pipe: PipeType, span: Span | None = None) -> Call:
+    """Acquire an A5 hardware buffer token on PIPE_M or PIPE_FIX (mode 0).
+
+    Pair with :func:`rls_buf` using the same pipe and token. Static IDs are
+    0--31; a dynamic ID must be an INDEX scalar in that range. The author owns
+    the token lifetime and must avoid collision with automatic synchronization.
+    """
+    operand = buf_id.unwrap() if isinstance(buf_id, Scalar) else buf_id
+    return _ir_ops.get_buf(operand, pipe=pipe, span=span)
+
+
+def rls_buf(buf_id: IntLike, *, pipe: PipeType, span: Span | None = None) -> Call:
+    """Release a matrix/FIX token after the preceding work on that pipe."""
+    operand = buf_id.unwrap() if isinstance(buf_id, Scalar) else buf_id
+    return _ir_ops.rls_buf(operand, pipe=pipe, span=span)
 
 
 def set_quant_scalar(scale: Scalar | Expr | float, *, id: int = 0, span: Span | None = None) -> Call:

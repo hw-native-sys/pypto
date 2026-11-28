@@ -51,6 +51,9 @@ class ExplicitFlagPlacementChecker : public IRVisitor {
           << "Explicit set_flag/wait_flag cannot be used inside pl.pipeline: pipeline scheduling does not "
              "preserve their source order. Use pl.range for manual flags until pipeline scheduling supports "
              "them.";
+      CHECK_SPAN(!IsOp(op, "system.get_buf") && !IsOp(op, "system.rls_buf"), op->span_)
+          << "Explicit get_buf/rls_buf cannot be used inside pl.pipeline: pipeline scheduling does not "
+             "preserve their source order. Use pl.range for manual buffer tokens.";
       // Same defect, different op: a pipe barrier has no operand, so the def-use
       // graph gives CanonicalizeIOOrder no edge to hold it in place. Authoring
       // `store(...); barrier(pipe=MTE3)` inside a pipeline loop yields the

@@ -16,10 +16,12 @@
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/pipe.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -82,6 +84,30 @@ TypePtr DeducePipelineFlagType(const std::vector<ExprPtr>& args,
   return GetUnknownType();
 }
 
+// A5 buffer IDs are hardware tokens shared between producers and consumers.
+// Use INDEX for a dynamic ID: PTOAS get_buf_dyn/rls_buf_dyn require index,
+// unlike intra-block semaphores, whose runtime IDs are INT32 or INT64.
+TypePtr DeduceBufferLockType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs, const char* name) {
+  CHECK(args.size() == 1) << name << " requires one buffer ID operand";
+  auto type = As<ScalarType>(args[0]->GetType());
+  CHECK(type && type->dtype_ == DataType::INDEX) << name << " buffer ID must be a ScalarType(INDEX)";
+  if (auto id = As<ConstInt>(args[0])) {
+    CHECK(id->value_ >= 0 && id->value_ <= 31) << name << " buffer ID must be in [0, 31]";
+  }
+  bool has_pipe = false;
+  for (const auto& [key, value] : kwargs) {
+    CHECK(key == "pipe") << name << " has unknown attribute '" << key << "'";
+    CHECK(!has_pipe) << name << " has duplicate pipe";
+    has_pipe = true;
+    const int pipe = AnyCast<int>(value, key);
+    CHECK(pipe == static_cast<int>(PipeType::M) || pipe == static_cast<int>(PipeType::FIX))
+        << name << " currently supports only PIPE_M and PIPE_FIX";
+  }
+  CHECK(has_pipe) << name << " requires a pipe";
+  return GetUnknownType();
+}
+
 }  // namespace
 
 // ============================================================================
@@ -132,6 +158,28 @@ REGISTER_OP("system.wait_flag")
     .set_attr<std::string>("core_type")
     .f_deduce_type([](const auto& args, const auto& kwargs) {
       return DeducePipelineFlagType(args, kwargs, "system.wait_flag");
+    });
+
+// Only the matrix and FIX pipeline forms are exposed. Both execute on AIC;
+// pin them there even when authored in a mixed InCore region.
+REGISTER_OP("system.get_buf")
+    .set_description("Acquire an A5 buffer token on the matrix or FIX pipeline (mode 0)")
+    .set_op_category("SyncOp")
+    .add_argument("buf_id", "Static or dynamic INDEX buffer ID in [0, 31]")
+    .set_attr<int>("pipe")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBufferLockType(args, kwargs, "system.get_buf");
+    });
+
+REGISTER_OP("system.rls_buf")
+    .set_description("Release an A5 buffer token on the matrix or FIX pipeline (mode 0)")
+    .set_op_category("SyncOp")
+    .add_argument("buf_id", "Static or dynamic INDEX buffer ID in [0, 31]")
+    .set_attr<int>("pipe")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .f_deduce_type([](const auto& args, const auto& kwargs) {
+      return DeduceBufferLockType(args, kwargs, "system.rls_buf");
     });
 
 /// Deduce `system.bar_*`: operand-free, with an optional `core_type` naming one lane.

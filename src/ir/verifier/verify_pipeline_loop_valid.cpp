@@ -86,6 +86,14 @@ class PipelineLoopValidChecker : public IRVisitor {
                                     "Use pl.range for manual flags until pipeline scheduling supports them.",
                                 op->span_);
     }
+    if (in_pipeline_ && (IsOp(op, "system.get_buf") || IsOp(op, "system.rls_buf"))) {
+      diagnostics_.emplace_back(
+          DiagnosticSeverity::Error, "PipelineLoopValid", 2,
+          "Explicit get_buf/rls_buf in function '" + func_name_ +
+              "' cannot be used inside pl.pipeline: pipeline scheduling does not preserve their "
+              "source order. Use pl.range for manual buffer tokens.",
+          op->span_);
+    }
     IRVisitor::VisitExpr_(op);
   }
 

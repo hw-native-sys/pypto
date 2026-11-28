@@ -357,6 +357,8 @@ MIGRATION_FAMILIES = (
             "system.wait_intra_block",
             "system.set_flag",
             "system.wait_flag",
+            "system.get_buf",
+            "system.rls_buf",
             "system.set_ffts",
             "system.syncall",
         ),

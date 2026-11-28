@@ -745,6 +745,33 @@ void RegisterCrossCoreOps(Backend& backend, const std::unordered_set<std::string
     return emit_flag(op, base, "wait_flag");
   });
 
+  auto emit_buffer_lock = [](const ir::CallPtr& op, codegen::CodegenBase& base, const char* instruction) {
+    auto& codegen = AsPto(base);
+    CHECK_SPAN(codegen.GetBackendHandler()->GetPtoTargetArch() == "a5" && codegen.IsAICFunction(), op->span_)
+        << op->op_->name_ << " requires an A5 AIC function";
+    codegen.RecordExplicitPipeFlag();
+    INTERNAL_CHECK_SPAN(op->args_.size() == 1, op->span_) << "Buffer lock requires one buffer ID";
+    const auto pipe = static_cast<ir::PipeType>(op->GetKwarg<int>("pipe"));
+    // Although <PIPE_M>/<PIPE_FIX> parse, PTOAS 0.78 EmitC does not lower
+    // those attributes for buffer locks. These native operation kinds emit the
+    // matching hardware pipe, unlike flag synchronization instructions.
+    const std::string operation = pipe == ir::PipeType::M ? "\"TMATMUL\"" : "\"TSTORE_ACC\"";
+    if (auto id = As<ir::ConstInt>(op->args_[0])) {
+      codegen.Emit(std::string("pto.") + instruction + " " + operation + ", " + std::to_string(id->value_) +
+                   ", 0");
+    } else {
+      const auto dynamic_id = EmitIndexOperand(codegen, op->args_[0], "buffer lock ID");
+      codegen.Emit(std::string("pto.") + instruction + "_dyn " + operation + ", " + dynamic_id + ", 0");
+    }
+    return std::string("");
+  };
+  reg("system.get_buf", [emit_buffer_lock](const ir::CallPtr& op, codegen::CodegenBase& base) {
+    return emit_buffer_lock(op, base, "get_buf");
+  });
+  reg("system.rls_buf", [emit_buffer_lock](const ir::CallPtr& op, codegen::CodegenBase& base) {
+    return emit_buffer_lock(op, base, "rls_buf");
+  });
+
   reg("tile.tpush_to_aiv", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpushCodegenPTO("aiv", op, codegen);
   });

@@ -334,6 +334,15 @@ INDEX scalar，但其实际值必须在 0 到 7 之间。一个 flag 只供一�
 显式 flag 必须放在 `pl.pipeline` 循环之外。当前流水线调度无法保持它们的源码顺序，
 因此 PyPTO 会拒绝循环中的任一 flag。需要在循环内手工同步时，请使用 `pl.range`。
 
+在 A5 上，AIC 的矩阵流水和 FIX 流水还可以用
+`pl.system.get_buf(buf_id, pipe=...)` 和
+`pl.system.rls_buf(buf_id, pipe=...)` 获取和释放显式硬件缓冲区 token。
+这两个操作下沉为 mode-0 buffer lock；`pipe` 为 `pl.PipeType.M` 或
+`pl.PipeType.FIX`，ID 为 [0, 31] 内的常量或运行时 INDEX scalar。
+例如，矩阵流水生产循环复用的 L0C 累加器、FIX 流水消费该累加器时，可以使用同一 token。
+作者负责 token 分配、获取/释放配对以及其他流水线依赖。手工同步循环请用
+`pl.range`，而非 `pl.pipeline`。
+
 流水线屏障统一使用 `pl.system.barrier(*, pipe)`，必选关键字接受 `pl.PipeType`
 的任意成员。单流水线屏障为对应流水线的前后工作建立顺序，这是在不占用事件槽的
 前提下，把缓冲区复用与在途搬运定序的低成本写法。屏障排空的是**流水**而非某个

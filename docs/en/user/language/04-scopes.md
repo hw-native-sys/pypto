@@ -378,6 +378,16 @@ Keep explicit flags outside `pl.pipeline` loops. Pipeline scheduling cannot yet
 preserve their authored order, so PyPTO rejects either flag in such a loop.
 Use `pl.range` when manually synchronizing work inside a loop.
 
+On A5, the AIC matrix and FIX pipes can also acquire/release an explicit
+hardware buffer token with `pl.system.get_buf(buf_id, pipe=...)` and
+`pl.system.rls_buf(buf_id, pipe=...)`. These lower to mode-0 buffer locks;
+`pipe` is either `pl.PipeType.M` or `pl.PipeType.FIX`, and the ID is a
+literal in [0, 31] or a dynamic INDEX scalar in the same range. For example,
+a rotating L0C accumulator can be protected by the same token on M
+while producing it and on FIX while consuming it. The author controls token
+allocation, paired acquire/release, and all other pipe dependencies.
+Use `pl.range`, not `pl.pipeline`, for manually synchronized loops.
+
 For a pipeline barrier, use `pl.system.barrier(*, pipe)`. The required keyword
 accepts any `pl.PipeType` member. A single-pipe barrier orders preceding and
 following work on that pipeline, which is the cheap way to order a buffer reuse
