@@ -562,6 +562,129 @@ def test_mx_scale_extract_accepts_dominating_reshape(tmp_path, planner):
     assert "TEXTRACT(" in _assemble_mx(mlir, tmp_path, planner=planner)
 
 
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("side, offset", [("left", 128), ("left", 512), ("right", 128)])
+@pytest.mark.parametrize("write_into", [False, True])
+def test_mx_scale_extract_uses_runtime_binding_for_boxed_l0_subview(tmp_path, planner, side, offset, write_into):
+    # Boxed K windows have physical offsets different from their logical
+    # MemRef offsets. The scale write must follow the emitted subview handle.
+    a_k = offset + 128 if side == "left" else 128
+    n = 128 if side == "right" else 256
+    b_k = 256 if side == "right" else 128
+    if side == "left":
+        parent = (
+            f"parent = pl.tile.create([64, {a_k}], pl.FP8E4M3FN, target_memory=pl.Mem.Left)"
+            if write_into
+            else "parent = pl.move(am, pl.Mem.Left)"
+        )
+        data = [parent, f"a0 = pl.tile.slice(parent, [64, 128], [0, {offset}])", "b0 = pl.move(bm, pl.Mem.Right)"]
+        if write_into:
+            data.append(f"a0 = pl.tile.extract_into(a0, am, 0, {offset})")
+    else:
+        parent = (
+            f"parent = pl.tile.create([256, {n}], pl.FP8E4M3FN, target_memory=pl.Mem.Right)"
+            if write_into
+            else "parent = pl.move(bm, pl.Mem.Right)"
+        )
+        data = [parent, f"b0 = pl.tile.slice(parent, [128, {n}], [128, 0])", "a0 = pl.move(am, pl.Mem.Left)"]
+        if write_into:
+            data.append("b0 = pl.tile.extract_into(b0, bm, 128, 0)")
+    scales = [
+        "sa0 = pl.tile.extract(sam, 0, 0, [64, 4], target_memory=pl.Mem.LeftScale)",
+        f"sb0 = pl.tile.extract(sbm, 0, 0, [4, {n}], target_memory=pl.Mem.RightScale)",
+    ]
+    body = "\n        ".join([*data, *scales])
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def main(
+        self,
+        a: pl.Tensor[[64, {a_k}], pl.FP8E4M3FN],
+        b: pl.Tensor[[{b_k}, {n}], pl.FP8E4M3FN],
+        sa: pl.Tensor[[64, 4], pl.FP8E8M0, pl.MX_A_ZZ],
+        sb: pl.Tensor[[4, {n}], pl.FP8E8M0, pl.MX_B_NN],
+        flag: pl.Scalar[pl.INDEX],
+        out: pl.Out[pl.Tensor[[64, {n}], pl.FP32]],
+    ) -> pl.Tensor[[64, {n}], pl.FP32]:
+        am = pl.load(a, [0, 0], [64, {a_k}], target_memory=pl.Mem.Mat)
+        bm = pl.load(b, [0, 0], [{b_k}, {n}], target_memory=pl.Mem.Mat)
+        sam = pl.load(sa, [0, 0], [64, 4], target_memory=pl.Mem.Mat)
+        sbm = pl.load(sb, [0, 0], [4, {n}], target_memory=pl.Mem.Mat)
+        {body}
+        if flag > 0:
+            acc = pl.matmul_mx(a0, sa0, b0, sb0)
+        else:
+            acc = pl.matmul_mx(a0, sa0, b0, sb0)
+            acc = pl.matmul_mx_acc(acc, a0, sa0, b0, sb0)
+        return pl.store(acc, [0, 0], out)
+""")
+    # The control-flow boundary preserves the direct scale extract rather than
+    # letting InsertMxScaleAddr rewrite it to an explicitly bound destination.
+    lowered = ir.python_print(_run_default_pipeline(program, planner=planner))
+    assert "tile.tget_scale_addr" in lowered
+    mlir = _emit_incore_mlir(program, planner=planner)
+    view = re.search(r"(%\S+) = pto\.subview", mlir)
+    assert view, mlir
+    bindings = list(re.finditer(rf"pto\.tget_scale_addr ins\({re.escape(view[1])} :.*?outs\((%\S+) :", mlir))
+    assert len(bindings) == 1, mlir
+    destination = bindings[0][1]
+    extract = re.search(rf"pto\.textract .*?outs\({re.escape(destination)} :", mlir)
+    assert extract and view.start() < bindings[0].start() < extract.start(), mlir
+    # The fixed-address planner also emits an unused allocation for the
+    # logical slice offset; the 128-byte case is not PTOAS-aligned. Keep
+    # that regression at the IR level and assemble the aligned case.
+    if find_ptoas_binary() is not None and not (
+        planner == passes.MemoryPlanner.PYPTO and side == "left" and offset == 128
+    ):
+        assert "TMATMUL_MX(" in _assemble_mx(mlir, tmp_path, planner=planner)
+
+
+@pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
+@pytest.mark.parametrize("share_parent", [False, True])
+def test_mx_scale_extract_boxed_l0_subview_backing_lifetimes(planner, share_parent):
+    # Row-major MemRefs make two row windows of one boxed parent look disjoint.
+    # Distinct backing allocations, however, can safely hold co-live scales.
+    second_parent = "parent" if share_parent else "pl.move(am1, pl.Mem.Left)"
+    program = pl.parse_program(f"""
+@pl.program
+class Program:
+    @pl.function(type=pl.FunctionType.AIC)
+    def main(
+        self,
+        a: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+        a_other: pl.Tensor[[64, 128], pl.FP8E4M3FN],
+        b: pl.Tensor[[128, 256], pl.FP8E4M3FN],
+        sa: pl.Tensor[[32, 8], pl.FP8E8M0, pl.MX_A_ZZ],
+        sb: pl.Tensor[[4, 256], pl.FP8E8M0, pl.MX_B_NN],
+        out: pl.Out[pl.Tensor[[32, 256], pl.FP32]],
+    ) -> pl.Tensor[[32, 256], pl.FP32]:
+        am = pl.load(a, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        am1 = pl.load(a_other, [0, 0], [64, 128], target_memory=pl.Mem.Mat)
+        bm = pl.load(b, [0, 0], [128, 256], target_memory=pl.Mem.Mat)
+        sam = pl.load(sa, [0, 0], [32, 8], target_memory=pl.Mem.Mat)
+        sbm = pl.load(sb, [0, 0], [4, 256], target_memory=pl.Mem.Mat)
+        parent = pl.move(am, pl.Mem.Left)
+        other = {second_parent}
+        a0 = pl.tile.slice(parent, [32, 128], [0, 0])
+        a1 = pl.tile.slice(other, [32, 128], [32, 0])
+        b0 = pl.move(bm, pl.Mem.Right)
+        sb0 = pl.move(sbm, pl.Mem.RightScale)
+        sa0 = pl.tile.extract(sam, 0, 0, [32, 4], target_memory=pl.Mem.LeftScale)
+        sa1 = pl.tile.extract(sam, 0, 4, [32, 4], target_memory=pl.Mem.LeftScale)
+        acc = pl.matmul_mx(a0, sa0, b0, sb0)
+        acc = pl.matmul_mx_acc(acc, a1, sa1, b0, sb0)
+        return pl.store(acc, [0, 0], out)
+""")
+    if share_parent:
+        with pytest.raises(
+            ValueError, match="Overlapping MX scale extractions cannot share a data allocation"
+        ):
+            _emit_incore_mlir(program, planner=planner)
+    else:
+        assert "pto.tmatmul.mx.acc" in _emit_incore_mlir(program, planner=planner)
+
+
 class TestMxMatmulCodegen:
     @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
     @pytest.mark.parametrize("hint", [pl.CachePolicy.NORMAL_FIRST_VICTIM, pl.CachePolicy.NOT_ALLOC_KEEP])

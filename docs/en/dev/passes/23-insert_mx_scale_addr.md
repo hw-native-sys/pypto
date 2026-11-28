@@ -73,8 +73,10 @@ destination with the corresponding MX data operand before emitting `textract`.
 Unlike Mat-to-scale `tmov`, PTOAS 0.78 does not hoist a later
 `tget_scale_addr` before this write. With a fixed, aligned A5 L0 allocation,
 codegen instead assigns the scale address directly (`data_byte_address / 16`),
-avoiding a scalar pipe dependency between extracts. Otherwise the binding is
-emitted before the extraction, once the associated data tile is defined.
+avoiding a scalar pipe dependency between extracts. Boxed L0 subviews and
+their aliases use descriptor-based runtime binding because their logical
+MemRef offsets do not describe physical fractal addresses. Otherwise the binding
+is emitted before the extraction, once the associated data tile is defined.
 Direct scale extraction requires the paired data tile to be defined first
 and the scale result to feed its paired MX binding directly (without intervening
 aliases), so the scale's lifetime cannot exceed that of its L0 data allocation.
@@ -83,6 +85,8 @@ scale sharing its L0 data allocation, including `bind_scale_addr` + `extract_int
 and Mat-to-scale `tmov` producers. For control-flow-selected or loop-carried
 scales, the check includes the live ranges of all incoming producers. Metadata
 updates and other buffer-preserving aliases are traced to the original write.
+For boxed L0 subviews the overlap check uses the complete backing allocations,
+not logical slice offsets.
 Consume the first scale before writing the next one. A previously defined data
 view is also valid when its descriptor dominates the extraction.
 

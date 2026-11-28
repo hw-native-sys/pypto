@@ -1415,6 +1415,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       std::map<const ir::Var*, size_t> binding_uses;
       std::vector<std::pair<ir::VarPtr, ir::VarPtr>> all_bindings;
       std::map<const ir::Var*, ir::VarPtr> scale_aliases;
+      std::set<const ir::Var*> data_subviews;
       // The allocation analyzer tracks the concrete producers, not phi or
       // loop-carried SSA handles. Keep their incoming value graph separately.
       std::map<const ir::Var*, std::vector<ir::VarPtr>> incoming_values;
@@ -1437,6 +1438,12 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
             if (auto data = ir::AsVarLike(call->args_[0])) {
               all_bindings.emplace_back(stmt->var_, data);
             }
+          }
+        } else if (tile && (tile->GetMemorySpace() == ir::MemorySpace::Left ||
+                            tile->GetMemorySpace() == ir::MemorySpace::Right)) {
+          if (ir::IsOp(call, "tile.slice")) data_subviews.insert(stmt->var_.get());
+          if (auto source = ir::op_predicates::GetBufferAliasSource(stmt->value_)) {
+            RecordIncoming(stmt->var_, source);
           }
         }
         // Count only RHS uses; assignment targets are definitions.
@@ -1524,6 +1531,56 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
         ++it;
       }
     }
+    // Boxed Left/Right slice MemRefs use logical row-major byte offsets,
+    // not the hardware fractal addresses. Follow storage/view and control-flow
+    // aliases to the original allocations. Use their whole backing ranges for
+    // interference checks: disjoint logical windows need not be disjoint in L0.
+    struct DataFootprint {
+      bool has_subview = false;
+      bool unknown = false;
+      std::vector<ir::MemRefPtr> refs;
+    };
+    std::map<const ir::Var*, DataFootprint> footprints;
+    if (!collector.bindings.empty()) {
+      for (const auto& [scale, data] : collector.all_bindings) {
+        auto [it, inserted] = footprints.try_emplace(data.get());
+        if (!inserted) continue;
+        auto& footprint = it->second;
+        std::vector<const ir::Var*> pending{data.get()};
+        std::set<const ir::Var*> visited;
+        while (!pending.empty()) {
+          const auto* var = pending.back();
+          pending.pop_back();
+          if (!visited.insert(var).second) continue;
+          footprint.has_subview |= collector.data_subviews.count(var) != 0;
+          auto incoming = collector.incoming_values.find(var);
+          if (incoming != collector.incoming_values.end()) {
+            for (const auto& source : incoming->second) {
+              if (source) {
+                pending.push_back(source.get());
+              } else {
+                footprint.unknown = true;
+              }
+            }
+          } else if (auto type = ir::GetTileTypeWithMemRef(var->GetType())) {
+            footprint.refs.push_back(ir::GetDefinedMemRef(type));
+          } else {
+            footprint.unknown = true;
+          }
+        }
+        if (footprint.has_subview) {
+          fs_.mx_scale_subview_data.insert(data.get());
+          footprint.unknown |= footprint.refs.empty();
+        } else {
+          // Preserve the existing precise MemRef comparison for ordinary data
+          // descriptors, rather than inflating all aliases to their roots.
+          footprint.refs.clear();
+          if (auto type = ir::GetTileTypeWithMemRef(data->GetType())) {
+            footprint.refs.push_back(ir::GetDefinedMemRef(type));
+          }
+        }
+      }
+    }
     // Direct TEXTRACT writes can interfere with any scale bound to the same
     // data allocation: TMOV's binding is hoisted by PTOAS, and the pass may
     // already have rewritten a different TEXTRACT to bind_scale_addr +
@@ -1599,27 +1656,34 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
                 [](const ScaleLifetime& a, const ScaleLifetime& b) { return a.first < b.first; });
       for (size_t i = 0; i < scales.size(); ++i) {
         const auto& a = scales[i];
-        auto a_type = ir::GetTileTypeWithMemRef(a.data->GetType());
+        auto a_type = As<ir::TileType>(a.data->GetType());
         for (size_t j = i + 1; j < scales.size(); ++j) {
           const auto& b = scales[j];
           if (a.last < b.first) break;
           if (a.scale == b.scale || (!a.early && !b.early)) continue;
-          auto b_type = ir::GetTileTypeWithMemRef(b.data->GetType());
+          auto b_type = As<ir::TileType>(b.data->GetType());
           if (a_type && b_type && a_type->GetMemorySpace() != b_type->GetMemorySpace()) continue;
           bool overlaps = a.data == b.data;
-          if (a_type && b_type) {
-            auto a_ref = ir::GetDefinedMemRef(a_type);
-            auto b_ref = ir::GetDefinedMemRef(b_type);
-            auto a_off = As<ir::ConstInt>(a_ref->byte_offset_);
-            auto b_off = As<ir::ConstInt>(b_ref->byte_offset_);
-            // Fixed offsets are absolute within each L0 address space.
-            // PTOAS offsets are relative to the planner's allocation identity.
-            if ((emit_tile_addr_ && a_off && b_off) || a_ref->base_ == b_ref->base_) {
-              overlaps = true;
-              if (a_off && b_off && a_ref->slot_count_ == 1 && b_ref->slot_count_ == 1) {
-                overlaps = a_off->value_ <= b_off->value_
-                               ? static_cast<uint64_t>(b_off->value_ - a_off->value_) < a_ref->size_
-                               : static_cast<uint64_t>(a_off->value_ - b_off->value_) < b_ref->size_;
+          const auto& a_footprint = footprints.at(a.data.get());
+          const auto& b_footprint = footprints.at(b.data.get());
+          if ((a_footprint.has_subview && a_footprint.unknown) ||
+              (b_footprint.has_subview && b_footprint.unknown)) {
+            overlaps = true;
+          }
+          for (const auto& a_ref : a_footprint.refs) {
+            for (const auto& b_ref : b_footprint.refs) {
+              auto a_off = As<ir::ConstInt>(a_ref->byte_offset_);
+              auto b_off = As<ir::ConstInt>(b_ref->byte_offset_);
+              // Fixed offsets are absolute within each L0 address space.
+              // PTOAS offsets are relative to the planner's allocation identity.
+              if ((emit_tile_addr_ && a_off && b_off) || a_ref->base_ == b_ref->base_) {
+                bool ranges_overlap = true;
+                if (a_off && b_off && a_ref->slot_count_ == 1 && b_ref->slot_count_ == 1) {
+                  ranges_overlap = a_off->value_ <= b_off->value_
+                                       ? static_cast<uint64_t>(b_off->value_ - a_off->value_) < a_ref->size_
+                                       : static_cast<uint64_t>(a_off->value_ - b_off->value_) < b_ref->size_;
+                }
+                overlaps |= ranges_overlap;
               }
             }
           }
@@ -2704,7 +2768,9 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   // divided by 16 (see PTO ISA GetScaleAddr). When PyPTO owns a fixed L0
   // allocation, materialize that address directly. A runtime tget_scale_addr
   // between TEXTRACTs would otherwise add MTE1 -> S -> MTE1 dependencies even
-  // though the two slot addresses are compile-time constants.
+  // though the two slot addresses are compile-time constants. Boxed L0
+  // subviews do not have trustworthy MemRef byte offsets: bind through their
+  // actual emitted descriptors instead of applying the static shortcut.
   const auto paired_data = fs_.mx_scale_extract_data.find(tile_var.get());
   if (emit_tile_addr_ && backend_->GetHandler()->GetPtoTargetArch() == "a5" &&
       paired_data != fs_.mx_scale_extract_data.end() && paired_data->second) {
@@ -2715,7 +2781,8 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
     constexpr int64_t kA5MxScaleAddressRatio = 16;
     if (address && address->value_ >= 0 && address->value_ % kA5MxScaleAddressRatio == 0 &&
         data_memref->slot_count_ == 1 && scale_memref->slot_count_ == 1 &&
-        !IsParameterBackedTile(data_tile)) {
+        !IsParameterBackedTile(data_tile) && !fs_.mx_scale_subview_data.count(paired_data->second.get()) &&
+        !FindSubviewAncestor(LookupVarName(paired_data->second))) {
       fields.addr_ssa = GetOrEmitConstant(address->value_ / kA5MxScaleAddressRatio, DataType::INT64);
       fs_.early_bound_mx_scale_extracts.insert(tile_var.get());
     }

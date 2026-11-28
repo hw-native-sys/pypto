@@ -1355,6 +1355,8 @@ class PTOCodegen : public CodegenBase {
     std::string current_result_buf;
     std::shared_ptr<const ir::TileType> current_result_tile_type;
     std::map<const ir::Var*, ir::VarPtr> mx_scale_extract_data;
+    /// Paired L0 data derived from a boxed slice, requiring descriptor-based binding.
+    std::set<const ir::Var*> mx_scale_subview_data;
     std::set<const ir::Var*> early_bound_mx_scale_extracts;
 
     std::string gm_slot_buffer_ssa;
@@ -1468,6 +1470,7 @@ class PTOCodegen : public CodegenBase {
       current_result_buf.clear();
       current_result_tile_type = nullptr;
       mx_scale_extract_data.clear();
+      mx_scale_subview_data.clear();
       early_bound_mx_scale_extracts.clear();
 
       gm_slot_buffer_ssa.clear();
