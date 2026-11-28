@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_BACKEND_910B_BACKEND_910B_HANDLER_H_
-#define PYPTO_BACKEND_910B_BACKEND_910B_HANDLER_H_
+#ifndef PYPTO_BACKEND_910_BACKEND_910_HANDLER_H_
+#define PYPTO_BACKEND_910_BACKEND_910_HANDLER_H_
 
 #include <cstdint>
 #include <string>
@@ -31,9 +31,9 @@ namespace backend {
  * adapter; the GM-backed slot buffer must be injected by ExpandMixedKernel;
  * the AIV split-load tpop hazard workaround applies on this backend only.
  */
-class Ascend910BHandler : public BackendHandler {
+class Ascend910Handler : public BackendHandler {
  public:
-  static const Ascend910BHandler& Instance();
+  static const Ascend910Handler& Instance();
 
   [[nodiscard]] std::string GetPtoTargetArch() const override { return "a2a3"; }
   [[nodiscard]] const sync::ResourceCatalog& GetSyncResourceCatalog() const override;
@@ -122,10 +122,10 @@ class Ascend910BHandler : public BackendHandler {
   }
 
  private:
-  Ascend910BHandler();
+  Ascend910Handler();
 };
 
 }  // namespace backend
 }  // namespace pypto
 
-#endif  // PYPTO_BACKEND_910B_BACKEND_910B_HANDLER_H_
+#endif  // PYPTO_BACKEND_910_BACKEND_910_HANDLER_H_

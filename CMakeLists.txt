@@ -430,9 +430,9 @@ set(PYPTO_SOURCES
     src/codegen/array_op_codegen.cpp
 
     # Backend
-    src/backend/910B/backend_910b.cpp
-    src/backend/910B/backend_910b_handler.cpp
-    src/backend/910B/backend_910b_ops.cpp
+    src/backend/910/backend_910.cpp
+    src/backend/910/backend_910_handler.cpp
+    src/backend/910/backend_910_ops.cpp
     src/backend/950/backend_950.cpp
     src/backend/950/backend_950_handler.cpp
     src/backend/950/backend_950_ops.cpp

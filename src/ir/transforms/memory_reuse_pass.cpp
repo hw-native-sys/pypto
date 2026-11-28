@@ -93,7 +93,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // Step 2: Identify reuse opportunities.  On Ascend910 split-AIV functions,
   // collect the load + tpop_from_aic hazard inputs so the reuse decision never
   // forms the hazardous in-place sharing (folds in the former
-  // LegalizePTOBufferReuse responsibility).  Off-910B the inputs stay empty and
+  // LegalizePTOBufferReuse responsibility).  Off-910 the inputs stay empty and
   // reuse behaviour is unchanged.
   const memory_reuse::HazardInputs& hazard = constraint_analysis.target_hazard_inputs;
   const memory_reuse::ForbidAliasMap& forbid_alias = constraint_analysis.forbid_alias;

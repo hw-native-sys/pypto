@@ -522,7 +522,7 @@ def _assert_split_aiv_lowered_and_codegen(transformed: _ir.Program, base_name: s
     tile.aic_gather folded into cross-core tpush/tpop by ExpandMixedKernel), so
     the post-pipeline invariants are identical. The caller must have already run
     the Default pipeline under the active Ascend910 backend (the split_aiv /
-    GM-pipe-buffer path is 910B-gated); this helper leaves the backend untouched
+    GM-pipe-buffer path is 910-gated); this helper leaves the backend untouched
     and returns the generated torch code.
 
     Asserts: both AIC/AIV lanes exist and carry the split marker; NO
@@ -604,7 +604,7 @@ def _run_split_aiv_default_and_check(
 ) -> None:
     """Run Default + codegen on a pl.split_aiv kernel and assert full e2e health.
 
-    Pinned to Ascend910 (the split_aiv / GM-pipe-buffer path is 910B-gated).
+    Pinned to Ascend910 (the split_aiv / GM-pipe-buffer path is 910-gated).
     Asserts: pipeline survives Default; both AIC/AIV lanes exist and the split
     is folded (no surviving tile.aiv_shard / tile.aic_gather op); PTO codegen
     emits both lanes with no ``__FREE_VAR``; torch golden matches.
@@ -887,7 +887,7 @@ def test_split_singleton_broadcast_golden(mode, manual):
         # The former whole-function AUTO authoring surface now reports a
         # migration error instead of synthesizing a shard and rewriting offsets.
         reset_for_testing()
-        set_backend_type(BackendType.Ascend910B)
+        set_backend_type(BackendType.Ascend910)
         try:
             with pytest.raises(ValueError, match="Implicit AIV splitting is no longer supported"):
                 legacy_auto_kernel.compile(

@@ -172,8 +172,8 @@ Register with `REGISTER_ORCHESTRATION_OP` — see [reference.md §6](reference.m
 | Simple N-ary op mapping to one PTO instruction | Add a row to the `kSimpleOps` table |
 | Anything else | `backend.RegisterOp("tile.<op>").f_codegen(...)` |
 
-Also check whether the 910B backend needs special handling in
-`src/backend/910B/backend_910b_ops.cpp`. Templates: [reference.md §5](reference.md).
+Also check whether the 910 backend needs special handling in
+`src/backend/910/backend_910_ops.cpp`. Templates: [reference.md §5](reference.md).
 
 ### C3: System Tests
 

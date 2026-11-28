@@ -139,7 +139,7 @@ class LaneProgram:
 """)
 
 
-@pytest.mark.parametrize(("target", "arch"), [(BackendType.Ascend910B, "a3"), (BackendType.Ascend950, "a5")])
+@pytest.mark.parametrize(("target", "arch"), [(BackendType.Ascend910, "a3"), (BackendType.Ascend950, "a5")])
 @pytest.mark.parametrize("lane_kind", ["static", "dynamic", "omit"])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_default_pipeline_keeps_lane_and_compiles(target, arch, lane_kind, planner, ptoas_binary, tmp_path):
@@ -253,7 +253,7 @@ module {
     assert "does not support 'aiv_subblockid' for !pto.tensor_view" in diagnostics
 
 
-@pytest.mark.parametrize("target", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("target", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("split", [3, 4])
 def test_odd_v2c_pypto_restriction_is_preserved(target, split):
     backend.reset_for_testing()
@@ -276,7 +276,7 @@ def test_odd_v2c_pypto_restriction_is_preserved(target, split):
         codegen.PTOCodegen().generate(ir.Program(members, "lane", rejected.span))
 
 
-@pytest.mark.parametrize("target", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("target", [BackendType.Ascend910, BackendType.Ascend950])
 def test_outlining_and_auto_core_placement_keep_lane(target):
     """A captured dynamic lane is retained exclusively in the AIV kernel."""
     backend.reset_for_testing()

@@ -2,7 +2,7 @@
 # PyPTO on-device development image, on top of the official CANN base.
 #
 # Goal: `docker run` -> build PyPTO from a bind-mounted checkout -> run
-# pypto-lib models on a real card, on A2/A3 (Ascend910B) and A5 (Ascend950)
+# pypto-lib models on a real card, on A2/A3 (Ascend910) and A5 (Ascend950)
 # alike. One Dockerfile; the chip series is the CANN base tag.
 #
 #   A2/A3  --build-arg CANN_TAG=9.0.0-a3-ubuntu22.04-py3.11-devel

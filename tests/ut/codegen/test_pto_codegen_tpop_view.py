@@ -105,7 +105,7 @@ def _compile_borrowed_program(
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_borrowed_if_result_codegen(tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType):
     """An ordinary Tile if-result must retain the received handle without an allocation."""
@@ -134,7 +134,7 @@ def test_borrowed_if_result_codegen(tmp_path: Path, planner: passes.MemoryPlanne
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_dynamic_reinterpret_after_borrowed_if(
     tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
@@ -176,7 +176,7 @@ def test_dynamic_reinterpret_after_borrowed_if(
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_borrowed_if_view_result_codegen(
     tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
@@ -209,7 +209,7 @@ def test_borrowed_if_view_result_codegen(
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_different_borrowed_if_sources_keep_phi_copy(
     tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
@@ -241,7 +241,7 @@ def test_different_borrowed_if_sources_keep_phi_copy(
     assert mlir.rindex("pto.tmov") < mlir.index("pto.tfree_from_aic") < mlir.index("pto.tstore")
 
 
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_outer_mat_fifo_if_merge_rejected(planner: passes.MemoryPlanner, backend_type: BackendType):
     """Automatic V2C receives before an if must not fall through to Mat-to-Mat copies."""
@@ -289,7 +289,7 @@ def test_outer_mat_fifo_if_merge_rejected(planner: passes.MemoryPlanner, backend
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_same_mat_fifo_if_result_codegen(
     tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType
@@ -337,7 +337,7 @@ def test_same_mat_fifo_if_result_codegen(
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 @pytest.mark.parametrize("ordinary_else", [False, True])
 def test_branch_local_borrowed_result_copied_before_free(
@@ -406,7 +406,7 @@ def test_branch_local_borrowed_result_copied_before_free(
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 def test_borrowed_fillpad_writeback_codegen(
     tmp_path: Path, planner: passes.MemoryPlanner, backend_type: BackendType

@@ -1694,7 +1694,7 @@ class TestAutoTileMatmulL0MNTiling:
         _assert_ssa_valid(After, "test_matmul_bias_window_load_uses_tensor_remapped_by_earlier_fold")
 
     def test_matmul_bias_capacity_caps_n_even_when_l0abc_fit(self):
-        """The 910B 1 KiB bias table limits INT32 bias windows to N=256."""
+        """The 910 1 KiB bias table limits INT32 bias windows to N=256."""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
         M, K, N = 16, 32, 512
@@ -1797,7 +1797,7 @@ class TestAutoTileMatmulL0MNTiling:
         """M-only tiling reuses one full-width Bias tile without pipeline replication."""
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
-        # FP32 Bias capacity is N=256 on 910B. The output needs M tiling,
+        # FP32 Bias capacity is N=256 on 910. The output needs M tiling,
         # while full N fits only when the existing Bias tile is charged once;
         # applying the Mat-window /2 pipeline bound would force unsupported N
         # tiling and incorrectly defer this legal case.
@@ -2036,7 +2036,7 @@ class TestAutoTileMatmulL0MNTiling:
         from pypto.jit.decorator import jit  # noqa: PLC0415
 
         # Override the autouse Ascend950 fixture: 256×256 FP32 fits L0c on 950
-        # but overflows it on 910B, which is the configuration that forces M/N
+        # but overflows it on 910, which is the configuration that forces M/N
         # tiling here (and matches the solver's per-tile-kernel target backend).
         _backend.reset_for_testing()
         _backend.set_backend_type(BackendType.Ascend910)
@@ -4124,7 +4124,7 @@ class TestAutoTileMatmulL0OperandKAlignment:
 def test_automatic_dbc_disabled_for_in_tree_planners(planner, legacy_opt_in, shape):
     """The legacy opt-in must not shrink a single-C tile to the dbC capacity."""
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
     M, N, K = shape
 
     @pl.program
@@ -4159,7 +4159,7 @@ def test_automatic_dbc_disabled_for_in_tree_planners(planner, legacy_opt_in, sha
 def test_ptoas_retains_automatic_dbc_independently_of_legacy_flag(legacy_opt_in):
     """Keep the historical full-K dbC choice only for the native planner."""
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class Before:
@@ -4201,7 +4201,7 @@ def test_existing_l0_pipeline_preserves_explicit_buffering_policy(planner, legac
     from pypto.language.parser.text_parser import parse as parse_text  # noqa: PLC0415
 
     _backend.reset_for_testing()
-    _backend.set_backend_type(BackendType.Ascend910B)
+    _backend.set_backend_type(BackendType.Ascend910)
 
     @pl.program
     class Before:

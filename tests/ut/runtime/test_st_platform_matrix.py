@@ -100,7 +100,7 @@ class _LeftoverPinCase(_Case):
 
 
 def test_a_case_carries_no_backend_of_its_own():
-    # Not "the default is 910B" — there is no such accessor to default.
+    # Not "the default is 910" — there is no such accessor to default.
     assert not hasattr(harness.PTOTestCase, "get_backend_type")
     with pytest.raises(TypeError):
         _Case(backend_type=BackendType.Ascend910)  # pyright: ignore[reportCallIssue]

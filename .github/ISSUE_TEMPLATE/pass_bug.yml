@@ -91,7 +91,7 @@ body:
       description: Target NPU architecture
       options:
         - N/A (not hardware-specific)
-        - Ascend 910B
+        - Ascend 910 (Atlas A2)
         - Ascend 910C
         - Other (please specify in description)
     validations:

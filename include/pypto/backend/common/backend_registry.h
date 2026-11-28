@@ -43,7 +43,7 @@ class BackendRegistry {
   /**
    * @brief Register a backend type
    *
-   * @param type_name Backend type name (e.g., "910B", "950")
+   * @param type_name Backend type name (e.g., "910", "950")
    * @param func Factory function that creates backend from SoC
    */
   void Register(const std::string& type_name, CreateFunc func);
@@ -51,7 +51,7 @@ class BackendRegistry {
   /**
    * @brief Create a backend instance (deprecated for singleton backends)
    *
-   * Backends are singletons; this always throws. Use Backend910B::Instance()
+   * Backends are singletons; this always throws. Use Backend910::Instance()
    * or Backend950::Instance() instead.
    *
    * @param type_name Backend type name
@@ -76,7 +76,7 @@ class BackendRegistry {
 /**
  * @brief Create backend from registry (deprecated for singleton backends)
  *
- * Backends are singletons; this always throws. Use Backend910B::Instance()
+ * Backends are singletons; this always throws. Use Backend910::Instance()
  * or Backend950::Instance() instead.
  *
  * @param type_name Backend type name

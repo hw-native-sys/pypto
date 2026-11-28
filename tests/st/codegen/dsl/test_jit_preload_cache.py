@@ -45,7 +45,7 @@ def _cache_worker(root: Path, phase: str, token: str) -> None:
     if os.environ.get("LD_PRELOAD"):
         assert loaded, "The test allocator must really be loaded at process startup"
     config = RunConfig(
-        backend_type=BackendType.Ascend910B,
+        backend_type=BackendType.Ascend910,
         execution_mode=ExecutionMode.ONBOARD,
         cache_config=CacheConfig(enabled=True, root=root, extra_fingerprint=token),
     )

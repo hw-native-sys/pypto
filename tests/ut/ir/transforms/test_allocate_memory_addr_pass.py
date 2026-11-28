@@ -505,7 +505,7 @@ def test_allocated_memory_addr_verifier_via_pipeline():
 def test_allocated_memory_addr_verifier_errors_when_vec_exceeds_safe_cap():
     """A Vec footprint above the safe UB cap must be rejected (pto-isa#170).
 
-    The 910B Vec UB physical size is 192KB, but only ~184KB is usable: PTO-ISA
+    The 910 Vec UB physical size is 192KB, but only ~184KB is usable: PTO-ISA
     reserves the top ~8KB and silently corrupts any tile placed there (pto-isa#170).
     soc.cpp therefore caps the *safe* Vec UB at 184KB (188416 bytes), so the
     AllocatedMemoryAddr verifier (which compares the Vec high-water against

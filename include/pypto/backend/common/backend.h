@@ -53,9 +53,8 @@ class BackendHandler;
  * @brief Backend type identifier for selecting backend instance
  */
 enum class BackendType {
-  Ascend910,              ///< 910 backend (A2/A3 PTO assembly codegen)
-  Ascend950,              ///< 950 PTO backend
-  Ascend910B = Ascend910  ///< Compatibility alias; prefer Ascend910
+  Ascend910,  ///< 910 backend (A2/A3 PTO assembly codegen)
+  Ascend950,  ///< 950 PTO backend
 };
 
 /**
@@ -368,7 +367,7 @@ class Backend {
   /**
    * @brief Get backend type name for serialization
    *
-   * @return Backend type name (e.g., "910B", "950")
+   * @return Backend type name (e.g., "910", "950")
    */
   [[nodiscard]] virtual std::string GetTypeName() const = 0;
 

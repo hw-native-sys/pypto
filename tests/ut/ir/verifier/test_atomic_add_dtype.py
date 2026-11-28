@@ -129,7 +129,7 @@ def test_bf16_atomic_add_rejected_on_ascend950(build, atomic):
 
 
 @pytest.mark.parametrize("build,atomic", _BUILDERS)
-def test_bf16_atomic_add_accepted_on_ascend910b(build, atomic):
+def test_bf16_atomic_add_accepted_on_ascend910(build, atomic):
     """The same programs are legal on A2/A3 (pto-isa set_atomic_bf16)."""
     assert _verify(build(pl.BF16, atomic), BackendType.Ascend910) == []
 
@@ -165,7 +165,7 @@ def test_pipeline_input_verification_rejects_bf16_atomic_put():
         PassManager.get_strategy(OptimizationStrategy.Default).run_passes(prog)
 
 
-def test_pipeline_accepts_bf16_atomic_put_on_ascend910b():
+def test_pipeline_accepts_bf16_atomic_put_on_ascend910():
     """Regression guard against an over-strict check: the identical program
     compiles on the profile whose store pipe honours set_atomic_bf16."""
     backend.reset_for_testing()
@@ -249,7 +249,7 @@ def test_tile_level_bf16_atomic_add_rejected_on_ascend950(op_name):
 
 
 @pytest.mark.parametrize("op_name", _TILE_LEVEL_OPS)
-def test_tile_level_bf16_atomic_add_accepted_on_ascend910b(op_name):
+def test_tile_level_bf16_atomic_add_accepted_on_ascend910(op_name):
     assert _verify(_tile_level_program(op_name, DataType.BF16, 1), BackendType.Ascend910) == []
 
 

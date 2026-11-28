@@ -1121,14 +1121,10 @@ class TestCompiledMetaAndFromDir:
         assert meta["platform"] == "a2a3sim"
         assert meta["backend_type"] == "Ascend910"
 
-    @pytest.mark.parametrize("backend_name", ["Ascend910", "Ascend910B"])
-    def test_from_dir_accepts_ascend910_backend_names(self, tmp_path, backend_name):
-        """Reload artifacts written before the rename without changing their metadata."""
+    def test_from_dir_preserves_backend_metadata(self, tmp_path):
+        """Reload the backend identity without rewriting artifact metadata."""
         CompiledProgram(_make_program_with_orchestration(), str(tmp_path), platform="a2a3sim")
         meta_path = tmp_path / _COMPILED_META_FILENAME
-        meta = json.loads(meta_path.read_text())
-        meta["backend_type"] = backend_name
-        meta_path.write_text(json.dumps(meta))
         persisted = meta_path.read_bytes()
 
         reloaded = CompiledProgram.from_dir(tmp_path)

@@ -177,13 +177,12 @@ def test_cross_base_overlap_is_flagged_as_conflict():
     assert not boxes["lhs"].view and not boxes["rhs"].view
 
 
-def test_backend_names_are_canonical_but_old_names_remain_readable():
+def test_backend_names():
     assert memory_map.backend_names() == ["Ascend910", "Ascend950"]
-    assert memory_map.backend_instance("Ascend910B") is memory_map.backend_instance("Ascend910")
 
 
-@pytest.mark.parametrize("name", ["Ascend910", "Ascend910B"])
-def test_cli_accepts_both_ascend910_names(case: Path, name: str):
+def test_cli_accepts_ascend910(case: Path):
+    name = "Ascend910"
     assert memory_map.main([str(case), "--backend", name]) == 0
     assert memory_map.resolve_backend(_dump_of(case), name).name == "Ascend910"
 

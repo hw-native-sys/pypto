@@ -438,12 +438,12 @@ def _classify_overlaps(boxes: list[Box]) -> None:
 
 
 def backend_names() -> list[str]:
-    """Canonical backend names, with compatibility aliases omitted from the UI."""
-    return list(dict.fromkeys(member.name for member in _backend.BackendType.__members__.values()))
+    """Backend names accepted by the CLI."""
+    return list(_backend.BackendType.__members__)
 
 
 def _backend_type(backend_name: str) -> _backend.BackendType:
-    """Resolve canonical names and compatibility aliases through the enum."""
+    """Resolve a backend name through the enum."""
     backend_type = _backend.BackendType.__members__.get(backend_name)
     if backend_type is None:
         raise ValueError(f"unknown backend {backend_name!r}; known backends: {', '.join(backend_names())}")

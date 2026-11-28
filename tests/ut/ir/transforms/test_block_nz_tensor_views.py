@@ -1537,7 +1537,7 @@ def test_acc_nz_store_automatically_tiles_only_columns(cols, column_offset, batc
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
         tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
     _assert_nz_column_grid(tiled, 64, cols, column_offset, 0 if batch is None else batch)
-    text = _emit_pto(before, BackendType.Ascend910B)
+    text = _emit_pto(before, BackendType.Ascend910)
     assert "#pto.layout<nz>" in text and "pto.tstore" in text
     assert f"rows=64, cols={cols}," not in text, "the oversized physical Acc survived allocation"
 
@@ -1551,7 +1551,7 @@ def test_acc_nz_store_automatically_tiles_canonical_split_k():
         tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
     _assert_nz_column_grid(tiled, 64, 2048, column_offset=8)
     assert "pl.tile.matmul_acc(" in ir.python_print(tiled)
-    text = _emit_pto(before, BackendType.Ascend910B)
+    text = _emit_pto(before, BackendType.Ascend910)
     assert "#pto.layout<nz>" in text and "pto.tstore" in text
     assert "rows=64, cols=2048," not in text
 
@@ -1839,7 +1839,7 @@ def test_acc_nz_store_rejects_when_no_full_row_column_tile_fits():
     """Even the minimum 16-column Acc exceeds L0C at 2064 complete rows."""
     before = _wide_acc_nz_program(rows=2064, cols=16)
     with pytest.raises(ValueError, match="NZ") as error:
-        _emit_pto(before, BackendType.Ascend910B)
+        _emit_pto(before, BackendType.Ascend910)
     message = str(error.value)
     assert "row" in message.lower()
     assert "pl.ND" in message
@@ -1853,7 +1853,7 @@ def test_acc_nz_store_full_row_tiling_keeps_stationary_a_candidates():
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PYPTO):
         tiled = passes.auto_tile_matmul_l0()(passes.legalize_tile_cast()(blocked))
     _assert_nz_column_grid(tiled, 2048, 32)
-    assert "pto.tstore" in _emit_pto(before, BackendType.Ascend910B)
+    assert "pto.tstore" in _emit_pto(before, BackendType.Ascend910)
 
 
 @pytest.mark.usefixtures("ascend_backend")
@@ -1873,7 +1873,7 @@ def test_acc_nz_store_exact_l0c_capacity_codegen():
             rhs = pl.load(w, [0, 0], [16, 512], target_memory=pl.Mem.Mat)
             return pl.store(pl.matmul(lhs, rhs, out_dtype=pl.FP32), [0, 0], out)
 
-    text = _emit_pto(Before, BackendType.Ascend910B)
+    text = _emit_pto(Before, BackendType.Ascend910)
     tstore = next(line for line in text.splitlines() if "pto.tstore" in line)
     assert "#pto.layout<nz>" in text
     assert "loc=acc" in tstore
@@ -1909,7 +1909,7 @@ def test_acc_nz_store_codegen_uses_nz_destination_and_2d_accumulator():
     assert _values(_elements(store.args[1])) == [0, 2, 0, 0, 0]
     assert _values(_elements(store.args[3])) == [1, 2, 4, 16, 8]
     assert _shape_values(store.args[0]) == [64, 16]
-    text = _emit_pto(before, BackendType.Ascend910B)
+    text = _emit_pto(before, BackendType.Ascend910)
     assert "#pto.layout<nz>" in text
     tstore = next(line for line in text.splitlines() if "pto.tstore" in line)
     assert "loc=acc" in tstore

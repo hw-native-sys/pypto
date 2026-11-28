@@ -53,8 +53,6 @@ names = target.get_registered_op_names()
 ## 后端名称
 
 A2/A3 后端使用 `BackendType.Ascend910`，A5 使用 `BackendType.Ascend950`。
-Python 和 C++ 中的 `BackendType.Ascend910B` 均保留为 `BackendType.Ascend910`
-的兼容别名，两个名称选择相同目标。规范的 `.name` 和新写入的产物元数据使用
-`Ascend910`。包含 `Ascend910B` 的旧产物仍可读取；较旧版本的 PyPTO 可能无法
-识别包含 `Ascend910` 的新产物。平台字符串（`a2a3`、`a2a3sim`、`a5`、
-`a5sim`）与枚举整数值保持不变。
+A2/A3 的单例为 `Backend910.instance()`，其类型名称为 `910`，
+序列化的后端枚举名称为 `Ascend910`。加载使用旧名称的 A2/A3 产物前，请将其
+`backend_type` 字段更新为 `Ascend910`。平台仍为 `a2a3` 或 `a2a3sim`。

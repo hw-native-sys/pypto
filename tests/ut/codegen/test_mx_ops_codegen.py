@@ -397,7 +397,7 @@ class TestMxMatmulCodegen:
             assert "v_row=2, v_col=64" in subview
             assert "sizes = [%c1_index, %c64_index]" in partition
 
-    def test_rejects_ascend910b_before_codegen(self):
+    def test_rejects_ascend910_before_codegen(self):
         @pl.program
         class Program:
             @pl.function(type=pl.FunctionType.InCore)

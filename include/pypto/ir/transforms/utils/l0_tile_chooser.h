@@ -149,7 +149,7 @@ struct L0TileConfig {
   // chooser scores wall-clock directly: an exposed drain uses
   // max(C_load, C_mad) + C_drain; dbC=2 overlaps the drain and includes one
   // fill/drain bubble.
-  // Defaults are Ascend a2a3 (910B) for the common BF16 x BF16 -> FP32 GEMM, so
+  // Defaults are Ascend a2a3 (910) for the common BF16 x BF16 -> FP32 GEMM, so
   // standalone callers (tests) get a sane model without wiring a backend.
   double bw_a = 129.7;                // L1->L0A bytes/cycle (on-device MTE1 sweep, R^2 0.993).
   double bw_b = 85.4;                 // L1->L0B bytes/cycle (on-device MTE1 sweep; ~1.52:1 vs L0A).

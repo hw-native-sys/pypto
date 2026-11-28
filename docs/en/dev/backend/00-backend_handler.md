@@ -37,8 +37,8 @@ it through the new pure-virtual `Backend::GetHandler()`.
                                      │
                                      ▼
                 ┌──────────────────────────────────────┐
-                │  Backend910B / Backend950 / ...      │
-                │     -> Ascend910BHandler::Instance() │
+                │  Backend910 / Backend950 / ...       │
+                │     -> Ascend910Handler::Instance()  │
                 │     -> Ascend950Handler::Instance()  │
                 └──────────────────────────────────────┘
 ```

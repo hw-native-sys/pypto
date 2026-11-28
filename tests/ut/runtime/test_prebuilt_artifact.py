@@ -1630,7 +1630,7 @@ def test_private_output_base_does_not_change_persistent_artifacts(
 
     monkeypatch.setattr(Path, "resolve", track_resolution)
     config = RunConfig(
-        backend_type=BackendType.Ascend910B,
+        backend_type=BackendType.Ascend910,
         execution_mode=ExecutionMode.SIM,
         cache_config=CacheConfig(enabled=True, root=root),
     )
@@ -1683,12 +1683,12 @@ def test_private_output_base_inside_cache_keeps_runtime_outside(
         selected.symlink_to(root / "runs", target_is_directory=True)
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(selected))
     config = RunConfig(
-        backend_type=BackendType.Ascend910B,
+        backend_type=BackendType.Ascend910,
         execution_mode=ExecutionMode.SIM,
         cache_config=CacheConfig(enabled=True, root=cache_location),
     )
     readonly = RunConfig(
-        backend_type=BackendType.Ascend910B,
+        backend_type=BackendType.Ascend910,
         execution_mode=ExecutionMode.SIM,
         cache_config=CacheConfig(enabled=True, readonly=True, root=cache_location),
     )

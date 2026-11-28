@@ -28,7 +28,7 @@ codegen -> runtime path on device.
 
 ``CORE_NUM`` is derived from the Ascend910 backend's SoC model (the same core
 description the compiler targets), so the launch always fills the AIV grid the
-codegen assumes. This test targets the a2a3 (910B) profile; the 950/a5 AIV
+codegen assumes. This test targets the a2a3 (910) profile; the 950/a5 AIV
 count differs, so it is parametrized over the a2a3 platforms only.
 """
 
@@ -66,14 +66,14 @@ def _aic_core_count(bk: backend.Backend) -> int:
 
 
 # Hard-form SYNCALL requires full AIV-core occupancy (see module docstring).
-# Derive the count from the 910B SoC model rather than hardcoding it.
-CORE_NUM = _aiv_core_count(backend.Backend910B.instance())  # 48 on Ascend910
+# Derive the count from the 910 SoC model rather than hardcoding it.
+CORE_NUM = _aiv_core_count(backend.Backend910.instance())  # 48 on Ascend910
 TILE_ROWS = 128
 TILE_COLS = 128
-TOTAL_ROWS = CORE_NUM * TILE_ROWS  # 48 * 128 = 6144 on 910B
+TOTAL_ROWS = CORE_NUM * TILE_ROWS  # 48 * 128 = 6144 on 910
 
 # Hard-form SYNCALL needs the full AIV grid; the 950/a5 AIV count differs, so
-# restrict this test to the a2a3 (910B) profile it was validated against.
+# restrict this test to the a2a3 (910) profile it was validated against.
 A2A3_PLATFORMS = ("a2a3", "a2a3sim")
 
 # Soft-form SYNCALL polls a shared GM workspace, so it works at *partial*
@@ -84,11 +84,11 @@ SOFT_CORE_NUM = 4
 SOFT_TOTAL_ROWS = SOFT_CORE_NUM * TILE_ROWS  # 512
 SOFT_WS_SLOTS = 16
 
-# Mixed (AIC + AIV) soft-form SYNCALL. On 910B one cube block pairs with
+# Mixed (AIC + AIV) soft-form SYNCALL. On 910 one cube block pairs with
 # AIV_RATIO vector subblocks (1 AIC + 2 AIV), so a launch of B cube blocks has
 # B * (1 + AIV_RATIO) soft participants. Derive the ratio from the SoC model.
-_BK910B = backend.Backend910B.instance()
-AIV_RATIO = _aiv_core_count(_BK910B) // _aic_core_count(_BK910B)  # 48 // 24 = 2
+_BK910 = backend.Backend910.instance()
+AIV_RATIO = _aiv_core_count(_BK910) // _aic_core_count(_BK910)  # 48 // 24 = 2
 MIX_CUBE_BLOCKS = 2  # partial occupancy (a hard mix barrier would deadlock here)
 MIX_USED_CORES = MIX_CUBE_BLOCKS * (1 + AIV_RATIO)  # 2 * 3 = 6 total AIC+AIV participants
 MIX_WS_SLOTS = 16

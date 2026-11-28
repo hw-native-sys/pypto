@@ -73,7 +73,7 @@ data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum, core_num=4)
 
 - 默认为 `1`（单 block，即原有行为）。
 - 仅 mesh：`mode="ring"` 要求 `core_num == 1`。
-- 不得超过目标平台的 AIV 核数（910B 为 48，950 为 36）——该 launch 要求所有
+- 不得超过目标平台的 AIV 核数（910 为 48，950 为 36）——该 launch 要求所有
   block 同时准入，因此超额请求会在编译期被拒绝。
 - 显式 `signal` 需要每个 block 一条 lane：`[world_size(), stride]` 且
   `stride >= core_num`。rank-1 的 `[world_size()]` signal 只适用于 `core_num=1`。

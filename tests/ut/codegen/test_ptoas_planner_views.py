@@ -214,7 +214,7 @@ def _compile_fillpad(mlir: str, tmp_path: Path, planner: passes.MemoryPlanner) -
 
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("pad_value", [pl.PadValue.zero, pl.PadValue.max, pl.PadValue.min])
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
 )
@@ -319,7 +319,7 @@ def test_fillpad_inplace_composed_views(tmp_path: Path, program):
 
 @pytest.mark.ptoas_compile
 @pytest.mark.parametrize("dynamic_bounds", [False, True])
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
 )
@@ -373,7 +373,7 @@ def test_fillpad_inplace_then_set_validshape(tmp_path: Path, dynamic_bounds, bac
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 @pytest.mark.parametrize(
     "planner", [passes.MemoryPlanner.PTOAS, passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.DSA_RP]
 )
@@ -890,7 +890,7 @@ class Program:
 """)
     assert isinstance(program, _ir.Program)
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=buffer_ir):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     if width < 16 and parent_rows > 1:
@@ -957,7 +957,7 @@ class Program:
 """)
     assert isinstance(program, _ir.Program)
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=passes.MemoryPlanner.PTOAS, enable_buffer_ir=buffer_ir):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=False)
@@ -1031,7 +1031,7 @@ class Program:
 """)
     assert isinstance(program, _ir.Program)
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     with passes.PassContext([], memory_planner=planner, enable_buffer_ir=buffer_ir):
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(program)
     mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
@@ -1089,7 +1089,7 @@ def test_zero_valid_sentinel_treshape_keeps_a_dynamic_valid():
 
 
 @pytest.mark.ptoas_compile
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950])
 def test_fillpad_same_mode_after_validshape_update(tmp_path: Path, backend_type: BackendType):
     """Equal tile types must not merge independently initialized valid extents."""
 
@@ -1131,7 +1131,7 @@ def test_fillpad_same_mode_after_validshape_update(tmp_path: Path, backend_type:
     _compile_fillpad(mlir, tmp_path, passes.MemoryPlanner.PTOAS)
 
 
-@pytest.mark.parametrize("backend_type", [BackendType.Ascend910B, BackendType.Ascend950], ids=["a2a3", "a5"])
+@pytest.mark.parametrize("backend_type", [BackendType.Ascend910, BackendType.Ascend950], ids=["a2a3", "a5"])
 @pytest.mark.parametrize("planner", list(passes.MemoryPlanner), ids=lambda planner: planner.name)
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype",
@@ -1174,7 +1174,7 @@ def test_tcvt_planner_scratch_views(
     mlir_path = "ptoas/kernel.pto" if native else "kernels/aiv/kernel.pto"
     mlir = (tmp_path / mlir_path).read_text()
     tcvt = _sole_line(mlir, "pto.tcvt")
-    needs_scratch = backend_type == BackendType.Ascend910B and saturation_mode == "off"
+    needs_scratch = backend_type == BackendType.Ascend910 and saturation_mode == "off"
     explicit = needs_scratch and planner != passes.MemoryPlanner.PTOAS
     assert ("tcvt_tmp_view" in tcvt) == explicit, tcvt
     assert ("tcvt_src_view" in tcvt) == needs_scratch, tcvt
@@ -1214,7 +1214,7 @@ def test_tcvt_rank_one_with_explicit_scratch(tmp_path: Path, planner, valid_cols
             return pl.tile.store(converted_2d, [0, 0], out)
 
     reset_for_testing()
-    set_backend_type(BackendType.Ascend910B)
+    set_backend_type(BackendType.Ascend910)
     # Keep rank-one tiles at codegen entry; the default pipeline would first
     # normalize their geometry and conceal this explicit-scratch regression.
     with passes.PassContext([], memory_planner=planner):
@@ -1254,10 +1254,10 @@ def test_tcvt_rank_one_with_explicit_scratch(tmp_path: Path, planner, valid_cols
 @pytest.mark.parametrize(
     "backend_type,dst_dtype,saturation_mode",
     [
-        (BackendType.Ascend910B, pl.INT8, "on"),
-        (BackendType.Ascend910B, pl.FP32, "off"),
+        (BackendType.Ascend910, pl.INT8, "on"),
+        (BackendType.Ascend910, pl.FP32, "off"),
         (BackendType.Ascend950, pl.INT8, "off"),
-        (BackendType.Ascend910B, pl.INT8, "off"),
+        (BackendType.Ascend910, pl.INT8, "off"),
     ],
     ids=["a2a3-saturating", "a2a3-widening", "a5-nonsaturating", "a2a3-scratch"],
 )
@@ -1277,7 +1277,7 @@ def test_tcvt_dynamic_validity_contract(tmp_path, backend_type, dst_dtype, satur
             converted = pl.cast(tile, dst_dtype, mode="trunc", saturation_mode=saturation_mode)
             return pl.store(converted, [0, 0], out)
 
-    if backend_type == BackendType.Ascend910B and dst_dtype == pl.INT8 and saturation_mode == "off":
+    if backend_type == BackendType.Ascend910 and dst_dtype == pl.INT8 and saturation_mode == "off":
         # Runtime validity cannot size A2/A3's implicit scratch. Fail at the
         # source cast with a useful diagnostic, rather than inside PTOAS.
         with pytest.raises(ValueError, match="requires compile-time static valid_shape"):

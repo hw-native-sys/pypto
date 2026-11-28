@@ -451,7 +451,7 @@ def _load_name_map(path: Path) -> dict[str, str]:
 def _completion_us(tasks: list[tuple[int, float]], us_per_cycle: float) -> float | None:
     """Last-completing AIV block in the faithful trace view.
 
-    On 910B2 the same dispatch can be stamped from two cycle origins ~seconds
+    On the tested Atlas A2 (B2) device the same dispatch can be stamped from two cycle origins ~seconds
     apart (a second die's trace), and those duplicate durations are inflated —
     observed from ~3x up to ~140x the faithful stamp (e.g. 160 us vs 22.3 ms
     on an archived P2 cell). Split ``tasks`` (start cycles, duration) into
@@ -479,7 +479,7 @@ def _aiv_exec_us_from_raw_records(path: Path, needle: str = "all_to_all_v") -> f
     Level-1 records store ``func_id`` in ``task_token_raw & 0xFFFFFFFF``. Converted
     event names are ``task_spmd`` / ``func_-1_`` and must not be used. Duration is
     ``(end - start) / clock_freq`` **per task** — ``max(end) - min(start)`` across
-    cores is not a gang span on 910B2 (two cycle origins ~seconds apart). Stamps
+    cores is not a gang span on the tested Atlas A2 (B2) device (two cycle origins ~seconds apart). Stamps
     are split into trace views by start-time gaps (> 1 s); the view holding the
     fastest stamp is faithful (duplicate stamps from the second origin are
     inflated — observed up to ~140x), and the rank's span is the **maximum

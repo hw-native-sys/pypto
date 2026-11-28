@@ -156,7 +156,7 @@ The pass preserves all properties it requires.
 | Decision | Rationale |
 | -------- | --------- |
 | Separate from `ExpandMixedKernel` | Keeps the kernel split focused on AIC/AIV body construction and confines the GM-workspace concern to a single, easily disabled pass |
-| Backend-gated via `BackendHandler::RequiresGMPipeBuffer()` | Lets each backend opt in without scattering `if (backend == "910B")` checks in pass code (see `pass-context-config.md`) |
+| Backend-gated via `BackendHandler::RequiresGMPipeBuffer()` | Lets each backend opt in without scattering `if (backend == "910")` checks in pass code (see `pass-context-config.md`) |
 | Detect via `initialize_pipe` ops, not function-name patterns | Robust to renaming and to functions that legitimately do not need cross-core setup |
 | Stop propagation at Orchestration | Orchestration is the host-side scheduler; it is the right layer to materialize the workspace and hand it to device-side callees |
 | Keep IR allocation as a placeholder | Keeps the IR pass focused on argument wiring while codegen handles backend footprint and per-pipe GM offsets |

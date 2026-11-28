@@ -1246,7 +1246,7 @@ class TestSoftwarePipeline:
         assert len(_pipeline_loops(after)) == 1
         assert not _slotted_memrefs(after)
 
-    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910B, BackendType.Ascend950], indirect=True)
+    @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910, BackendType.Ascend950], indirect=True)
     def test_dynamic_bound_has_guarded_preload_and_one_rotating_body(self, ascend_backend):
         @pl.program
         class Before:

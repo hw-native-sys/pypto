@@ -64,7 +64,7 @@ namespace {
  * an inner K-loop's initValue is the *outer* loop's iter_arg, and
  * YieldFixupMutator runs bottom-up — so it patches the inner carry against the
  * still-stale outer iter_arg and then inserts acc->acc tile.move ops to
- * reconcile the two buffers.  Ascend 910B has no hardware path between disjoint
+ * reconcile the two buffers.  Ascend 910 has no hardware path between disjoint
  * accumulator addresses, so ptoas rejects those moves.
  *
  * This mutator restores the invariant codegen already assumes — "iter_arg /

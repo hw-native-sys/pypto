@@ -175,7 +175,7 @@ class TestQwen3JITLowering:
         assert all(base.same_as(scratch_bases[0]) for base in scratch_bases), (
             "Sequential reductions must retain scratch reuse"
         )
-        assert sum(allocation_bytes) <= 188416, "The original schedule must fit the 910B UB budget"
+        assert sum(allocation_bytes) <= 188416, "The original schedule must fit the 910 UB budget"
 
     def test_qwen3_decode_post_pass_has_orchestration_entry(self, post_pass):
         """The entry function lands as Orchestration after outlining."""

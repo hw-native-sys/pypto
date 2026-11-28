@@ -28,7 +28,7 @@ from pypto.pypto_core import passes
 
 
 def _default_config(M: int, N: int, K: int) -> passes.l0_tile_chooser.L0TileConfig:
-    """Build a config matching the 910B defaults and the L0_TILING.md examples.
+    """Build a config matching the 910 defaults and the L0_TILING.md examples.
 
     `allow_padding` is left at its C++ default (False): at L0 the cube minimum
     must already be met by the input shape. Tests that explicitly want the
@@ -1107,7 +1107,7 @@ class TestL0TilingRooflineMigration:
     is a deliberate MODEL-DRIVEN tile-selection change, NOT a behavior-neutral
     refactor: for MAD-bound shapes the wall-optimum differs from the old traffic
     optimum. Each shape pins the current roofline tile and records the pre-rewrite
-    closed-form tile, so the delta is reviewable. 910B cost model (the 950 FP32
+    closed-form tile, so the delta is reviewable. 910 cost model (the 950 FP32
     example from the review is omitted — its cost constants are placeholders)."""
 
     @pytest.mark.parametrize(

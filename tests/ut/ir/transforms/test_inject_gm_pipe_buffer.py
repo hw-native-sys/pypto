@@ -85,7 +85,7 @@ def test_gm_pipe_injection_handles_submit_launched_group():
     """A Group launched via pl.submit from a manual_scope must be wired too.
 
     Submit is a first-class call-like IR kind (pass-submit-awareness.md). On
-    910B, an Orchestration that launches a pipe-using Group via
+    910, an Orchestration that launches a pipe-using Group via
     `result, tid = pl.submit(self.group_func, ...)` must, per doc 22 lines
     11-12 and Phase 3 (lines 61-65), receive a per-call-site placeholder
     `tensor.create` and forward that workspace as an extra Submit argument —

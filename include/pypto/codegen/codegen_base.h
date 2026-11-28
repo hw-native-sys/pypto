@@ -27,7 +27,7 @@ namespace codegen {
 /**
  * @brief Base class for platform code generators (Ascend910, Ascend950, etc.)
  *
- * Provides a common API used by operator codegen callbacks (f_codegen_ascend910b, f_codegen_ascend950).
+ * Provides a common API used by operator codegen callbacks (f_codegen_ascend910, f_codegen_ascend950).
  * Subclasses implement platform-specific code generation while sharing this contract.
  * Does not define Generate() as each platform has different signature (e.g. map vs string).
  */

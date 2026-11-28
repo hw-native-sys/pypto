@@ -6612,7 +6612,7 @@ class TestStorageLayoutReuse:
         )
 
 
-class TestAscend910BLoadTpopHazard:
+class TestAscend910LoadTpopHazard:
     """MemoryReuse must not coalesce a writer that consumes a tile.load result
     and a tile.tpop_from_aic value into the load's buffer on Ascend910 split-AIV
     functions — that in-place sharing is a silent hardware hazard.  This guard
@@ -6782,7 +6782,7 @@ class TestAscend910BLoadTpopHazard:
 
         return Prog
 
-    def test_ascend910b_split_aiv_does_not_reuse_load_buffer(self):
+    def test_ascend910_split_aiv_does_not_reuse_load_buffer(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910)
         try:
@@ -6797,7 +6797,7 @@ class TestAscend910BLoadTpopHazard:
             f"(load+tpop_from_aic hazard), but both bind to {bases['down_prev']}"
         )
 
-    def test_dsa_rp_ascend910b_split_aiv_physically_separates_load_buffer(self):
+    def test_dsa_rp_ascend910_split_aiv_physically_separates_load_buffer(self):
         """DSA-RP exports the load+tpop target hazard as an unrelaxable edge."""
 
         backend.reset_for_testing()
@@ -7108,7 +7108,7 @@ class TestForbidOutputAlias:
             )
 
     def test_ci_output_does_not_alias_compiler_scratch(self):
-        """InitMemRef must append tile.ci tmp on 910B; MemoryReuse forbids dst alias tmp."""
+        """InitMemRef must append tile.ci tmp on 910; MemoryReuse forbids dst alias tmp."""
 
         @pl.program
         class Before:
