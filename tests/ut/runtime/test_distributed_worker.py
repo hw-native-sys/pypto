@@ -77,23 +77,71 @@ def _fake_compiled(param_infos, output_indices):
     return compiled
 
 
+def _bind_native(handle, kwargs):
+    handle._submission_callbacks = kwargs
+    handle._completion_mu = threading.RLock()
+    handle.finalized = False
+    handle._final_error = None
+    return handle
+
+
+def _finish_native(handle, error=None):
+    with handle._completion_mu:
+        if handle.finalized:
+            if handle._final_error is not None:
+                raise handle._final_error
+            return
+        _finalize_native(handle, error)
+
+
+def _finalize_native(handle, error):
+    callbacks = getattr(handle, "_submission_callbacks", {})
+    predecessor = callbacks.get("success_predecessor")
+    if predecessor is not None:
+        try:
+            predecessor.result()
+        except BaseException as predecessor_error:
+            error = predecessor_error
+    on_result = getattr(handle, "_on_result", None)
+    if on_result is not None:
+        on_result()
+    callback = callbacks.pop("completion_callback", None)
+    if callback is not None:
+        try:
+            callback(error)
+        except BaseException as callback_error:
+            if error is None:
+                error = callback_error
+    handle._final_error = error
+    handle.finalized = True
+    if error is not None:
+        raise error
+
+
 class _ImmediateNativeHandle:
     """Minimal Simpler RunHandle stand-in used by prepared-worker tests."""
 
     done = True
 
+    def __init__(self, **kwargs):
+        _bind_native(self, kwargs)
+
     def result(self, timeout=None):
         del timeout
+        _finish_native(self)
 
 
 class _ControlledNativeHandle:
     """RunHandle stand-in with an explicit terminal-completion gate."""
+
+    finalized: bool
 
     def __init__(
         self,
         error: BaseException | None = None,
         on_result: Callable[[], None] | None = None,
     ) -> None:
+        _bind_native(self, {})
         self._terminal = threading.Event()
         self.result_started = threading.Event()
         self.error = error
@@ -111,10 +159,7 @@ class _ControlledNativeHandle:
         self.result_started.set()
         if not self._terminal.wait(timeout):
             raise TimeoutError("native handle timed out")
-        if self._on_result is not None:
-            self._on_result()
-        if self.error is not None:
-            raise self.error
+        _finish_native(self, self.error)
 
 
 class _NamedHostRange:
@@ -209,7 +254,36 @@ def patched_setup():
     worker._building_run_resources = None
     worker.alloc_child_tensor.return_value = _FakeBuffer(0xDEAD0000, 1 << 20)
     worker.create_buffer.side_effect = lambda nbytes: _FakeBuffer(0, nbytes, host=True)
-    worker.submit.side_effect = lambda fn: (fn(worker._orch, None, None), _ImmediateNativeHandle())[1]
+    worker.submit.side_effect = lambda fn, **kwargs: (
+        fn(worker._orch, None, None),
+        _ImmediateNativeHandle(**kwargs),
+    )[1]
+
+    configure_frames = DistributedWorker._configure_dispatch_frames
+
+    def configure_test_frames(runtime):
+        # This broad fixture models two granted identities and explicit result
+        # observation. Dedicated tests below exercise native event retirement.
+        class Capacity:
+            def wait_any(self, handles):
+                return None
+
+            def wake_wait_any(self):
+                pass
+
+            def cancel_wait_any(self):
+                pass
+
+            @property
+            def run_identity_capacity(self):
+                return 2
+
+        backend = runtime._w
+        runtime._w = Capacity()
+        try:
+            configure_frames(runtime)
+        finally:
+            runtime._w = backend
 
     mod = "pypto.runtime.distributed_runner"
     chip_callables = ({"chip_orch": object()}, "rt_name", False)
@@ -222,8 +296,13 @@ def patched_setup():
                 "simpler.buffer": buffer_mod,
             },
         ),
+        patch.object(DistributedWorker, "_configure_dispatch_frames", configure_test_frames),
+        patch.object(DistributedWorker, "_start_completion_reaper"),
         patch(f"{mod}._assemble_chip_callables", return_value=chip_callables) as assemble,
         patch(f"{mod}._load_orch_entry", return_value=(MagicMock(name="entry_fn"), None)) as load_entry,
+        # This fixture supplies mocked entry functions without source artifacts.
+        # Static source classification is covered by test_communication_resources.
+        patch(f"{mod}.entry_has_control_effects", return_value=False),
         patch(f"{mod}._load_sub_worker_fns", return_value={}) as load_subs,
         patch(f"{mod}._load_required_callbacks", return_value=set()) as load_required,
         patch(f"{mod}._construct_worker", return_value=worker) as construct,
@@ -234,6 +313,7 @@ def patched_setup():
     ):
         yield {
             "worker": worker,
+            "configure_frames": configure_frames,
             "assemble": assemble,
             "load_entry": load_entry,
             "load_subs": load_subs,
@@ -334,6 +414,39 @@ class TestSetupOnce:
 
 
 class TestAsyncDispatchHandle:
+    @pytest.mark.parametrize("error_type", [KeyboardInterrupt, RuntimeError])
+    def test_nonterminal_wait_error_keeps_frame_owned(self, patched_setup, error_type):
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle()
+        patched_setup["submit_dispatch"].return_value = native
+        rt = DistributedWorker(compiled)
+        handle = rt.submit(compiled, _resident(rt, (16, 16)))
+        with patch.object(native, "result", side_effect=error_type("wait interrupted")):
+            with pytest.raises(error_type, match="wait interrupted"):
+                handle.result()
+            with pytest.raises(error_type, match="wait interrupted"):
+                _ = handle.done
+        assert handle in rt._active_dispatch_handles
+        assert any(frame.in_use for frame in rt._dispatch_frames)
+        assert not handle._terminal
+        native.complete()
+        handle.result()
+        assert all(not frame.in_use for frame in rt._dispatch_frames)
+        rt.close()
+
+    def test_terminal_timeout_error_retires_frame(self, patched_setup):
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+        native = _ControlledNativeHandle()
+        patched_setup["submit_dispatch"].return_value = native
+        rt = DistributedWorker(compiled)
+        handle = rt.submit(compiled, _resident(rt, (16, 16)))
+        native.complete(error=TimeoutError("terminal execution failure"))
+        with pytest.raises(TimeoutError, match="terminal execution failure"):
+            handle.result()
+        assert handle.done
+        assert all(not frame.in_use for frame in rt._dispatch_frames)
+        rt.close()
+
     def test_submit_returns_handle_and_retires_frame_on_result(self, patched_setup):
         m = patched_setup
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -394,7 +507,7 @@ class TestAsyncDispatchHandle:
         assert arg_ref() is None
         rt.close()
 
-    def test_third_submit_drains_oldest_before_allocating_metadata(self, patched_setup):
+    def test_submit_waits_for_frame_retirement_before_allocating_metadata(self, patched_setup):
         m = patched_setup
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         natives = [_ControlledNativeHandle() for _ in range(3)]
@@ -416,13 +529,14 @@ class TestAsyncDispatchHandle:
 
         caller = threading.Thread(target=submit_third)
         caller.start()
-        assert natives[0].result_started.wait(timeout=2)
+        assert not natives[0].result_started.is_set()
         # Backpressure happens before a CallConfig or frame-local tensor map is
         # created for the third dispatch.
         assert m["make_call_config"].call_count == 3
         assert not third_result
 
         natives[0].complete()
+        first.result()
         caller.join(timeout=2)
         assert not caller.is_alive()
         assert not third_error
@@ -447,10 +561,9 @@ class TestAsyncDispatchHandle:
         second = rt.submit(compiled, arg)
 
         natives[0].complete(RuntimeError("first dispatch failed"))
-        third = rt.submit(compiled, arg)
-
         with pytest.raises(RuntimeError, match="first dispatch failed"):
             first.result()
+        third = rt.submit(compiled, arg)
         natives[1].complete()
         natives[2].complete()
         second.result()
@@ -2675,12 +2788,13 @@ class TestDfxCounterWiring:
             seen.update(kwargs)
 
         class _FakeWorker:
-            def submit(self, request):  # noqa: ANN001
+            def submit(self, request, **kwargs):  # noqa: ANN001
                 request(object(), None, None)
                 return "handle"
 
         monkeypatch.setattr(dr, "_reset_dfx_dispatch_state", _fake_reset)
         worker = dr.DistributedWorker.__new__(dr.DistributedWorker)
+        worker._initialize_dispatch_tracking()
         worker._persistent_error = None
         worker._persistent_error_reported = False
         worker._persistent_domains_by_program = {}
@@ -3602,7 +3716,7 @@ class _PersistentOrch:
         finally:
             self._retire_run(resources)
 
-    def run_with_abandoned_finalization(self, fn):
+    def run_with_abandoned_finalization(self, fn, **kwargs):
         """Leave the owner unretired, as an ambiguous finalizer boundary does."""
         resources = self._begin_run()
         try:
@@ -3727,7 +3841,10 @@ def test_window_sources_are_forwarded_only_at_runtime(patched_setup, persistent)
     compiled = _fake_compiled([_param("a", [16, 16])], [])
     source = io.BytesIO(b"shard")
     files = [source]
-    m["worker"].submit.side_effect = lambda fn: (fn(MagicMock(), None, None), _ImmediateNativeHandle())[1]
+    m["worker"].submit.side_effect = lambda fn, **kwargs: (
+        fn(MagicMock(), None, None),
+        _ImmediateNativeHandle(**kwargs),
+    )[1]
     m["submit_dispatch"].side_effect = _submit_dispatch
     with DistributedWorker(compiled, persistent=persistent, window_sources={"engram": files}) as rt:
         files.clear()
@@ -3759,9 +3876,9 @@ class TestPersistentDistributedWorker:
         m["worker"].create_buffer.side_effect = lambda size: _FakeBuffer(0, size, host=True)
         orch = _PersistentOrch(m["worker"])
 
-        def worker_submit(fn):
+        def worker_submit(fn, **kwargs):
             orch.run(fn)
-            return _ImmediateNativeHandle()
+            return _ImmediateNativeHandle(**kwargs)
 
         m["worker"].submit.side_effect = worker_submit
         handles = []
@@ -3802,7 +3919,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         m["worker"].create_buffer.side_effect = lambda size: _FakeBuffer(0, size, host=True)
         source = torch.tensor(list(b"table"), dtype=torch.uint8) if tensor_source else io.BytesIO(b"table")
         device_entry = _persistent_entry(64, [])
@@ -3897,10 +4017,10 @@ class TestPersistentDistributedWorker:
             assert resources.live_domains == {"p0:comm_d0": orch.handles[0]}
             assert orch.handles[0].owner is resources
 
-        def worker_submit(fn):
+        def worker_submit(fn, **kwargs):
             submit_threads.append(threading.get_ident())
             orch.run(fn, before_retire=assert_domain_owned_by_current_run)
-            return _ImmediateNativeHandle()
+            return _ImmediateNativeHandle(**kwargs)
 
         m["worker"].submit.side_effect = worker_submit
         seen_handles: list[Any] = []
@@ -3957,7 +4077,8 @@ class TestPersistentDistributedWorker:
         assert handle.freed
         assert m["worker"]._live_domains == {}
 
-    def test_warm_domain_supports_two_bounded_handles_and_single_close_release(self, patched_setup):
+    @pytest.mark.parametrize("reset_windows", [False, True])
+    def test_warm_domain_submission_respects_reset_and_releases_once(self, patched_setup, reset_windows):
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
@@ -3965,22 +4086,43 @@ class TestPersistentDistributedWorker:
         second_native = _ControlledNativeHandle()
         natives = [_ImmediateNativeHandle(), first_native, second_native]
 
-        def worker_submit(fn):
+        def worker_submit(fn, **kwargs):
             orch.run(fn)
-            return natives.pop(0)
+            return _bind_native(natives.pop(0), kwargs)
 
         m["worker"].submit.side_effect = worker_submit
         seen_handles: list[Any] = []
         m["load_entry"].return_value = (_persistent_entry(64, seen_handles), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        rt = DistributedWorker(compiled, persistent=True)
+        rt = DistributedWorker(compiled, persistent=True, reset_persistent_windows=reset_windows)
         arg = _resident(rt, (16, 16))
 
         rt(arg)
         rt.submit(compiled, arg)
-        rt.submit(compiled, arg)
+        if reset_windows:
+            submit_errors = []
+
+            def submit_successor():
+                try:
+                    rt.submit(compiled, arg)
+                except BaseException as error:
+                    submit_errors.append(error)
+
+            submitter = threading.Thread(target=submit_successor)
+            submitter.start()
+            try:
+                assert first_native.result_started.wait(timeout=2)
+                assert m["worker"].submit.call_count == 2
+            finally:
+                first_native.complete()
+                submitter.join(timeout=2)
+            assert not submitter.is_alive()
+            assert not submit_errors
+        else:
+            rt.submit(compiled, arg)
         domain = orch.handles[0]
         assert len(rt._active_dispatch_handles) == 2
+        assert first_native.finalized is reset_windows
         assert len(orch.allocate_calls) == 1
         assert seen_handles == [domain, domain, domain]
         assert len(orch.reuse_calls) == 3
@@ -4004,7 +4146,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         seen_handles: list[Any] = []
         m["load_entry"].return_value = (_persistent_entry(64, seen_handles), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -4026,7 +4171,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         seen_handles: list[Any] = []
         m["load_entry"].return_value = (_persistent_entry(64, seen_handles), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
@@ -4057,7 +4205,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         compiled._distributed_config = DistributedConfig(device_ids=[0, 1])
@@ -4078,7 +4229,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         m["load_entry"].return_value = (
             _persistent_entry(128, [], buffer_nbytes=(64,)),
             None,
@@ -4100,7 +4254,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
@@ -4170,10 +4327,10 @@ class TestPersistentDistributedWorker:
 
         native = _ControlledNativeHandle(on_result=assert_task_args_alive)
 
-        def worker_submit(fn):
+        def worker_submit(fn, **kwargs):
             orch.run(fn, before_retire=assert_task_args_alive)
             native.complete()
-            return native
+            return _bind_native(native, kwargs)
 
         m["worker"].submit.side_effect = worker_submit
         m["load_entry"].return_value = (entry, None)
@@ -4192,7 +4349,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         seen_a: list[Any] = []
         seen_b: list[Any] = []
         m["load_entry"].side_effect = [
@@ -4233,7 +4393,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
@@ -4256,7 +4419,10 @@ class TestPersistentDistributedWorker:
     def test_unfreed_domain_release_reaches_close(self, patched_setup):
         m = patched_setup
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
         rt = DistributedWorker(compiled, persistent=True)
@@ -4278,7 +4444,10 @@ class TestPersistentDistributedWorker:
         m = patched_setup
         m["worker"]._live_domains = {}
         orch = _PersistentOrch(m["worker"])
-        m["worker"].submit.side_effect = lambda fn: (orch.run(fn), _ImmediateNativeHandle())[1]
+        m["worker"].submit.side_effect = lambda fn, **kwargs: (
+            orch.run(fn),
+            _ImmediateNativeHandle(**kwargs),
+        )[1]
 
         def failing_entry(
             orch,
@@ -4362,9 +4531,9 @@ class TestPersistentDistributedWorker:
         m["worker"]._live_domains = {}
         native = _ControlledNativeHandle()
 
-        def worker_submit(fn):
+        def worker_submit(fn, **kwargs):
             del fn
-            return native
+            return _bind_native(native, kwargs)
 
         m["worker"].submit.side_effect = worker_submit
 
@@ -4986,7 +5155,7 @@ def test_persistent_domain_identity_includes_source_and_workspace():
 
 
 @pytest.fixture
-def external_window_worker(patched_setup, tmp_path):
+def external_window_worker(patched_setup, tmp_path, request):
     from pypto.runtime.comm_domain import (  # noqa: PLC0415
         CommDomain,
         DomainBufferSpec,
@@ -4999,12 +5168,16 @@ def external_window_worker(patched_setup, tmp_path):
     )
     compiled.output_dir = tmp_path
     compiled.platform = "a2a3"
-    entry, _ = patched_setup["load_entry"].return_value
-    entry._window_requirements = {0: (True, (), None)}
+
+    def entry(_orch, _args, _config, *, _domain_provider=None, **_kwargs):
+        pass
+
+    setattr(entry, "_window_requirements", {0: (True, (), None)})
+    patched_setup["load_entry"].return_value = entry, None
     patched_setup["worker"]._accepted_run_handles = set()
     patched_setup["worker"]._abandoned_run_handles = []
     patched_setup["worker"]._hierarchical_start_cv = threading.Condition()
-    with DistributedWorker(compiled) as worker:
+    with DistributedWorker(compiled, persistent=getattr(request, "param", False)) as worker:
         slots, _ = build_domain_layout([DomainBufferSpec("table", (4,), DataType.FP32)])
         domain = CommDomain(worker, (0,), slots, "device", ())
         domain._native = MagicMock(freed=False)
@@ -5014,6 +5187,33 @@ def external_window_worker(patched_setup, tmp_path):
         domain._tokens[0] = MagicMock()
         worker._external_domains[domain.ref] = domain
         yield worker, compiled, domain
+
+
+@pytest.mark.parametrize("external_window_worker", [True], indirect=True)
+def test_persistent_submit_forwards_shared_window_args_and_completion(patched_setup, external_window_worker):
+    worker, compiled, domain = external_window_worker
+    backend = patched_setup["worker"]
+    seen = []
+
+    def submit(fn, args, **kwargs):
+        seen.append((args, kwargs))
+        fn(backend._orch, args, None)
+        return _ImmediateNativeHandle(**kwargs)
+
+    backend.submit.side_effect = submit
+    table = domain.tensor("table")
+    first = worker.submit(compiled, table)
+    first_native = first._native_handle
+    second = worker.submit(compiled, table)
+    second.result()
+    first.result()
+    assert len(seen) == 2
+    assert seen[0][0] is not seen[1][0]
+    for args, kwargs in seen:
+        assert args.add_scalar.call_count == 4
+        assert callable(kwargs["completion_callback"])
+    assert seen[0][1]["success_predecessor"] is None
+    assert seen[1][1]["success_predecessor"] is first_native
 
 
 def test_external_release_fences_interrupted_submission(patched_setup, external_window_worker):
@@ -5074,7 +5274,7 @@ def test_abandoned_submit_retains_resources_through_close_retry(patched_setup, e
     native_worker = patched_setup["worker"]
     cleanup = MagicMock()
 
-    def abandon(_state, _tensors, _config, _keepalive, callbacks):
+    def abandon(_state, _tensors, _config, _keepalive, callbacks, **_kwargs):
         callbacks.append(cleanup)
         native_worker._abandoned_run_handles.append(native)
         raise KeyboardInterrupt("submit interrupted")
@@ -5145,6 +5345,491 @@ def test_terminal_failure_retires_frame_before_concurrent_release(patched_setup,
                 release.result(timeout=2)
     domain._native.release.assert_called_once()
     patched_setup["worker"].release_buffer.assert_called_once()
+
+
+@pytest.mark.parametrize("directory, expected", [(1, 1), (2, 2), (7, 3)])
+def test_dispatch_frame_capacity_uses_host_bytes_and_native_directory(monkeypatch, directory, expected):
+    import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+    class Backend:
+        def wait_any(self, handles):
+            return None
+
+        def wake_wait_any(self):
+            pass
+
+        def cancel_wait_any(self):
+            pass
+
+        @property
+        def run_identity_capacity(self):
+            return directory
+
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._w = Backend()
+    worker._dispatch_frames = [dr._DispatchFrame(0)]
+    compiled = _fake_compiled([], [])
+    worker._states = {compiled: {"alloc_fn": None, "base_tensor_frames": ({},), "device_nums": 2}}
+    worker._pool_budget = {}
+    monkeypatch.setattr(dr.os, "sysconf", lambda key: 4096 if key == "SC_PAGE_SIZE" else 128)
+    monkeypatch.setattr(worker, "_host_frame_resources", lambda states: (4096, 0))
+    worker._configure_dispatch_frames()
+    assert len(worker._dispatch_frames) == expected
+    assert len(worker._states[compiled]["base_tensor_frames"]) == expected
+    assert worker._pool_budget["host_extra_bytes"] == 8192
+
+
+@pytest.mark.parametrize(
+    "shared, observable, expected", [(True, True, 4), (False, True, 64), (True, False, 1)]
+)
+def test_dispatch_frame_budget_accounts_shared_storage_descriptors(monkeypatch, shared, observable, expected):
+    import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+    class Backend:
+        run_identity_capacity = 64
+        wait_any = wake_wait_any = cancel_wait_any = lambda *args: None
+
+    def allocate(tensors, world_size):
+        values = [torch.zeros(1) for _ in range(world_size)]
+        if shared:
+            values = [value.share_memory_() for value in values]
+        tensors["values"] = values
+        tensors["aliases"] = [value.view(-1) for value in values]
+
+    initial = {}
+    allocate(initial, 8)
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._w = Backend()
+    worker._dispatch_frames = [dr._DispatchFrame(0)]
+    worker._states = {
+        _fake_compiled([], []): {"alloc_fn": allocate, "base_tensor_frames": (initial,), "device_nums": 8}
+    }
+    worker._pool_budget = {}
+    monkeypatch.setattr(dr.resource, "getrlimit", lambda kind: (128, 128))
+    original_listdir = dr.os.listdir
+
+    def listdir(path):
+        if path != "/proc/self/fd":
+            return original_listdir(path)
+        if not observable:
+            raise FileNotFoundError(path)
+        return list(range(16))
+
+    monkeypatch.setattr(dr.os, "listdir", listdir)
+    monkeypatch.setattr(dr.os, "sysconf", lambda key: 4096 if key == "SC_PAGE_SIZE" else 2**20)
+    worker._configure_dispatch_frames()
+    assert len(worker._dispatch_frames) == expected
+    if shared:
+        assert worker._pool_budget["host_frame_shared_storages"] == 8
+        assert worker._pool_budget["host_extra_descriptors"] == (28 if observable else 0)
+
+
+def test_declared_device_cost_limits_host_replication_before_fork(monkeypatch):
+    import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+    class Backend:
+        run_identity_capacity = 4096
+        wait_any = wake_wait_any = cancel_wait_any = lambda *args: None
+
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._w = Backend()
+    worker._dispatch_frames = [dr._DispatchFrame(0)]
+    allocations = []
+    domain = SimpleNamespace(workers=(0, 1), window_size=64 * 1024 * 1024)
+    worker._states = {
+        _fake_compiled([], []): {
+            "alloc_fn": lambda tensors, world_size: allocations.append(world_size),
+            "base_tensor_frames": ({},),
+            "device_nums": 2,
+            "domain_plan": SimpleNamespace(declarations=(domain,)),
+        }
+    }
+    worker._pool_budget = {}
+    monkeypatch.setattr(dr.os, "sysconf", lambda key: 4096 if key == "SC_PAGE_SIZE" else 2**20)
+    worker._configure_dispatch_frames()
+    assert len(worker._dispatch_frames) == 2
+    assert allocations == [2]
+
+
+@pytest.mark.parametrize("extra_copies", [None, 0, 1, 2, 5])
+def test_domain_pool_capacity_uses_weakest_rank_budget(monkeypatch, extra_copies):
+    import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+    cost = 10 * 1024 * 1024
+    calls = []
+    queries = {0: 0, 1: 0}
+
+    def memory(rank):
+        if extra_copies is None:
+            raise NotImplementedError("simulator has no physical-memory telemetry")
+        queries[rank] += 1
+        # Rank 0 has room for more copies; rank 1 determines the common pool.
+        free = (5 if rank == 0 else extra_copies) * cost * 64
+        return SimpleNamespace(free_bytes=free + (cost if queries[rank] == 1 else 0))
+
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._persistent = True
+    worker._active_dispatch_handles = set()
+    worker._accepting_dispatches = False
+    worker._pool_budget = {}
+    worker.dc = DistributedConfig(device_ids=[0, 1])
+    worker._w = SimpleNamespace(device_memory_info=memory)
+    worker._dispatch_frames = [dr._DispatchFrame(i) for i in range(7)]
+    state: dict[str, Any] = {
+        "persistent_id": "p",
+        "domain_plan": object(),
+        "base_tensor_frames": tuple({} for _ in range(7)),
+    }
+    worker._states = {_fake_compiled([], []): state}
+    worker._persistent_domains_by_program = {}
+
+    def prewarm(state, slot):
+        calls.append(slot)
+        handle = SimpleNamespace(
+            contexts={rank: SimpleNamespace(actual_window_size=cost - 2 * 1024 * 1024) for rank in (0, 1)}
+        )
+        worker._persistent_domains_by_program[f"p:frame{slot}"] = {"comm": ((), handle)}
+
+    monkeypatch.setattr(worker, "_prewarm_domain_frame", prewarm)
+    worker._prewarm_dispatch_domains()
+    expected = 1 + (extra_copies or 0)
+    assert calls == list(range(expected))
+    assert len(worker._dispatch_frames) == expected
+    assert len(state["domain_pool_ids"]) == expected
+    if extra_copies is not None:
+        assert worker._pool_budget["device_rank_1_frame_bytes"] == cost
+
+
+def test_completion_reaper_retires_any_terminal_frame_without_oldest_wait():
+    import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+    class Events:
+        def __init__(self):
+            self.cv = threading.Condition()
+            self.ready = []
+            self.entered = threading.Event()
+
+        def wait_any(self, handles):
+            with self.cv:
+                self.entered.set()
+                self.cv.wait_for(lambda: bool(self.ready))
+                return self.ready.pop(0)
+
+        def publish(self, handle):
+            with self.cv:
+                self.ready.append(handle)
+                self.cv.notify_all()
+
+    backend = Events()
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._w = backend
+    worker._dispatch_cv = threading.Condition()
+    worker._completion_stop = False
+    worker._completion_thread = None
+    worker._persistent = True
+    worker._persistent_error = None
+    worker._persistent_error_reported = False
+    first_native = _ControlledNativeHandle()
+    second_native = _ImmediateNativeHandle()
+    frames = [dr._DispatchFrame(i, in_use=True) for i in range(2)]
+    first = DistributedRunHandle(worker, first_native, frames[0], 1)
+    second = DistributedRunHandle(worker, second_native, frames[1], 2)
+    frames[0].handle, frames[1].handle = first, second
+    worker._unobserved_dispatch_errors = {}
+    worker._active_dispatch_handles = {first, second}
+    thread = threading.Thread(target=worker._reclaim_completed_dispatches)
+    thread.start()
+    try:
+        assert backend.entered.wait(2)
+        backend.publish(second_native)
+        with worker._dispatch_cv:
+            assert worker._dispatch_cv.wait_for(lambda: not frames[1].in_use, timeout=2)
+        assert frames[0].in_use
+        assert not first_native.result_started.is_set()
+        assert second.done
+    finally:
+        worker._completion_stop = True
+        backend.publish(None)
+        thread.join(2)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("failure_stage", ["cleanup", "postprocess"])
+def test_native_success_publication_includes_pypto_cleanup_and_postprocess(domain_pool, failure_stage):
+    env = domain_pool
+    callbacks = []
+    calls = []
+
+    class Native:
+        def __init__(self, callback):
+            _bind_native(self, {"completion_callback": callback})
+
+        def result(self, timeout=None):
+            _finish_native(self)
+
+    def submit(fn, **kwargs):
+        callbacks.append(kwargs)
+        fn(env.orch, None, None)
+        return Native(kwargs["completion_callback"])
+
+    env.backend.submit.side_effect = submit
+    arg = _resident(env.worker, (16, 16))
+    first = env.worker.submit(env.compiled, arg)
+
+    def cleanup():
+        calls.append("cleanup")
+        if failure_stage == "cleanup":
+            raise RuntimeError("cleanup failed")
+
+    def postprocess():
+        calls.append("postprocess")
+        raise RuntimeError("postprocess failed")
+
+    first._frame.cleanup.append(cleanup)
+    first._postprocess = postprocess
+    second = env.worker.submit(env.compiled, arg)
+    assert callbacks[0]["success_predecessor"] is None
+    assert callbacks[1]["success_predecessor"] is first._native_handle
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+            first.result()
+    assert calls == (["cleanup"] if failure_stage == "cleanup" else ["cleanup", "postprocess"])
+    # The native unit tests cover dependency cancellation. This fixture checks
+    # callback/dependency wiring and exactly-once outer result publication.
+    second.result()
+
+
+def test_worker_without_native_event_api_preserves_mainline_dispatch(patched_setup, monkeypatch):
+    compiled = _fake_compiled([], [])
+    backend = patched_setup["worker"]
+    # Use the pinned Simpler signature, without native completion callbacks.
+    backend.submit.side_effect = lambda fn: _ImmediateNativeHandle()
+    patched_setup["load_entry"].return_value = (_persistent_entry(64, []), None)
+    monkeypatch.setattr(DistributedWorker, "_configure_dispatch_frames", patched_setup["configure_frames"])
+    with DistributedWorker(compiled, persistent=True) as worker:
+        assert len(worker._dispatch_frames) == 2
+        assert not worker._completion_events
+        for _ in range(3):
+            last = worker.submit(compiled)
+        last.result()
+    backend.wait_any.assert_not_called()
+    backend.wake_wait_any.assert_not_called()
+    backend.cancel_wait_any.assert_not_called()
+
+
+def test_submit_failure_does_not_repeat_native_completion_cleanup(domain_pool, monkeypatch):
+    env = domain_pool
+    cleanup = []
+    monkeypatch.setattr(
+        env.worker, "_release_persistent_reset_buffers", lambda buffers: cleanup.append(buffers)
+    )
+
+    def reject(fn, **kwargs):
+        error = RuntimeError("submission rejected after callback")
+        kwargs["completion_callback"](error)
+        raise error
+
+    env.backend.submit.side_effect = reject
+    arg = _resident(env.worker, (16, 16))
+    with pytest.raises(RuntimeError, match="submission rejected"):
+        env.worker.submit(env.compiled, arg)
+    assert cleanup == [{}]
+    assert not env.worker._active_dispatch_handles
+
+
+@pytest.fixture
+def domain_pool(monkeypatch, patched_setup):
+    import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+    from pypto.runtime.communication_resources import DomainDeclaration, DomainPlan  # noqa: PLC0415
+
+    calls = []
+    declarations = []
+    allocations = []
+    spec = SimpleNamespace(name="window", dtype="opaque", count=64, nbytes=64)
+
+    def entry(
+        orch,
+        _args,
+        config,
+        *,
+        tensors,
+        callables,
+        sub_ids,
+        _keep,
+        world_size,
+        _domain_provider=None,
+        _window_sources=None,
+    ):
+        assert _domain_provider is not None
+        with _domain_provider(
+            name="comm", workers=list(range(world_size)), window_size=64, buffers=[spec]
+        ) as domain:
+            calls.append(domain)
+
+    plan = DomainPlan((DomainDeclaration("comm", (0,), 64, (("window", "opaque", 64, 64),)),))
+    monkeypatch.setattr(
+        sys.modules["simpler.task_interface"], "CommBufferSpec", SimpleNamespace, raising=False
+    )
+    monkeypatch.setattr(dr, "load_domain_plan", lambda *args: plan)
+    patched_setup["load_entry"].return_value = entry, None
+    backend = patched_setup["worker"]
+    backend.device_memory_info.return_value = SimpleNamespace(free_bytes=1 << 30)
+
+    def allocate(**kwargs):
+        handle = SimpleNamespace(
+            name=kwargs["name"],
+            retain_after_run=True,
+            freed=False,
+            contexts={0: SimpleNamespace(actual_window_size=64)},
+        )
+        handle.release = lambda: setattr(handle, "freed", True)
+        backend._live_domains[handle.name] = handle
+        allocations.append(handle)
+        return handle
+
+    orch = SimpleNamespace(
+        _worker=backend,
+        get_or_allocate_domain=allocate,
+        get_domain=lambda name: backend._live_domains[name],
+        declare_comm_domains=lambda handles: declarations.append(handles),
+    )
+    backend._orch = orch
+    backend.submit.side_effect = lambda fn, **kwargs: (
+        fn(orch, None, None),
+        _ImmediateNativeHandle(**kwargs),
+    )[1]
+    compiled = _fake_compiled([_param("a", [16, 16])], [])
+    worker = DistributedWorker(compiled, persistent=True, reset_persistent_windows=False)
+    try:
+        yield SimpleNamespace(
+            worker=worker,
+            backend=backend,
+            compiled=compiled,
+            orch=orch,
+            calls=calls,
+            declarations=declarations,
+            allocations=allocations,
+        )
+    finally:
+        worker.close()
+
+
+def test_domain_pool_keeps_each_frame_bound_to_its_own_domain(domain_pool):
+    env = domain_pool
+    assert len(env.allocations) == 2
+    assert not env.calls
+    arg = _resident(env.worker, (16, 16))
+    first = env.worker.submit(env.compiled, arg)
+    second = env.worker.submit(env.compiled, arg)
+    assert env.declarations == [(env.allocations[0],), (env.allocations[1],)]
+    assert env.calls == env.allocations
+    first.result()
+    second.result()
+
+
+def test_close_wakes_a_submitter_waiting_for_frame_capacity(patched_setup):
+    env = patched_setup
+    compiled = _fake_compiled([_param("a", [16, 16])], [])
+    natives = [_ControlledNativeHandle(), _ControlledNativeHandle()]
+    env["submit_dispatch"].side_effect = natives
+    worker = DistributedWorker(compiled)
+    arg = _resident(worker, (16, 16))
+    worker.submit(compiled, arg)
+    worker.submit(compiled, arg)
+    entered = threading.Event()
+    submit_errors = []
+    close_errors = []
+
+    def blocked_submit():
+        entered.set()
+        try:
+            worker.submit(compiled, arg)
+        except BaseException as exc:
+            submit_errors.append(exc)
+
+    def close():
+        try:
+            worker.close()
+        except BaseException as exc:
+            close_errors.append(exc)
+
+    submitter = threading.Thread(target=blocked_submit)
+    submitter.start()
+    assert entered.wait(2)
+    closer = threading.Thread(target=close)
+    closer.start()
+    assert natives[0].result_started.wait(2)
+    submitter.join(2)
+    assert not submitter.is_alive()
+    assert len(submit_errors) == 1
+    assert "closing" in str(submit_errors[0])
+    for native in natives:
+        native.complete()
+    closer.join(2)
+    assert not closer.is_alive()
+    assert not close_errors
+
+
+def test_observer_failure_is_terminal_and_wakes_capacity_waiters():
+    worker = DistributedWorker.__new__(DistributedWorker)
+    worker._initialize_dispatch_tracking()
+    worker._persistent_error = None
+    worker._persistent_error_reported = False
+    worker._persistent = False
+    worker._accepting_dispatches = True
+    error = RuntimeError("event observer failed")
+    backend = MagicMock()
+    backend.wait_any.side_effect = error
+    worker._w = backend
+    thread = threading.Thread(target=worker._reclaim_completed_dispatches)
+    worker._completion_thread = thread
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive()
+    backend.wait_any.assert_called_once()
+    with pytest.raises(RuntimeError, match="event observer failed"):
+        worker._acquire_dispatch_frame()
+
+
+def test_observer_start_failure_rolls_back_initialized_native_worker(patched_setup, monkeypatch):
+    def fail_start(worker):
+        worker._completion_thread = SimpleNamespace(ident=None)
+        raise RuntimeError("cannot start observer")
+
+    monkeypatch.setattr(DistributedWorker, "_start_completion_reaper", fail_start)
+    with pytest.raises(RuntimeError, match="cannot start observer"):
+        DistributedWorker(_fake_compiled([], []))
+    patched_setup["worker"].close.assert_called_once()
+    patched_setup["worker"].cancel_wait_any.assert_called_once()
+
+
+def test_done_query_does_not_mark_failure_delivered_to_caller():
+    import pypto.runtime.distributed_runner as dr  # noqa: PLC0415
+
+    owner = MagicMock()
+    owner._completion_thread = None
+    owner._persistent_error_reported = False
+    native = _ControlledNativeHandle()
+    native.complete(RuntimeError("late failure"))
+    handle = DistributedRunHandle(owner, native, dr._DispatchFrame(0, in_use=True), 1)
+    assert handle.done
+    assert not owner._persistent_error_reported
+    with pytest.raises(RuntimeError, match="late failure"):
+        handle.result()
+    assert owner._persistent_error_reported
+
+
+def test_close_reports_retired_nonpersistent_failure_after_done_query(patched_setup):
+    compiled = _fake_compiled([], [])
+    worker = DistributedWorker(compiled)
+    native = _ControlledNativeHandle()
+    patched_setup["submit_dispatch"].return_value = native
+    handle = worker.submit(compiled)
+    native.complete(RuntimeError("unobserved dispatch failure"))
+    assert handle.done
+    with pytest.raises(RuntimeError, match="unobserved dispatch failure"):
+        worker.close()
+    patched_setup["worker"].close.assert_called_once()
 
 
 if __name__ == "__main__":

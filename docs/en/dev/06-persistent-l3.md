@@ -85,23 +85,27 @@ with prefill.prepare(extra_compiled=[decode], persistent=True) as worker:
     worker.run(decode, decode_x, weights, kv_cache)
 ```
 
-Domains are isolated by `(compiled program, generated domain name)`. Prefill's
+Domains are isolated by `(compiled program, generated domain name)`. Pooled domains
+also include the owning dispatch frame. Prefill's
 `comm_d0` and decode's `comm_d0` therefore remain distinct even when their
 generated names match. All prepared programs still must satisfy the normal
 platform, runtime, and device-ID compatibility checks.
 
 Graph construction remains serialized by `DistributedWorker.submit()` and
-Simpler. Once accepted, persistent runs follow the same bounded asynchronous
-dispatch contract as ordinary runs: up to two PyPTO metadata frames may be
-published, while the backend's negotiated depth determines how many device
-runs can actually overlap.
+Simpler. When Simpler provides completion events and identity capacity, a byte
+budget and the public `Worker.run_identity_capacity` directory limit bound the
+Host frame pool. Completion events return frames to blocked submitters.
+See [bounded distributed dispatch](distributed-dispatch.md)
+for the resource policy, explicit resource contract, and success dependencies.
 
 ## Runtime dependency
 
-This implementation does not modify Simpler. Each request uses the public
+The budgeted path uses Simpler's public identity capacity, completion events,
+and predecessor success interfaces. Each request uses the public
 `Worker.submit()` boundary, and its native handle remains attached to PyPTO's
-bounded dispatch handle until completion. Each request acquires its domains
-through `Orchestrator.get_or_allocate_domain(..., retain_after_run=True)`.
+bounded dispatch handle until completion. In the pool Simpler declares each
+frame's retained domains on submission. Outside the pool each request acquires
+its domains through `Orchestrator.get_or_allocate_domain(..., retain_after_run=True)`.
 Simpler validates the configuration on reuse, registers the domain with the
 current run's completion fence, and retains its allocation across successful
 runs. PyPTO releases the domains after draining all dispatch handles when the
