@@ -12,28 +12,49 @@
 import pytest
 
 
-@pytest.mark.parametrize(
-    "module", ["torch_npu", "simpler", "simpler_setup", "_task_interface", "pypto._torch_npu"]
-)
 @pytest.mark.parametrize("optimize", ["0", "1", "2"])
-@pytest.mark.parametrize("route", ["statement", "dynamic", "caught_dynamic"])
+def test_optional_runtime_guard_records_all_caught_imports(
+    run_without_optional_runtime, monkeypatch, optimize
+):
+    """The guard must record every blocked root even when ImportError is swallowed."""
+    modules = ["torch_npu", "simpler", "simpler_setup", "_task_interface", "pypto._torch_npu"]
+    monkeypatch.setenv("PYTHONOPTIMIZE", optimize)
+    # Exercise the complete blocked-root list in each optimization mode without
+    # starting a separate interpreter (and importing PyPTO) for every root.
+    result = run_without_optional_runtime(f"""
+import importlib
+for module in {modules!r}:
+    try:
+        importlib.import_module(module)
+    except ImportError:
+        pass
+""")
+    assert result.returncode != 0
+    assert f"Optional runtime imports attempted: {modules!r}" in result.stderr
+
+
+@pytest.mark.parametrize("route", ["statement", "dynamic"])
+@pytest.mark.parametrize(
+    "module,optimize",
+    [
+        ("torch_npu", "0"),
+        ("torch_npu", "1"),
+        ("torch_npu", "2"),
+        ("pypto._torch_npu", "0"),
+    ],
+)
 def test_optional_runtime_import_attempt_is_detected(
     run_without_optional_runtime, monkeypatch, module, route, optimize
 ):
-    """Both import APIs must fail the guard, even when the caller catches ImportError."""
+    """Uncaught imports fail through both Python import APIs, for root and dotted names."""
+    # The optimization-level behavior is independent of the requested module:
+    # the explicit guard checks run for all roots in the caught-import test above.
     monkeypatch.setenv("PYTHONOPTIMIZE", optimize)
-    if route == "statement":
-        source = f"import {module}"
-    elif route == "dynamic":
-        source = f"import importlib; importlib.import_module({module!r})"
-    else:
-        source = f"""
-import importlib
-try:
-    importlib.import_module({module!r})
-except ImportError:
-    pass
-"""
+    source = (
+        f"import {module}"
+        if route == "statement"
+        else f"import importlib; importlib.import_module({module!r})"
+    )
     result = run_without_optional_runtime(source)
     assert result.returncode != 0
     assert "Optional runtime imports attempted:" in result.stderr

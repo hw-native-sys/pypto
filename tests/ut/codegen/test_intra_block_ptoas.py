@@ -22,6 +22,7 @@ from types import ModuleType
 import pytest
 from pypto import backend
 from pypto.backend import BackendType
+from pypto.backend._ptoas_locate import find_ptoas_binary
 
 pytestmark = pytest.mark.ptoas_compile
 
@@ -42,6 +43,10 @@ def contracts() -> Iterator[ModuleType]:
 
 @pytest.fixture(autouse=True)
 def a5_backend():
+    # The same IR assertions have already been exercised in test_intra_block_ops.
+    # Do not lower the programs a second time merely to skip their compiler phase.
+    if find_ptoas_binary() is None:
+        pytest.skip("PTOAS is not available")
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend950)
     yield

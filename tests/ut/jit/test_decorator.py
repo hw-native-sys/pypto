@@ -1083,8 +1083,8 @@ class TestJitCaching:
         """Keep cache compilation source-only on hosts with an unusable ptoas."""
         monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
 
-    def test_cache_hit_same_shape(self):
-        """Second call with same shape returns cached program without recompilation."""
+    def test_cache_hit_and_miss_on_static_shapes(self):
+        """One multi-function cache shares equal shapes and splits different shapes."""
         torch = pytest.importorskip("torch")
 
         @jit.incore
@@ -1101,48 +1101,21 @@ class TestJitCaching:
             c = _add_incore(a, b, c)
             return c
 
-        a = torch.randn(128, 128)
-        b = torch.randn(128, 128)
-        c = torch.empty(128, 128)
+        args128 = tuple(torch.empty(128, 128) for _ in range(3))
+        args64 = tuple(torch.empty(64, 64) for _ in range(3))
 
-        add_kernel.compile(a, b, c)
+        first = add_kernel.compile(*args128)
+        assert isinstance(first, CompiledProgram)
+        assert list(add_kernel._cache.values()) == [first]
+        assert add_kernel.compile(*args128) is first
         assert len(add_kernel._cache) == 1
-        add_kernel.compile(a, b, c)
-        assert len(add_kernel._cache) == 1  # no new entry — cache hit
+        second = add_kernel.compile(*args64)
+        assert isinstance(second, CompiledProgram)
+        assert second is not first
+        assert len(add_kernel._cache) == 2
 
-    def test_cache_miss_different_shape(self):
-        """Different shape causes new compilation."""
-        torch = pytest.importorskip("torch")
-
-        @jit.incore
-        def _add_incore2(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-            M, N = a.shape
-            tile_a = pl.load(a, [0, 0], [M, N])
-            tile_b = pl.load(b, [0, 0], [M, N])
-            tile_c = pl.add(tile_a, tile_b)
-            pl.store(tile_c, [0, 0], c)
-            return c
-
-        @jit
-        def add_kernel2(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-            c = _add_incore2(a, b, c)
-            return c
-
-        a128 = torch.randn(128, 128)
-        b128 = torch.randn(128, 128)
-        c128 = torch.empty(128, 128)
-
-        a64 = torch.randn(64, 64)
-        b64 = torch.randn(64, 64)
-        c64 = torch.empty(64, 64)
-
-        add_kernel2.compile(a128, b128, c128)
-        assert len(add_kernel2._cache) == 1
-        add_kernel2.compile(a64, b64, c64)
-        assert len(add_kernel2._cache) == 2  # different shape — cache miss
-
-    def test_dynamic_dim_cache_hit_different_concrete_value(self):
-        """With bind_dynamic, different M values should hit the same cache entry."""
+    def test_dynamic_dim_cache_shares_dynamic_and_splits_static_extents(self):
+        """With bind_dynamic, only a non-dynamic extent change misses the cache."""
         torch = pytest.importorskip("torch")
 
         @jit.incore
@@ -1159,45 +1132,17 @@ class TestJitCaching:
             c = _copy_incore_dyn(a, c)
             return c
 
-        a256 = torch.randn(256, 128)
-        c256 = torch.empty(256, 128)
-        a512 = torch.randn(512, 128)
-        c512 = torch.empty(512, 128)
+        args = tuple(torch.empty(256, 128) for _ in range(2))
+        different_dynamic = tuple(torch.empty(512, 128) for _ in range(2))
+        different_static = tuple(torch.empty(256, 256) for _ in range(2))
 
-        dyn_kernel.compile(a256, c256)
+        first = dyn_kernel.compile(*args)
         assert len(dyn_kernel._cache) == 1
-        dyn_kernel.compile(a512, c512)
-        # Both M values → same cache entry (M is dynamic)
+        assert dyn_kernel.compile(*different_dynamic) is first
         assert len(dyn_kernel._cache) == 1
-
-    def test_dynamic_dim_cache_miss_on_static_dim_change(self):
-        """Changing a non-dynamic dim should miss the cache."""
-        torch = pytest.importorskip("torch")
-
-        @jit.incore
-        def _copy_incore_dyn2(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-            M = pl.dynamic("M")
-            a.bind_dynamic(0, M)
-            c.bind_dynamic(0, M)
-            tile_a = pl.load(a, [0, 0], [128, 128])
-            pl.store(tile_a, [0, 0], c)
-            return c
-
-        @jit
-        def dyn_kernel2(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-            c = _copy_incore_dyn2(a, c)
-            return c
-
-        a128 = torch.randn(256, 128)
-        c128 = torch.empty(256, 128)
-        a256 = torch.randn(256, 256)
-        c256 = torch.empty(256, 256)
-
-        dyn_kernel2.compile(a128, c128)
-        assert len(dyn_kernel2._cache) == 1
-        dyn_kernel2.compile(a256, c256)
-        # K changed (128 → 256), should be different compilations
-        assert len(dyn_kernel2._cache) == 2
+        # K changed (128 -> 256), so this is a different compilation.
+        assert dyn_kernel.compile(*different_static) is not first
+        assert len(dyn_kernel._cache) == 2
 
     def test_annotation_dynvar_scanned_without_bind_dynamic(self):
         """A pl.dynamic() var in the annotation marks the dim dynamic — no bind_dynamic.
@@ -1244,29 +1189,6 @@ class TestJitCaching:
         ann_dyn_kernel.compile(a512, c512)
         # Both M values → same cache entry (M is dynamic via annotation alone).
         assert len(ann_dyn_kernel._cache) == 1
-
-    def test_returns_compiled_program(self):
-        """JIT compilation should produce a CompiledProgram in the cache."""
-        torch = pytest.importorskip("torch")
-
-        @jit.incore
-        def _copy_incore_simple(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-            M, N = a.shape
-            tile_a = pl.load(a, [0, 0], [M, N])
-            pl.store(tile_a, [0, 0], c)
-            return c
-
-        @jit
-        def simple(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-            c = _copy_incore_simple(a, c)
-            return c
-
-        a = torch.randn(64, 64)
-        c = torch.empty(64, 64)
-        simple.compile(a, c)
-        cached_values = list(simple._cache.values())
-        assert len(cached_values) == 1
-        assert isinstance(cached_values[0], CompiledProgram)
 
 
 class TestMultiFuncDepDiscovery:
@@ -1864,31 +1786,6 @@ class TestMultiFuncIntegration:
         func_names = [f.name for f in program.functions.values()]
         assert "add_incore" in func_names
         assert "add_entry" in func_names
-
-    def test_multi_func_cache_hit(self, monkeypatch, tmp_path):
-        """Two multi-function JIT calls with same shapes reuse the cached program."""
-        torch = pytest.importorskip("torch")
-        monkeypatch.setenv("PTOAS_ROOT", str(tmp_path / "missing_ptoas"))
-
-        @jit.incore
-        def relu_incore(x: pl.Tensor, out: pl.Out[pl.Tensor]):
-            M, N = x.shape
-            t = pl.load(x, [0, 0], [M, N])
-            r = pl.relu(t)
-            pl.store(r, [0, 0], out)
-            return out
-
-        @jit
-        def relu_entry(x: pl.Tensor, out: pl.Out[pl.Tensor]):
-            out = relu_incore(x, out)
-            return out
-
-        x = torch.randn(16, 16)
-        out = torch.empty(16, 16)
-        relu_entry.compile(x, out)
-        assert len(relu_entry._cache) == 1
-        relu_entry.compile(x, out)
-        assert len(relu_entry._cache) == 1  # cache hit
 
     def test_multi_func_structural_equal_to_program(self):
         """Multi-function JIT output matches hand-written @pl.program structurally."""

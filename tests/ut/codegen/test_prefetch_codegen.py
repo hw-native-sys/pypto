@@ -113,6 +113,23 @@ class TestPrefetchPTOCodegen:
             mlir,
         ), mlir
 
+        # Handles have no buffer. Every operand must refer to the SSA name of
+        # its defining assignment, rather than an invented undefined temp.
+        defined: set[str] = set()
+        for line in mlir.splitlines():
+            stripped = line.strip()
+            operands = re.findall(r"%\w+", stripped)
+            if " = " in stripped:
+                lhs = stripped.split(" = ", 1)[0].strip()
+                operands = re.findall(r"%\w+", stripped.split(" = ", 1)[1])
+            else:
+                lhs = None
+            if "pto.tprefetch_async" in stripped or "pto.comm.wait_async_event" in stripped:
+                for operand in operands:
+                    assert operand in defined, f"{operand} used before definition in: {stripped}"
+            if lhs is not None:
+                defined.add(lhs)
+
     def test_hidden_sdma_pointer_is_first_parameter_without_user_args(self):
         """A hidden-only signature starts directly with ``%arg0``, not a comma."""
         mlir = _generate_mlir(ZeroParamPrefetchProgram)
@@ -152,29 +169,6 @@ class TestPrefetchPTOCodegen:
             r"__pypto_spmd_block_idx, __pypto_spmd_block_num\);",
             call_line,
         ), call_line
-
-    def test_handle_ssa_values_are_defined_before_use(self):
-        """Each handle operand resolves to an SSA name defined earlier in the function.
-
-        Regression guard: the handle types carry no buffer, so an emitter that
-        invented a fresh temp instead of defining the assignment's bound LHS name
-        would produce operands referencing undefined SSA values.
-        """
-        mlir = _generate_mlir(PrefetchProgram)
-        defined: set[str] = set()
-        for line in mlir.splitlines():
-            stripped = line.strip()
-            operands = re.findall(r"%\w+", stripped)
-            if " = " in stripped:
-                lhs = stripped.split(" = ", 1)[0].strip()
-                operands = re.findall(r"%\w+", stripped.split(" = ", 1)[1])
-            else:
-                lhs = None
-            if "pto.tprefetch_async" in stripped or "pto.comm.wait_async_event" in stripped:
-                for operand in operands:
-                    assert operand in defined, f"{operand} used before definition in: {stripped}"
-            if lhs is not None:
-                defined.add(lhs)
 
 
 @pl.program

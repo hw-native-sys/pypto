@@ -652,8 +652,10 @@ def _matrix_data(rows, cols, dtype, modulus=7):
     return values.to(dtype) if dtype == torch.int8 else values.to(dtype) / 4
 
 
+# Explicit True is identical to the default PassContext setting; the mixed
+# rollout test in test_lower_tile_to_buffer.py covers both spellings.
 @pytest.mark.parametrize("planner", _PLANNERS)
-@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("enabled", [None, False], ids=["default", "off"])
 @pytest.mark.parametrize(
     "operand,dtype",
     [("FP16", torch.float16), ("BF16", torch.bfloat16), ("FP32", torch.float32), ("INT8", torch.int8)],

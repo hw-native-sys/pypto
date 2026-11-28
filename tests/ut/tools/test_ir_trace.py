@@ -12,6 +12,7 @@
 import errno
 import importlib.metadata
 import json
+import runpy
 import shutil
 import subprocess
 import sys
@@ -343,38 +344,42 @@ def test_installed_distribution_provides_the_console_script():
 
 
 @pytest.mark.parametrize("command", _entry_point_commands())
-def test_entry_points_preserve_main_exit_codes(command: list[str], tmp_path: Path):
+def test_entry_points_preserve_main_exit_codes(
+    command: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     dump = _write_dump(
         tmp_path,
         {"00_frontend.py": "a\n", "01_after_TestPass.py": "b\n"},
     )
     output = tmp_path / "trace.html"
 
+    # Keep one real launch per entry point to catch installation or launcher
+    # regressions. The CLI's error cases are also tested directly above; run
+    # the actual entry-point wrappers in-process for their exit-code checks
+    # rather than importing PyPTO in two more interpreters each time.
     success = subprocess.run(
         [*command, str(dump), "--output", str(output)],
         check=False,
         capture_output=True,
         text=True,
     )
-    domain_error = subprocess.run(
-        [*command, str(tmp_path / "missing")],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    argument_error = subprocess.run(
-        [*command, str(dump), "--context", "-1"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
     assert success.returncode == 0
     assert output.read_text(encoding="utf-8").startswith("<!doctype html>")
-    assert domain_error.returncode == 1
-    assert "pypto-ir-trace: error: input directory does not exist" in domain_error.stderr
-    assert argument_error.returncode == 2
-    assert "argument --context: must be non-negative, got -1" in argument_error.stderr
+
+    errors = [
+        ([str(tmp_path / "missing")], 1, "pypto-ir-trace: error: input directory does not exist"),
+        ([str(dump), "--context", "-1"], 2, "argument --context: must be non-negative, got -1"),
+    ]
+    for args, exit_code, message in errors:
+        with monkeypatch.context() as invocation:
+            invocation.setattr(sys, "argv", [command[-1], *args])
+            with pytest.raises(SystemExit) as exc_info:
+                if command[1:2] == ["-m"]:
+                    runpy.run_module(command[-1], run_name="__main__", alter_sys=True)
+                else:
+                    runpy.run_path(command[0], run_name="__main__")
+        assert exc_info.value.code == exit_code
+        assert message in capsys.readouterr().err
 
 
 def test_build_trace_counts_and_aligns_replace(tmp_path: Path):

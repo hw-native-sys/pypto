@@ -650,11 +650,24 @@ def test_allreduce_is_decomposed_to_primitives():
     After = passes.lower_composite_ops()(Before)
     op_names = set(_collect_op_names(After))
 
-    assert "pld.tensor.allreduce" not in op_names, (
+    assert ir.get_op("pld.tensor.allreduce").name not in op_names, (
         "lower_composite_ops must remove the composite allreduce call entirely"
     )
     missing = _ALLREDUCE_REQUIRED_OPS - op_names
     assert not missing, f"lowered IR missing expected ops: {missing}"
+
+    # Each chunk completes a second peer barrier before overwriting target
+    # data that slower peers may still be reading. The epilogue clears credits.
+    collector = _StmtKindCollector()
+    collector.visit_program(After)
+
+    assert collector.for_count == 7, (
+        f"expected 7 ForStmts (notify,wait,chunk,reduce,renotify,rewait,epilogue), got {collector.for_count}"
+    )
+    assert collector.if_count == 6, f"expected 6 peer-filter IfStmts, got {collector.if_count}"
+
+    # An already-lowered program contains no composite calls to rewrite.
+    ir.assert_structural_equal(passes.lower_composite_ops()(After), After)
 
 
 def test_allreduce_in_host_orchestrator_is_left_for_host_collective_lowering():
@@ -812,7 +825,7 @@ def _min_clamps(values: list) -> list:
     return found
 
 
-def test_all_to_all_v_push_loop_is_bounded_by_runtime_send_counts():
+def test_all_to_all_v_runtime_counts_and_barrier_protocol():
     """The push loop is bounded by ``send_counts[dest]`` read at runtime, not by
     the compile-time MAX_RECV capacity — a capacity-bounded loop would transfer
     padding rows the destination never asked for."""
@@ -849,6 +862,14 @@ def test_all_to_all_v_push_loop_is_bounded_by_runtime_send_counts():
         f"the clamp must bound the count by MAX_RECV ({_AAV_MAX_RECV}); "
         f"constant clamp operands found: {clamp_operands}"
     )
+
+    # Reuse the same lowered kernel for independent contracts on transfer
+    # shapes, count accounting and the acquire/release protocol.
+    _assert_all_to_all_v_transfer_shape_is_the_runtime_row_count(After)
+    _assert_all_to_all_v_row_count_is_clamped_below_by_zero(After)
+    _assert_all_to_all_v_zero_rows_skip_count_publication_and_payload(After)
+    _assert_all_to_all_v_resets_counts_before_atomic_publication(After)
+    _assert_all_to_all_v_waits_preserve_acquires_and_put_release(After)
 
 
 class _GuardProbe(ir.IRVisitor):
@@ -913,7 +934,7 @@ def _collect_tile_puts(prog) -> list:
     ]
 
 
-def test_all_to_all_v_transfer_shape_is_the_runtime_row_count():
+def _assert_all_to_all_v_transfer_shape_is_the_runtime_row_count(After):
     """The TPUT transfer extent is the runtime row count, not MAX_RECV.
 
     Regression lock. The transfer shape used to be the compile-time
@@ -926,7 +947,6 @@ def test_all_to_all_v_transfer_shape_is_the_runtime_row_count():
     unaffected (the receiver uses ``recv_counts`` either way). Only the bytes on
     the wire change, which no functional test observes.
     """
-    After = passes.lower_composite_ops()(_build_all_to_all_v_before())
     puts = _collect_tile_puts(After)
     assert puts, "expected a pld.tile.put per destination"
 
@@ -943,14 +963,13 @@ def test_all_to_all_v_transfer_shape_is_the_runtime_row_count():
         )
 
 
-def test_all_to_all_v_row_count_is_clamped_below_by_zero():
+def _assert_all_to_all_v_row_count_is_clamped_below_by_zero(After):
     """``rows`` is clamped on both sides, not just against MAX_RECV.
 
     The lower clamp only became load-bearing once ``rows`` started sizing the
     transfer. Before that a negative ``send_counts`` merely produced a negative
     TNOTIFY payload; now it would be a negative transfer extent.
     """
-    After = passes.lower_composite_ops()(_build_all_to_all_v_before())
     probe = _probe_stmts(After)
 
     floors = [v for v in probe.assign_values if isinstance(v, ir.Max)]
@@ -966,9 +985,8 @@ def test_all_to_all_v_row_count_is_clamped_below_by_zero():
     )
 
 
-def test_all_to_all_v_zero_rows_skip_count_publication_and_payload():
+def _assert_all_to_all_v_zero_rows_skip_count_publication_and_payload(After):
     """Receiver reset preserves zero when the sender skips an empty transfer."""
-    After = passes.lower_composite_ops()(_build_all_to_all_v_before())
     probe = _GuardProbe()
     probe.visit_program(After)
 
@@ -1003,9 +1021,8 @@ def test_all_to_all_v_zero_rows_skip_count_publication_and_payload():
     assert all(call.kwargs["op"] == int(pld.NotifyOp.AtomicAdd) for call in (*count_notifies, *publications))
 
 
-def test_all_to_all_v_resets_counts_before_atomic_publication():
+def _assert_all_to_all_v_resets_counts_before_atomic_publication(After):
     """Announce every reset before waiting only for the current destination."""
-    After = passes.lower_composite_ops()(_build_all_to_all_v_before())
     probe = _probe_stmts(After)
     calls = [value for value in probe.values if isinstance(value, ir.Call)]
     notify_op = ir.get_op("pld.system.notify").name
@@ -1089,9 +1106,8 @@ def test_all_to_all_v_resets_counts_before_atomic_publication():
     assert isinstance(epilogue.args[3], ir.ConstInt) and epilogue.args[3].value == -2
 
 
-def test_all_to_all_v_waits_preserve_acquires_and_put_release():
+def _assert_all_to_all_v_waits_preserve_acquires_and_put_release(lowered):
     """Readiness and completion waits retain the standard acquire behavior."""
-    lowered = passes.lower_composite_ops()(_build_all_to_all_v_before())
 
     reparsed = pl.parse_program(ir.python_print(lowered))
     ir.assert_structural_equal(lowered, reparsed)
@@ -1387,36 +1403,6 @@ def test_all_to_all_v_in_while_loop_now_succeeds():
             return data
 
     passes.lower_composite_ops()(LoopAllToAllV)
-
-
-def test_allreduce_emits_for_and_if_control_flow():
-    """The chunked recipe emits six ForStmts and five IfStmts:
-
-    * Phase 2a (notify all peers) — for + if
-    * Phase 2b (wait on all peers) — for + if
-    * Phase 3 chunk traversal — one for loop
-    * Phase 3 peer reduction — for + if
-    * Per-chunk Phase 3.5 re-notify — for + if
-    * Per-chunk Phase 3.5 re-wait — for + if
-
-    Phase 3.5 is a second cross-rank barrier inserted between Phase 3
-    (read peers via ``pld.tile.remote_load``) and Phase 4 (write reduced
-    value back into ``target``). Without it, a fast rank could overwrite
-    its slot while slower ranks are still reading the staged Phase-1 data
-    — a write-after-read race that manifests as off-by-N*peer drift on
-    slower ranks at P>=4.
-
-    This pins the structured control-flow shape so a refactor that
-    collapses or drops any of the loops surfaces here."""
-    Before = _build_allreduce_before()
-    After = passes.lower_composite_ops()(Before)
-    collector = _StmtKindCollector()
-    collector.visit_program(After)
-
-    assert collector.for_count == 7, (
-        f"expected 7 ForStmts (notify,wait,chunk,reduce,renotify,rewait,epilogue), got {collector.for_count}"
-    )
-    assert collector.if_count == 6, f"expected 6 peer-filter IfStmts, got {collector.if_count}"
 
 
 def test_allreduce_flattens_target_to_2d_view_for_mesh_lowering():
@@ -1985,15 +1971,6 @@ def test_allreduce_dynamic_mesh_lowering_reaches_pto_codegen(default_pass_manage
     assert re.search(r"sizes = \[%c1_index, %[A-Za-z0-9_.$]+\]", remote_partition), remote_partition
 
 
-def test_allreduce_lowering_is_idempotent():
-    """Running the pass on already-lowered IR is a no-op — the second pass
-    has nothing left to rewrite."""
-    Before = _build_allreduce_before()
-    once = passes.lower_composite_ops()(Before)
-    twice = passes.lower_composite_ops()(once)
-    ir.assert_structural_equal(twice, once)
-
-
 def test_allreduce_noop_when_only_user_call_chain():
     """Programs that never call ``pld.tensor.allreduce`` are left
     structurally unchanged (sanity check the dispatch table)."""
@@ -2098,11 +2075,7 @@ def test_barrier_is_decomposed_to_primitives():
     missing = _BARRIER_REQUIRED_OPS - op_names
     assert not missing, f"lowered IR missing expected ops: {missing}"
 
-
-def test_barrier_emits_for_and_if_control_flow():
-    """Barrier emits 2 ForStmts + 2 IfStmts: notify-all + wait-all."""
-    Before = _build_barrier_before()
-    After = passes.lower_composite_ops()(Before)
+    # Notify, wait and the self-clearing epilogue each use a peer loop.
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
@@ -2111,13 +2084,8 @@ def test_barrier_emits_for_and_if_control_flow():
     )
     assert collector.if_count == 3, f"expected 3 IfStmts (one per ForStmt body), got {collector.if_count}"
 
-
-def test_barrier_lowering_is_idempotent():
-    """Running the pass on already-lowered barrier IR is a no-op."""
-    Before = _build_barrier_before()
-    once = passes.lower_composite_ops()(Before)
-    twice = passes.lower_composite_ops()(once)
-    ir.assert_structural_equal(twice, once)
+    # An already-lowered program contains no composite calls to rewrite.
+    ir.assert_structural_equal(passes.lower_composite_ops()(After), After)
 
 
 # ============================================================================
@@ -2169,12 +2137,7 @@ def test_broadcast_is_decomposed_to_primitives():
     missing = _BROADCAST_REQUIRED_OPS - op_names
     assert not missing, f"lowered IR missing expected ops: {missing}"
 
-
-def test_broadcast_emits_for_and_if_control_flow():
-    """Broadcast emits 2 ForStmts + 2 IfStmts: notify-all + wait-all.
-    Phase 3 (tile.create + pld.tile.get) has no loop."""
-    Before = _build_broadcast_before()
-    After = passes.lower_composite_ops()(Before)
+    # Notify/wait/epilogue loops, plus an unlooped staging tile and get.
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
@@ -2183,13 +2146,8 @@ def test_broadcast_emits_for_and_if_control_flow():
     )
     assert collector.if_count == 3, f"expected 3 IfStmts (one per ForStmt body), got {collector.if_count}"
 
-
-def test_broadcast_lowering_is_idempotent():
-    """Running the pass on already-lowered broadcast IR is a no-op."""
-    Before = _build_broadcast_before()
-    once = passes.lower_composite_ops()(Before)
-    twice = passes.lower_composite_ops()(once)
-    ir.assert_structural_equal(twice, once)
+    # An already-lowered program contains no composite calls to rewrite.
+    ir.assert_structural_equal(passes.lower_composite_ops()(After), After)
 
 
 # ============================================================================
@@ -2242,15 +2200,8 @@ def test_allgather_is_decomposed_to_primitives():
     missing = _ALLGATHER_REQUIRED_OPS - op_names
     assert not missing, f"lowered IR missing expected ops: {missing}"
 
-
-def test_allgather_emits_for_and_if_control_flow():
-    """Push-based allgather emits 3 ForStmts + 2 IfStmts: push loop, notify-all, wait-all.
-
-    Phase 1 (push) uses a runtime ForStmt over nranks_idx — every peer gets a
-    pld.tile.put (self-store via HCCL identity mapping, no per-rank IfStmt).
-    Phase 2a/2b are the standard notify-all/wait-all loops with per-peer IfStmts."""
-    Before = _build_allgather_before()
-    After = passes.lower_composite_ops()(Before)
+    # The push loop includes self (identity mapping); only the notify, wait
+    # and epilogue loops filter peers with an IfStmt.
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
@@ -2261,13 +2212,8 @@ def test_allgather_emits_for_and_if_control_flow():
         f"expected 3 IfStmts (notify-all + wait-all + epilogue), got {collector.if_count}"
     )
 
-
-def test_allgather_lowering_is_idempotent():
-    """Running the pass on already-lowered allgather IR is a no-op."""
-    Before = _build_allgather_before()
-    once = passes.lower_composite_ops()(Before)
-    twice = passes.lower_composite_ops()(once)
-    ir.assert_structural_equal(twice, once)
+    # An already-lowered program contains no composite calls to rewrite.
+    ir.assert_structural_equal(passes.lower_composite_ops()(After), After)
 
 
 # ============================================================================
@@ -2321,12 +2267,7 @@ def test_reduce_scatter_is_decomposed_to_primitives():
     missing = _REDUCE_SCATTER_REQUIRED_OPS - op_names
     assert not missing, f"lowered IR missing expected ops: {missing}"
 
-
-def test_reduce_scatter_emits_for_and_if_control_flow():
-    """Reduce-scatter emits 5 ForStmts + 5 IfStmts (same shape as allreduce):
-    notify, wait, reduce, re-notify, re-wait."""
-    Before = _build_reduce_scatter_before()
-    After = passes.lower_composite_ops()(Before)
+    # Notify, wait, reduce, re-notify, re-wait and epilogue.
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
@@ -2335,13 +2276,8 @@ def test_reduce_scatter_emits_for_and_if_control_flow():
     )
     assert collector.if_count == 6, f"expected 6 IfStmts (one per ForStmt body), got {collector.if_count}"
 
-
-def test_reduce_scatter_lowering_is_idempotent():
-    """Running the pass on already-lowered reduce_scatter IR is a no-op."""
-    Before = _build_reduce_scatter_before()
-    once = passes.lower_composite_ops()(Before)
-    twice = passes.lower_composite_ops()(once)
-    ir.assert_structural_equal(twice, once)
+    # An already-lowered program contains no composite calls to rewrite.
+    ir.assert_structural_equal(passes.lower_composite_ops()(After), After)
 
 
 def _build_reduce_scatter_op_program(reduce_op):
@@ -2631,20 +2567,16 @@ def test_ring_allreduce_is_decomposed_to_primitives():
     missing = _RING_ALLREDUCE_REQUIRED_OPS - op_names
     assert not missing, f"ring-lowered IR missing expected ops: {missing}"
 
-
-def test_ring_allreduce_emits_ring_control_flow():
-    """Ring lowering emits phase, subchunk, and two-phase barrier loops.
-
-    For P=2 and one subchunk, each RS/AG phase has one outer loop, one
-    subchunk loop, four peer loops, one guarded data path, and one guarded
-    store."""
-    Before = _build_ring_allreduce_before()
-    After = passes.lower_composite_ops()(Before)
+    # For P=2 and one subchunk, each RS/AG phase has an outer loop,
+    # subchunk loop, four peer loops, guarded data path and guarded store.
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
     assert collector.for_count == 14, f"expected 14 ForStmts for P=2 ring, got {collector.for_count}"
     assert collector.if_count == 14, f"expected 14 IfStmts for P=2 ring, got {collector.if_count}"
+
+    # An already-lowered program contains no composite calls to rewrite.
+    ir.assert_structural_equal(passes.lower_composite_ops()(After), After)
 
 
 @pytest.mark.parametrize("size", [1, 3, 17, 8193, 65537])
@@ -3015,14 +2947,6 @@ def test_ring_allreduce_fp16_ragged_tail_reaches_pto_codegen(
     assert "f16" in mlir
 
 
-def test_ring_allreduce_lowering_is_idempotent():
-    """Running the pass on already-lowered ring IR is a no-op."""
-    Before = _build_ring_allreduce_before()
-    once = passes.lower_composite_ops()(Before)
-    twice = passes.lower_composite_ops()(once)
-    ir.assert_structural_equal(twice, once)
-
-
 def test_ring_allreduce_invalid_signal_shape_is_rejected():
     """Ring mode validates signal type — rejects non-DistributedTensor or
     non-INT32 signals at lowering time.  The exact shape [2*(NR−1), NR]
@@ -3046,24 +2970,6 @@ def test_ring_allreduce_invalid_signal_shape_is_rejected():
                 return data
 
         passes.lower_composite_ops()(BadDtype)
-
-
-def test_ring_allreduce_mesh_default_unchanged():
-    """Existing mesh allreduce (mode omitted) still decomposes to the mesh
-    recipe — no ring primitives leak in."""
-    Before = _build_allreduce_before()
-    After = passes.lower_composite_ops()(Before)
-    op_names = set(_collect_op_names(After))
-
-    assert ir.get_op("pld.tensor.allreduce").name not in op_names
-    missing = _ALLREDUCE_REQUIRED_OPS - op_names
-    assert not missing, f"mesh-lowered IR missing expected ops: {missing}"
-
-    # Mesh-specific: ready barrier + chunk traversal + peer reduction +
-    # per-chunk read-complete barrier.
-    collector = _StmtKindCollector()
-    collector.visit_program(After)
-    assert collector.for_count == 7, f"mesh allreduce must produce 7 ForStmts, got {collector.for_count}"
 
 
 @pytest.mark.parametrize(("reduce_op", "expected_tile_op"), _ALLREDUCE_REDUCE_CASES)
@@ -3307,16 +3213,6 @@ _BACK_TO_BACK_CASES = {
 }
 
 
-def test_all_to_all_v_two_calls_retire_both_barrier_credits():
-    After = passes.lower_composite_ops()(_build_two_all_to_all_v_program())
-    resets = [
-        call.args[3].value
-        for call in _collect_barrier_calls(After).notifies
-        if isinstance(call.args[3], ir.ConstInt) and call.args[3].value < 0
-    ]
-    assert resets == [-2, -2], "each call must remove both reset and completion credits"
-
-
 @pytest.mark.parametrize("collective", sorted(_BACK_TO_BACK_CASES))
 def test_back_to_back_collective_restarts_at_generation_one(collective):
     """A signal reused by two consecutive collectives always restarts at 1.
@@ -3335,19 +3231,8 @@ def test_back_to_back_collective_restarts_at_generation_one(collective):
         f"{expected_generations}, got {_static_wait_expectations(After)}"
     )
 
-
-@pytest.mark.parametrize("collective", sorted(_BACK_TO_BACK_CASES))
-def test_collective_barriers_use_atomic_add_and_ge(collective):
-    """Every barrier notifies with ``AtomicAdd`` and waits with ``Ge``.
-
-    ``Set`` must never appear: mixing it with ``AtomicAdd`` on the same cells
-    can clobber an already-advanced counter. ``Ge`` (not ``Eq``) is required
-    because a fast peer can advance a cell past the value the waiter is
-    looking for. The credit epilogue's reset notify is itself an ``AtomicAdd``
-    (of a negative value) — never a ``Set`` — so this invariant covers it too.
-    """
-    build, _ = _BACK_TO_BACK_CASES[collective]
-    After = passes.lower_composite_ops()(build())
+    # AtomicAdd and Ge are required even if a fast peer has already advanced
+    # a cell past the wait target (including the credit-reset epilogue).
     calls = _collect_barrier_calls(After)
 
     assert calls.notifies, f"{collective} lowering emitted no notify"
@@ -3360,6 +3245,14 @@ def test_collective_barriers_use_atomic_add_and_ge(collective):
         assert wait.kwargs["cmp"] == int(pld.WaitCmp.Ge), (
             f"{collective} must wait with Ge, got cmp={wait.kwargs['cmp']}"
         )
+
+    if collective == "all_to_all_v":
+        resets = [
+            call.args[3].value
+            for call in _collect_barrier_calls(After).notifies
+            if isinstance(call.args[3], ir.ConstInt) and call.args[3].value < 0
+        ]
+        assert resets == [-2, -2], "each call must remove both reset and completion credits"
 
 
 def test_barrier_chain_restarts_generation_through_the_rebind_idiom():
@@ -4032,7 +3925,8 @@ def test_tile_select_lowers_to_the_matching_pto_form(form, expected_select_op, m
     has no TSELS form, so the scalar is materialized with ``tile.full`` and the
     selection becomes TSEL.
     """
-    After = passes.lower_composite_ops()(_build_select_before(form=form))
+    Before = _build_select_before(form=form)
+    After = passes.lower_composite_ops()(Before)
     names = _collect_op_names(After)
 
     assert _OP_TILE_SELECT not in names
@@ -4041,26 +3935,12 @@ def test_tile_select_lowers_to_the_matching_pto_form(form, expected_select_op, m
     # The scratch operand tile.select does not carry is synthesized here.
     assert _OP_TILE_CREATE in names
 
-
-@pytest.mark.parametrize("form", ["mask-tile-scalar", "mask-scalar-tile", "mask-tile-tile"])
-def test_tile_select_never_synthesizes_a_compare(form):
-    """The condition is already the mask both TSEL and TSELS take.
-
-    `tile.select` accepts only the packed predicate mask, so the lowering reuses
-    it verbatim and the compare count is unchanged. Asserting on the *delta*
-    rather than the total keeps this sharp: each program already contains exactly
-    one compare, so a total-count assertion would still hold if the lowering
-    re-derived a mask it had been handed.
-    """
-    Before = _build_select_before(form=form)
-
-    def compares(prog):
-        names = _collect_op_names(prog)
-        return names.count(_OP_TILE_CMPS) + names.count(_OP_TILE_CMP)
-
-    After = passes.lower_composite_ops()(Before)
-
-    assert compares(After) == compares(Before)
+    # Operand selection consumes the existing packed predicate mask, so the
+    # number of compares must not increase.
+    before_names = _collect_op_names(Before)
+    assert names.count(_OP_TILE_CMPS) + names.count(_OP_TILE_CMP) == (
+        before_names.count(_OP_TILE_CMPS) + before_names.count(_OP_TILE_CMP)
+    )
 
 
 def test_tile_select_keeps_a_narrowed_tail_on_a_materialized_scalar_branch():

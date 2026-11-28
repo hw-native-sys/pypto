@@ -448,6 +448,7 @@ def test_tensor_frontend_default_pipeline(tmp_path, planner):
             output_dir=str(tmp_path),
             backend_type=backend.BackendType.Ascend950,
             skip_ptoas=True,
+            dump_passes=False,
         )
     source = tmp_path / "kernels/aiv/register_tensor_kernel.pto"
     assert 'pto.backend = "vpto"' in source.read_text()

@@ -451,8 +451,10 @@ def test_assemble_preserves_a_partially_valid_target(
     assert "pto.tmov ins(" in text
 
 
+# Explicit True is identical to the default PassContext setting; the mixed
+# rollout test in test_lower_tile_to_buffer.py covers both spellings.
 @pytest.mark.parametrize("planner", _PLANNERS)
-@pytest.mark.parametrize("enabled", [None, True, False])
+@pytest.mark.parametrize("enabled", [None, False], ids=["default", "off"])
 @pytest.mark.parametrize("dtype_name", ["FP16", "BF16", "FP32", "INT32"])
 def test_default_reshape_preserves_bytes_in_debug(planner, enabled, dtype_name):
     options = {} if enabled is None else {"enable_buffer_ir": enabled}

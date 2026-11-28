@@ -50,7 +50,7 @@ def _specialize(tmp_path, body, *, core="aiv", public=True, contract=False, perm
     )
     result = "return out" if public else "..."
     out_direction = "pl.Out[pl.Tensor]" if public else "pl.InOut[pl.Tensor]"
-    path = tmp_path / "normalization_case.py"
+    path = tmp_path / ("normalization_public.py" if public else "normalization_void.py")
     path.write_text(f"""import pypto.language as pl
 @pl.jit.extern(core_type={core!r}, {source_args})
 def producer(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: {out_direction}):
@@ -100,7 +100,6 @@ def entry(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: pl.InOut[pl.Tensor],
     return source, program
 
 
-@pytest.mark.parametrize("public", [False, True], ids=["void", "public-return"])
 @pytest.mark.parametrize("core", ["aiv", "aic", "mixed"])
 @pytest.mark.parametrize(
     "body",
@@ -112,8 +111,12 @@ def entry(x: pl.Tensor, state: pl.InOut[pl.Tensor], out: pl.InOut[pl.Tensor],
         "for i in pl.range(2):\n    if flag:\n        helper(x, state, out)",
     ],
 )
-def test_hidden_writes_cross_inline_and_control_flow(tmp_path, public, core, body):
-    _, program = _specialize(tmp_path, body, public=public, core=core, contract=True)
+def test_hidden_writes_cross_inline_and_control_flow(tmp_path, core, body):
+    _, program = _specialize(tmp_path, body, public=False, core=core, contract=True)
+    _, public_program = _specialize(tmp_path, body, public=True, core=core, contract=True)
+    # The ignored public result is a written parameter in either case. Prove
+    # both calls normalize to the same writebacks before running passes once.
+    ir.assert_structural_equal(program, public_program)
     producer = program.get_function("producer_aic" if core == "mixed" else "producer")
     assert producer is not None
     assert ir.returned_param_indices(producer, program) == [1, 2]

@@ -4943,7 +4943,9 @@ def test_wrapper_diagnoses_runtime_payload_capacity(kind, limit, overflow):
 
 @pytest.mark.parametrize("extent", ["B * 2", "2 * B", "B + 2", "2 + B", "B - 2", "32 - B"])
 @pytest.mark.parametrize("scope", ["pl.spmd(1)", "pl.at(level=pl.Level.CORE_GROUP)"])
-def test_outline_preserves_shape_only_affine_extraction(tmp_path, extent, scope):
+def test_outline_preserves_shape_only_affine_extraction(
+    tmp_path, extent, scope, pass_verification_instruments
+):
     """Shape-only B has no orch scalar binding; the wrapper must recover it."""
     backend.reset_for_testing()
     program = pl.parse(f"""import pypto.language as pl
@@ -4963,12 +4965,23 @@ class Program:
         return out
 """)
     assert isinstance(program, ir.Program)
-    compiled = ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    # Reuse the last pass result from the real compile for the ABI check below,
+    # instead of running the full pipeline again (including roundtrip checks).
+    lowered_programs: list[ir.Program] = []
+
+    def capture_lowered(_pass, intermediate):
+        lowered_programs[:] = [intermediate]
+
+    with passes.PassContext(
+        [*pass_verification_instruments, passes.CallbackInstrument(after_pass=capture_lowered)]
+    ):
+        compiled = ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True, dump_passes=False)
     assert compiled is not None
     orch = (tmp_path / "orchestration" / "main.cpp").read_text()
     assert ".add_scalar(B)" not in orch
     # Check the ABI extractor independently of assembler availability.
-    lowered = _run_default_passes(program)
+    assert lowered_programs
+    lowered = lowered_programs[0]
     kernels = [func for func in lowered.functions.values() if ir.is_incore_type(func.func_type)]
     assert len(kernels) == 1
     unpacking, names = _generate_arg_unpacking(kernels[0])
@@ -4996,7 +5009,7 @@ class Program:
 """)
     assert isinstance(program, ir.Program)
     with pytest.raises(ValueError, match="B.*no caller-side runtime binding"):
-        ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+        ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True, dump_passes=False)
 
 
 @pytest.mark.parametrize("binding", ["B: pl.Scalar[pl.INDEX]", "source: pl.Tensor[[B, 16], pl.FP32]"])
@@ -5017,7 +5030,7 @@ class Program:
         return x
 """)
     assert isinstance(program, ir.Program)
-    ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True)
+    ir.compile(program, output_dir=str(tmp_path), skip_ptoas=True, dump_passes=False)
     orch = (tmp_path / "orchestration" / "main.cpp").read_text()
     assert ".add_scalar(B)" in orch
     assert "int64_t B =" in orch

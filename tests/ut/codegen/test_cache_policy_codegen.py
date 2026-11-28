@@ -271,7 +271,7 @@ def _warnings(capfd) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_declared_tensor_load_carries_the_bypass_attribute():
+def test_declared_tensor_load_carries_the_bypass_attribute_and_offset(capfd):
     """Only the declared operand's load is hinted; the other is untouched."""
     mlir = _incore_mlir(DeclaredBypass)
     loads = _tload_lines(mlir)
@@ -281,6 +281,13 @@ def test_declared_tensor_load_carries_the_bypass_attribute():
     plain = {_source_of(line) for line in loads if BYPASS_ATTR not in line}
     assert hinted == {"b"}, f"only the declared tensor may be hinted, got {hinted}"
     assert plain == {"a"}, f"the undeclared tensor must stay cached, got {plain}"
+    # PTOAS applies the offset only to a load declaring l2_bypass. The
+    # attribute alone would leave the original cached address unchanged.
+    hinted_loads = _hinted_tloads(mlir)
+    assert len(hinted_loads) == 1, f"expected exactly one hinted load:\n{mlir}"
+    assert OFFSET_OPERAND in hinted_loads[0], f"hinted load carries no device offset:\n{hinted_loads[0]}"
+    assert f"{OFFSET_PARAM}: i64" in _signature_line(mlir), _signature_line(mlir)
+    assert _warnings(capfd) == []
 
 
 def test_the_declaration_adds_only_the_attribute_offset_and_parameter():
@@ -310,7 +317,7 @@ def test_each_declared_tensor_gets_its_own_hinted_load():
     assert hinted == {"a", "b"}, f"expected both operands hinted, got {hinted}:\n{mlir}"
 
 
-def test_every_emitted_load_of_a_declared_tensor_is_hinted():
+def test_every_emitted_load_of_a_declared_tensor_is_hinted(capfd):
     """Many loads, one declaration, one hint each.
 
     The hint belongs to the instruction, not to the tensor: the old diagnostic
@@ -322,7 +329,12 @@ def test_every_emitted_load_of_a_declared_tensor_is_hinted():
     loads = _tload_lines(mlir)
 
     assert len(loads) == 2, f"expected two emitted loads:\n{mlir}"
-    assert len(_hinted_tloads(mlir)) == 2, f"every emitted load must carry the hint:\n{mlir}"
+    hinted = _hinted_tloads(mlir)
+    assert len(hinted) == 2, f"every emitted load must carry the hint:\n{mlir}"
+    # The offset cannot change during a dispatch: one parameter serves both loads.
+    assert all(OFFSET_OPERAND in line for line in hinted), f"every hinted load takes it:\n{mlir}"
+    assert _signature_line(mlir).count(f"{OFFSET_PARAM}: i64") == 1, _signature_line(mlir)
+    assert _warnings(capfd) == []
 
 
 # ---------------------------------------------------------------------------
@@ -333,36 +345,6 @@ def test_every_emitted_load_of_a_declared_tensor_is_hinted():
 def _signature_line(mlir: str) -> str:
     """The emitted ``func.func`` signature — where synthetic params are appended."""
     return next(line.strip() for line in mlir.splitlines() if line.strip().startswith("func.func @"))
-
-
-def test_declared_load_takes_the_device_offset_as_its_tload_operand():
-    """The attribute declares the policy; the offset is what moves the address.
-
-    PTOAS applies the offset only to a load that also declared ``l2_bypass``, so
-    the two travel together on the same ``pto.tload`` — an attribute without an
-    offset compiles to an ordinary cached load, which would make the declaration
-    silently inert.
-    """
-    mlir = _incore_mlir(DeclaredBypass)
-    hinted = _hinted_tloads(mlir)
-
-    assert len(hinted) == 1, f"expected exactly one hinted load:\n{mlir}"
-    assert OFFSET_OPERAND in hinted[0], f"hinted load carries no device offset:\n{hinted[0]}"
-    assert f"{OFFSET_PARAM}: i64" in _signature_line(mlir), _signature_line(mlir)
-
-
-def test_one_parameter_serves_every_declared_load():
-    """Two hinted loads, one parameter: the value cannot change within a dispatch.
-
-    The wrapper reads ``get_l2_cache_offset(args)`` once at kernel entry, so a
-    second parameter would mean a second GM read of a constant.
-    """
-    mlir = _incore_mlir(TwoBypassingLoadsOfOneTensor)
-    hinted = _hinted_tloads(mlir)
-
-    assert len(hinted) == 2, f"expected two hinted loads:\n{mlir}"
-    assert all(OFFSET_OPERAND in line for line in hinted), f"every hinted load takes it:\n{mlir}"
-    assert _signature_line(mlir).count(f"{OFFSET_PARAM}: i64") == 1, _signature_line(mlir)
 
 
 def test_legacy_bypass_on_a5_uses_isa_without_a_runtime_offset():
@@ -390,12 +372,13 @@ def test_legacy_scope_bypass_on_a5_keeps_its_cache_mode():
 # ---------------------------------------------------------------------------
 
 
-def test_undeclared_kernel_emits_no_cache_attribute():
+def test_undeclared_kernel_emits_no_cache_attribute(capfd):
     """`CachePolicy.DEFAULT` emits nothing, so unrelated kernels are unchanged."""
     mlir = _incore_mlir(PlainMatmul)
 
     assert _tload_lines(mlir), f"reference kernel emitted no pto.tload:\n{mlir}"
     assert "cache_policy" not in mlir, f"an undeclared kernel must emit no cache attribute:\n{mlir}"
+    assert _warnings(capfd) == []
 
 
 def test_explicit_default_load_beats_the_declaration_and_emits_no_attribute():
@@ -409,24 +392,6 @@ def test_explicit_default_load_beats_the_declaration_and_emits_no_attribute():
 
     assert _tload_lines(mlir), f"kernel emitted no pto.tload:\n{mlir}"
     assert "cache_policy" not in mlir, f"the re-cached access must carry no hint:\n{mlir}"
-
-
-# ---------------------------------------------------------------------------
-# (d) The stand-in diagnostic is gone
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("program_cls", [PlainMatmul, DeclaredBypass, TwoBypassingLoadsOfOneTensor])
-def test_no_cache_bypass_warning_is_emitted(program_cls, capfd):
-    """Nothing warns any more: the request is honoured rather than reported.
-
-    The warning travelled the C++ ``LOG_WARN`` channel, which writes to
-    ``std::cerr`` from native code, so it is read with pytest's ``capfd``
-    (file-descriptor level) rather than ``capsys`` — the same mechanism
-    ``tests/ut/core/test_logging.py`` uses.
-    """
-    _incore_mlir(program_cls)
-    assert _warnings(capfd) == []
 
 
 @pytest.mark.parametrize("load_hint", _LOAD_POLICIES)
@@ -665,8 +630,7 @@ def test_a2a3_rejects_all_explicit_store_hints(hint):
 @pytest.mark.parametrize("planner", [passes.MemoryPlanner.PYPTO, passes.MemoryPlanner.PTOAS])
 @pytest.mark.parametrize("load_hint", _LOAD_POLICIES)
 @pytest.mark.parametrize("store_hint", _STORE_POLICIES)
-@pytest.mark.parametrize("debug_rebuild", [False, True])
-def test_l2_hints_reach_isa_with_native_ptoas(tmp_path, planner, load_hint, store_hint, debug_rebuild):
+def test_l2_hints_reach_isa_with_native_ptoas(tmp_path, planner, load_hint, store_hint):
     if find_ptoas_binary() is None:
         pytest.skip("PTOAS is not available")
 
@@ -685,14 +649,14 @@ def test_l2_hints_reach_isa_with_native_ptoas(tmp_path, planner, load_hint, stor
         optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(HintedTransfers)
     mlir = codegen.PTOCodegen().generate(optimized, emit_tile_addr=planner != passes.MemoryPlanner.PTOAS)
     cpp = pto_backend._compile_pto_module(mlir, "hinted_transfers", str(tmp_path), planner)
-    if debug_rebuild:
-        # Rebuild the same PTO directly: the assembler must emit the complete
-        # hint semantics without a wrapper or a C++ finalization step.
-        ptoas_bin = find_ptoas_binary()
-        assert ptoas_bin is not None
-        rebuilt = tmp_path / "rebuilt.cpp"
-        pto_rebuild._run_ptoas(ptoas_bin, tmp_path / "ptoas" / "hinted_transfers.pto", rebuilt)
-        assert rebuilt.read_text() == cpp
+    # Rebuild the same PTO directly: the assembler must emit the complete
+    # hint semantics without a wrapper or a C++ finalization step. The
+    # ordinary compile above already covers the non-rebuild path.
+    ptoas_bin = find_ptoas_binary()
+    assert ptoas_bin is not None
+    rebuilt = tmp_path / "rebuilt.cpp"
+    pto_rebuild._run_ptoas(ptoas_bin, tmp_path / "ptoas" / "hinted_transfers.pto", rebuilt)
+    assert rebuilt.read_text() == cpp
     if _LOAD_HINTS[load_hint] is None:
         assert "TLOAD(" in cpp
     else:

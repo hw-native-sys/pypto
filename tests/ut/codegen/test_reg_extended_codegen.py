@@ -381,6 +381,7 @@ def test_extended_ops_survive_default_pipeline(name, dtype, statement, tmp_path)
             output_dir=str(tmp_path),
             backend_type=backend.BackendType.Ascend950,
             skip_ptoas=True,
+            dump_passes=False,
         )
     generated = (tmp_path / "kernels/aiv/kernel.pto").read_text()
     assert f"pto.vmi.v{name}" in generated
