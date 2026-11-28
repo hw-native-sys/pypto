@@ -880,6 +880,53 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_put_async_passes_through_without_staging(self):
+        """The async transfer is IR-only in this slice: no tile.create/tile.load.
+
+        ``put_async`` has no tile conversion registered and is a DistributedOp,
+        so ConvertTensorToTileOps leaves the call untouched. Its ReadWrite
+        destination still upgrades the ``dst`` param from In to InOut.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+                _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+                return _out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.InOut[pld.DistributedTensor[[16, 64], pl.FP16]],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+                _out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+                return _out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+        kernel = After.get_function("kernel")
+        assert kernel is not None
+        assert _find_first_call_to(kernel, ir.get_op("tile.create").name) is None
+        assert _find_first_call_to(kernel, ir.get_op("tile.load").name) is None
+        call = _find_first_call_to(kernel, ir.get_op("pld.tensor.put_async").name)
+        assert call is not None
+        assert call.kwargs["engine"] == int(ir.CommEngine.URMA)
+        # The result aliases dst and the ReadWrite destination upgrades the param.
+        ir.assert_structural_equal(call.type, kernel.params[0].type)
+        assert kernel.param_directions[0] == ir.ParamDirection.InOut
+        assert kernel.param_directions[1] == ir.ParamDirection.In
+        assert "pld.CommEngine.URMA" in str(After)
+
     def test_allreduce_upgrades_target_and_signal_to_inout(self):
         """``pld.tensor.allreduce(target, signal, op=...)`` upgrades both
         ``target`` and ``signal`` params from In to InOut.
@@ -6469,6 +6516,109 @@ class TestSubmitCallSiteUpdate:
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_submit_with_async_kernel_preserves_submit_and_no_staging(self):
+        """A submitted async kernel stays a Submit, keeps its TaskId dep, and is unstaged.
+
+        The async submit depends on a predecessor submit, so ``deps_`` is a
+        non-empty use-def edge rather than an empty list. ``pass-submit-awareness``
+        treats ``deps_`` as part of the use-def chain, and a conversion that drops
+        or fails to rewrite a real TaskId would otherwise still pass here.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+                out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def prepare(
+                self, src: pld.DistributedTensor[[16, 64], pl.FP16]
+            ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+                return src
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                with pl.manual_scope():
+                    staged, prep_tid = pl.submit(self.prepare, src)
+                    out, _tid = pl.submit(self.kernel, dst, staged, peer, deps=[prep_tid])
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.InOut[pld.DistributedTensor[[16, 64], pl.FP16]],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+                out = pld.tensor.put_async(dst, peer=peer, src=src, engine=pld.CommEngine.URMA)
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def prepare(
+                self, src: pld.DistributedTensor[[16, 64], pl.FP16]
+            ) -> pld.DistributedTensor[[16, 64], pl.FP16]:
+                return src
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                dst: pl.InOut[pld.DistributedTensor[[16, 64], pl.FP16]],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                with pl.manual_scope():
+                    staged, prep_tid = pl.submit(self.prepare, src)
+                    out, _tid = pl.submit(self.kernel, dst, staged, peer, deps=[prep_tid])
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+        kernel = After.get_function("kernel")
+        main = After.get_function("main")
+        assert kernel is not None and main is not None
+        assert kernel.param_directions[0] == ir.ParamDirection.InOut
+        assert _find_first_call_to(kernel, ir.get_op("tile.create").name) is None
+        assert _find_first_call_to(kernel, ir.get_op("pld.tensor.put_async").name) is not None
+
+        class _SubmitFinder(ir.IRVisitor):
+            def __init__(self) -> None:
+                super().__init__()
+                self.found: list[ir.Submit] = []
+
+            def visit_submit(self, op: ir.Submit) -> None:
+                self.found.append(op)
+                super().visit_submit(op)
+
+        finder = _SubmitFinder()
+        finder.visit_stmt(main.body)
+        assert len(finder.found) == 2
+
+        prepare_submit, async_submit = finder.found
+        assert len(async_submit.args) == 3
+
+        # The predecessor's TaskId must survive conversion as the async submit's
+        # dependency. Identity is pinned by the structural comparison above --
+        # ``Expected`` spells ``deps=[prep_tid]``, so a dep that is dropped or
+        # rewritten to a different value fails there. These focused assertions
+        # supplement it with the shape: the producer has no dependency, the
+        # async submit has exactly one.
+        assert len(prepare_submit.deps) == 0
+        assert len(async_submit.deps) == 1
 
 
 class TestSpmdBlockIdentityConversion:
