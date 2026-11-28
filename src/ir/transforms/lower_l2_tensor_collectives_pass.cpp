@@ -372,15 +372,6 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
                                   ProgramPtr program)
       : kernels_(kernels), body_(std::move(body)), program_(std::move(program)) {}
 
-  ExprPtr VisitExpr_(const CallPtr& op) override {
-    if (IsCcuCollective(op)) {
-      for (const auto& arg : op->args_) {
-        CheckOperandIsRowMajor(arg, op->op_->name_, "operand", op->span_);
-      }
-    }
-    return IRMutator::VisitExpr_(op);
-  }
-
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
     if (!IsManagedCollective(call)) return IRMutator::VisitStmt_(op);

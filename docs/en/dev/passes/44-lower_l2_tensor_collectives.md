@@ -278,7 +278,8 @@ calls are unsupported. See the [user contract](../../user/distributed/20-all_to_
 `FunctionType.CCU` native builtin declaration. Supported operands are window
 input `[1, N]`, target `[NR, N]`, and INT32 signal `[NR, 1]`, with full contiguous
 ND views, static positive shapes, and 2–64 ranks. Calls must form a straight-line
-CHIP sequence. Input and target must be distinct.
+CHIP sequence. Input and target must be distinct. The compiler checks known view strides.
+The caller guarantees packed rows when strides are unknown.
 
 The shared AIV wrapper has `(input, target, signal, order)` parameters; all three
 user windows retain DistributedTensor types. Its body invokes the actual CCU
@@ -303,7 +304,7 @@ parameter aliases to resolve each collective's windows at each HOST dispatch.
 All operands of one request, including signal, must resolve to the same domain;
 one CHIP can contain requests for different domains.
 
-For each used `(device, domain, definition)` combination, the pass inserts a
+For each used `(device, domain, CHIP callable, native CCU module)` combination, the pass inserts a
 HOST-only operation after its representative allocation and inside the domain:
 
 ```text
@@ -323,18 +324,16 @@ All potentially new registrations precede the run's first task submission, even
 when several rank loops dispatch tasks. Window construction and rank loops stay
 intact; a rank selector at each dispatch chooses its local handles. Allocations
 that become available only after the first submission cannot support new CCU
-registrations and are rejected. Each CHIP call gets its own registration SSA
-values, including repeated calls to the same callable. Only repeated requirements
-within one dispatch are coalesced; runtime caching is left to simpler. Handles
-cannot escape their domain.
+registrations and are rejected. Dispatches with the same registration key reuse one
+handle for the lifetime of the domain. Only windows used by CCU require an
+unconditional allocation.
 
 Registration has resource/failure effects and is preserved by DCE. Handles are
-SSA values in dispatch attrs, never CHIP algorithm arguments. Static participant
-coverage and collective protocol order/count are checked per domain; compatible
-rank-local definition symbols need not be identical. A positive bounded rank loop
-(up to 64 ranks) and statically decidable rank-selection branches are supported.
+SSA values in dispatch attributes. The caller ensures that peers participate in
+compatible collectives in the same order and agree on payload sizes and window slots.
+A positive bounded rank loop (up to 64 ranks) and statically decidable rank-selection branches are supported.
 Other conditional/repeated dispatch, dynamic rank selection, nested device calls
-and allocations inside control flow remain unsupported.
+and CCU window allocations inside control flow remain unsupported.
 
 Generated HOST Python calls
 `domain.get_or_register_ccu(callables[name], ccu_id=N, worker=rank)` and passes
@@ -347,7 +346,7 @@ registration table for packaging and wrapper constants; HOST codegen consumes
 that exact table. The same definition may have different IDs in different
 callables, with separate registrations. Different submissions may use different
 definitions at the same domain/ID; a single submission cannot bind conflicting
-registrations there. No cross-call registration sharing is performed.
+registrations there.
 
 ### Native source contract and validation boundary
 

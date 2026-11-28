@@ -28,6 +28,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/return_lineage_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -41,6 +42,17 @@ struct FunctionCtxPlan {
   std::vector<size_t> dist_param_indices;
   std::unordered_map<const Var*, VarPtr> param_to_ctx;
   std::vector<std::optional<size_t>> returned_param_indices;
+  std::vector<std::optional<size_t>> tuple_element_param_indices;
+
+  void IndexTupleResult(const FunctionPtr& func, const ProgramPtr& program) {
+    if (!return_lineage::HasSingleTupleReturn(func)) return;
+    for (const auto& element : As<TupleType>(func->return_types_[0])->types_) {
+      if (IsA<DistributedTensorType>(element)) {
+        tuple_element_param_indices = return_lineage::ReturnedTupleElementParamIndices(func, program);
+        return;
+      }
+    }
+  }
 };
 
 // Return the yield that terminates a structured control-flow branch.  The
@@ -121,9 +133,15 @@ template <typename LookupArgCtx>
   auto plan_it = plans.find(callee->name_);
   if (plan_it == plans.end()) return {};
 
-  std::vector<VarPtr> result(plan_it->second.returned_param_indices.size());
+  // Direct calls expose tuple elements. Submit keeps the declared return as one
+  // position alongside the task ID.
+  const auto& plan = plan_it->second;
+  const auto& indices = As<Call>(expr) && !plan.tuple_element_param_indices.empty()
+                            ? plan.tuple_element_param_indices
+                            : plan.returned_param_indices;
+  std::vector<VarPtr> result(indices.size());
   for (size_t result_idx = 0; result_idx < result.size(); ++result_idx) {
-    const auto& param_idx = plan_it->second.returned_param_indices[result_idx];
+    const auto& param_idx = indices[result_idx];
     if (!param_idx || *param_idx >= args->size() || *param_idx >= callee->params_.size()) continue;
     if (!As<DistributedTensorType>(callee->params_[*param_idx]->GetType())) continue;
     result[result_idx] = lookup_arg_ctx((*args)[*param_idx]);

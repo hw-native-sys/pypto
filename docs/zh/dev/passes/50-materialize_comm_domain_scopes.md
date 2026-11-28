@@ -286,7 +286,6 @@ worker 创建时固定来源映射与文件列表，修改原来的字典或列�
 
 建域后，CCU 使用通过现有 allocation slot 解析。pass 插入
 `pld.system.register_ccu(allocation, callee=..., chip_callee=...)`，并在 HOST dispatch 上附加
-`ccu_bindings` SSA 引用。每个 CHIP 调用独立注册，并通过 `chip_callee` 指定该 callable。
-注册携带 dispatch 的 device，返回本地 handle；依赖 rank 的
-注册先于首次任务提交，保留 rank 循环并在提交处按 rank 选择 handle，绑定必须与消费者 device 一致。不会合并成员相交的域。来源分析、参与校验和只支持
-codegen 的运行时边界见 [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather)。
+`ccu_bindings` SSA 引用。同一 worker 上，使用相同域、CHIP callable 和原生 CCU 模块的调用复用注册句柄。
+注册携带 dispatch 的 device，返回本地 handle。注册先于首次任务提交。保留的 rank 循环在提交处选择
+对应 worker 的 handle。来源分析、调用方负责的跨 rank 一致性以及运行时支持范围见 [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather)。

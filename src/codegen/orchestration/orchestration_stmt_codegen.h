@@ -446,7 +446,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   std::vector<size_t> CollectOutIndices(const ir::FunctionPtr& callee);
 
-  const std::vector<std::optional<size_t>>& GetReturnedParamIndices(const ir::FunctionPtr& callee);
+  const std::vector<std::optional<size_t>>& GetReturnedParamIndices(const ir::FunctionPtr& callee,
+                                                                    bool tuple_elements = false);
 
   static bool IsReturnedParamMapPrecise(const std::vector<std::optional<size_t>>& ret_map,
                                         const ir::CallPtr& call);
@@ -724,6 +725,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// from re-walking the same callee body and stays within the O(N log N) pass
   /// budget.
   std::unordered_map<const ir::Function*, std::vector<std::optional<size_t>>> returned_param_indices_cache_;
+  std::unordered_map<const ir::Function*, std::vector<std::optional<size_t>>> tuple_element_indices_cache_;
   /// The program and each wrapper's first inner call are immutable during
   /// emission. Key by the owning function: Submit lookups create transient Call
   /// views. Repeated dispatches then share one batch lineage/body index.

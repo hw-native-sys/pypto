@@ -308,12 +308,15 @@ std::vector<size_t> OrchestrationStmtCodegen::CollectOutIndices(const FunctionPt
 // rather than an analysis. An ambiguous extern declaration raises here: it must
 // never enter the legacy positional fallback for non-external open IR.
 const std::vector<std::optional<size_t>>& OrchestrationStmtCodegen::GetReturnedParamIndices(
-    const FunctionPtr& callee) {
-  auto it = returned_param_indices_cache_.find(callee.get());
-  if (it != returned_param_indices_cache_.end()) return it->second;
-  auto inserted = returned_param_indices_cache_.emplace(
-      callee.get(), ir::return_lineage::ExplicitReturnedParamIndices(callee));
-  return inserted.first->second;
+    const FunctionPtr& callee, bool tuple_elements) {
+  const bool project = tuple_elements && ir::return_lineage::HasSingleTupleReturn(callee);
+  auto& cache = project ? tuple_element_indices_cache_ : returned_param_indices_cache_;
+  auto [it, inserted] = cache.try_emplace(callee.get());
+  if (inserted) {
+    it->second = project ? ir::return_lineage::ReturnedTupleElementParamIndices(callee, program_)
+                         : ir::return_lineage::ExplicitReturnedParamIndices(callee);
+  }
+  return it->second;
 }
 
 // Decide whether the precise return->param map is trustworthy for this call.
@@ -578,7 +581,7 @@ void OrchestrationStmtCodegen::GenerateTupleReturnAliases(const CallPtr& call, c
   // every carry to the wrong source tensor. Fall back to the heuristic when
   // the map is not fully trustworthy (Group/Spmd wrappers with no traceable
   // top-level ReturnStmt, or return shapes the tracer cannot model).
-  const auto& ret_param_map = GetReturnedParamIndices(callee);
+  const auto& ret_param_map = GetReturnedParamIndices(callee, /*tuple_elements=*/true);
   const bool precise = IsReturnedParamMapPrecise(ret_param_map, call);
 
   // Legacy heuristic state — only computed when the precise map is unusable.

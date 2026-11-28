@@ -72,7 +72,7 @@ class Origins : public IRVisitor {
         tuple = defs.at(var.get());
       }
       if (auto values = As<MakeTuple>(tuple)) return Root(values->elements_.at(item->index_));
-      return CallResult(tuple, item->index_);
+      return CallResult(tuple, item->index_, /*projection=*/true);
     }
     if (auto call = As<Call>(expr)) {
       if (IsOp(call, "pld.tensor.window") || IsOp(call, "tensor.slice") || IsOp(call, "tensor.reshape")) {
@@ -84,7 +84,7 @@ class Origins : public IRVisitor {
   }
 
  private:
-  ExprPtr CallResult(const ExprPtr& expr, size_t index) {
+  ExprPtr CallResult(const ExprPtr& expr, size_t index, bool projection = false) {
     OpPtr op;
     std::vector<ExprPtr> args;
     if (auto call = As<Call>(expr)) {
@@ -97,8 +97,15 @@ class Origins : public IRVisitor {
     }
     auto callee = As<GlobalVar>(op) ? program_->GetFunction(op->name_) : nullptr;
     if (!callee) return nullptr;
-    auto [it, inserted] = returns_.try_emplace(callee.get());
-    if (inserted) it->second = return_lineage::ReturnedParamIndices(callee, program_);
+    // A direct call with one tuple-valued return exposes its elements. A
+    // Submit wraps the declared return positions in a tuple with a task ID.
+    const bool tuple_elements = projection && As<Call>(expr) && return_lineage::HasSingleTupleReturn(callee);
+    auto& cache = tuple_elements ? tuple_returns_ : returns_;
+    auto [it, inserted] = cache.try_emplace(callee.get());
+    if (inserted) {
+      it->second = tuple_elements ? return_lineage::ReturnedTupleElementParamIndices(callee, program_)
+                                  : return_lineage::ReturnedParamIndices(callee, program_);
+    }
     if (index >= it->second.size()) return nullptr;
     // Keep the presence check and dereference on the same optional value.
     const auto& returned_param = it->second[index];
@@ -108,23 +115,25 @@ class Origins : public IRVisitor {
   }
   ProgramPtr program_;
   std::unordered_map<const Var*, ExprPtr> roots_;
-  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returns_;
+  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returns_, tuple_returns_;
 };
-
-using Protocol = std::map<std::string, std::string>;
 
 struct Use {
   std::string definition;
   std::vector<size_t> params;
   int64_t ranks;
-  Protocol protocol;
 };
-using Uses = std::map<std::string, std::vector<Use>>;
+struct CallableUses {
+  std::vector<Use> requirements;
+  // Codegen can package several shape-specific definition symbols as one module.
+  std::map<std::string, std::string> representative;
+};
+using Uses = std::map<std::string, CallableUses>;
 
 class Scan : public IRVisitor {
  public:
   Scan(ProgramPtr program, const std::map<std::string, CallPtr>& wrappers, Origins& origins,
-       const std::unordered_map<const Var*, size_t>& params, std::vector<Use>& uses)
+       const std::unordered_map<const Var*, size_t>& params, CallableUses& uses)
       : program_(std::move(program)), wrappers_(wrappers), origins_(origins), params_(params), uses_(uses) {}
   void VisitExpr_(const CallPtr& call) override {
     Record(call);
@@ -158,7 +167,12 @@ class Scan : public IRVisitor {
     auto ranks = As<ConstInt>(target->shape_[0]);
     CHECK_SPAN(ranks && ranks->value_ >= 2 && ranks->value_ <= 64, call->span_)
         << "CCU declaration requires a static rank count in 2..64";
-    Use use{definition->name_, {}, ranks->value_, GetBuiltinTemplateVariables(definition)};
+    auto [symbol, new_symbol] = uses_.representative.try_emplace(definition->name_);
+    if (new_symbol) {
+      symbol->second =
+          modules_.try_emplace(GetCcuModuleIdentity(definition), definition->name_).first->second;
+    }
+    Use use{symbol->second, {}, ranks->value_};
     // Includes signal even though it is not packed into native arguments.
     for (const auto& arg : call->args_) {
       if (!As<DistributedTensorType>(arg->GetType())) continue;
@@ -168,13 +182,15 @@ class Scan : public IRVisitor {
           << "Cannot prove CCU DistributedTensor parameter provenance";
       use.params.push_back(param->second);
     }
-    uses_.push_back(std::move(use));
+    if (seen_.emplace(use.definition, use.params).second) uses_.requirements.push_back(std::move(use));
   }
   ProgramPtr program_;
   const std::map<std::string, CallPtr>& wrappers_;
   Origins& origins_;
   const std::unordered_map<const Var*, size_t>& params_;
-  std::vector<Use>& uses_;
+  CallableUses& uses_;
+  std::map<CcuModuleIdentity, std::string> modules_;
+  std::set<std::pair<std::string, std::vector<size_t>>> seen_;
   int depth_ = 0;
 };
 Uses AnalyzeUses(const ProgramPtr& program) {
@@ -191,7 +207,7 @@ Uses AnalyzeUses(const ProgramPtr& program) {
     for (size_t i = 0; i < func->params_.size(); ++i) params.emplace(func->params_[i].get(), i);
     Scan scan(program, wrappers, origins, params, result[func->name_]);
     scan.VisitStmt(func->body_);
-    if (result[func->name_].empty()) result.erase(func->name_);
+    if (result[func->name_].requirements.empty()) result.erase(func->name_);
   }
   class RejectNested : public IRVisitor {
    public:
@@ -223,7 +239,6 @@ using RegistrationKey = std::tuple<const CommDomainScopeStmt*, std::string, std:
 struct DeviceSelection {
   ExprPtr expr;
   int64_t constant = 0;
-  std::vector<int64_t> ranks;
 };
 
 class HostBindings : public IRVisitor {
@@ -233,35 +248,8 @@ class HostBindings : public IRVisitor {
   Origins origins;
   std::map<const Expr*, std::map<int64_t, std::vector<VarPtr>>> bindings;
   std::map<const Var*, std::vector<StmtPtr>> after_alloc;
-  std::map<const CommDomainScopeStmt*, std::map<int64_t, std::vector<Protocol>>> sequences;
+  std::set<const CommDomainScopeStmt*> used_domains;
   std::set<std::string> names;
-  using Request = std::pair<const CommDomainScopeStmt*, size_t>;
-  std::map<Request, std::set<Request>> successors;
-  std::map<int64_t, Request> previous;
-
-  void CheckOrder(const Span& span) const {
-    std::map<Request, size_t> indegree;
-    for (const auto& [node, edges] : successors) {
-      indegree.try_emplace(node, 0);
-      for (const auto& edge : edges) ++indegree[edge];
-    }
-    std::vector<Request> ready;
-    for (const auto& [node, count] : indegree) {
-      if (!count) ready.push_back(node);
-    }
-    size_t visited = 0;
-    while (!ready.empty()) {
-      auto node = ready.back();
-      ready.pop_back();
-      ++visited;
-      auto it = successors.find(node);
-      if (it == successors.end()) continue;
-      for (const auto& edge : it->second) {
-        if (--indegree[edge] == 0) ready.push_back(edge);
-      }
-    }
-    CHECK_SPAN(visited == indegree.size(), span) << "CCU collective order creates a cross-domain wait cycle";
-  }
 
   void VisitStmt_(const CommDomainScopeStmtPtr& op) override {
     for (const auto& slot : op->slots_) {
@@ -296,7 +284,11 @@ class HostBindings : public IRVisitor {
       auto chip = program_->GetFunction(call->GetKwarg<std::string>("chip_callee"));
       CHECK_SPAN(chip && chip->level_ == Level::CHIP && IsOrchestrationLike(chip->func_type_), op->span_)
           << "register_ccu chip_callee must resolve to a CHIP callable";
-      RegistrationKey key{domain->second.get(), chip->name_, definition->name_, device.constant};
+      const auto uses = uses_.find(chip->name_);
+      CHECK_SPAN(uses != uses_.end() && uses->second.representative.count(definition->name_), op->span_)
+          << "CCU bindings must match the required callable, domain and definition on the same device";
+      RegistrationKey key{domain->second.get(), chip->name_,
+                          uses->second.representative.at(definition->name_), device.constant};
       live_registrations_[op->var_.get()] = key;
       scope_registrations_[domain->second.get()].push_back(op->var_.get());
     }
@@ -308,9 +300,8 @@ class HostBindings : public IRVisitor {
       scope_registrations_[std::get<0>(it->second)].push_back(op->var_.get());
     }
     if (auto call = As<Call>(op->value_); IsOp(call, "pld.tensor.alloc_window_buffer")) {
-      CHECK_SPAN(depth_ == 0 && unsupported_ == 0, op->span_)
-          << "CCU domain allocations inside conditional/repeated regions are unsupported";
-      allocations_.insert(op->var_.get());
+      // Only unconditional allocations can anchor a compiler-inserted registration.
+      if (depth_ == 0 && unsupported_ == 0) allocations_.insert(op->var_.get());
       if (submitted_) late_allocations_.insert(op->var_.get());
     }
     IRVisitor::VisitStmt_(op);
@@ -342,8 +333,7 @@ class HostBindings : public IRVisitor {
     IRVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const IfStmtPtr& op) override {
-    // Recognize only a statically decidable rank selector. Arbitrary predicates
-    // still cannot prove collective participation and are rejected below.
+    // Select the worker-local handle when the rank predicate is statically known.
     if (auto eq = As<Eq>(op->condition_); eq && rank_var_) {
       auto left = DeviceValue(eq->left_);
       auto right = DeviceValue(eq->right_);
@@ -407,16 +397,14 @@ class HostBindings : public IRVisitor {
                                               "positive static rank loop of at most 64 ranks";
     device.constant = *value;
     device.expr = std::make_shared<ConstInt>(*value, type->dtype_, span);
-    device.ranks.push_back(*value);
     return device;
   }
   static void CheckMembers(const DeviceSelection& device, const CommDomainScopeStmtPtr& domain,
                            const Span& span) {
-    for (auto rank : device.ranks) {
-      CHECK_SPAN(std::find(domain->devices_.begin(), domain->devices_.end(), rank) != domain->devices_.end(),
-                 span)
-          << "CCU device is outside the registration domain";
-    }
+    CHECK_SPAN(std::find(domain->devices_.begin(), domain->devices_.end(), device.constant) !=
+                   domain->devices_.end(),
+               span)
+        << "CCU device is outside the registration domain";
   }
   template <typename T>
   void Record(const T& call) {
@@ -429,30 +417,25 @@ class HostBindings : public IRVisitor {
     auto uses = uses_.find(call->op_->name_);
     if (uses == uses_.end()) return;
     auto device = ResolveDevice(call->template GetAttr<ExprPtr>(kAttrDevice), call->span_);
-    auto& bindings = this->bindings[call.get()][device.constant];
+    std::vector<VarPtr> handles;
     const auto refs =
         verify_ ? call->template GetAttr<std::vector<VarPtr>>(kAttrCcuBindings) : std::vector<VarPtr>{};
     // Bindings are an unordered requirement set, not positional call-site IDs.
     std::set<RegistrationKey> provided, required;
-    std::set<const Var*> emitted;
-    // Registers belong to this dispatch. Coalesce repeated uses only within
-    // this invocation; another CHIP call gets its own handles even if its
-    // definition symbols match. simpler may cache the underlying registration.
-    std::map<RegistrationKey, VarPtr> registrations;
     for (const auto& ref : refs) {
       auto reg = live_registrations_.find(ref.get());
       CHECK_SPAN(reg != live_registrations_.end(), call->span_)
           << "CCU binding must dominate dispatch in a live domain";
       provided.insert(reg->second);
     }
-    for (const auto& use : uses->second) {
+    for (const auto& use : uses->second.requirements) {
       CommDomainScopeStmtPtr domain;
       VarPtr allocation;
       for (auto param : use.params) {
         auto root = AsVarLike(origins.Root(call->args_.at(param)));
         auto it = domains_.find(root.get());
         CHECK_SPAN(it != domains_.end() && allocations_.count(root.get()), call->span_)
-            << "CCU argument must originate from an allocation in a live communication domain";
+            << "CCU argument must originate from an unconditional allocation in a live communication domain";
         CHECK_SPAN(!domain || domain == it->second, call->span_)
             << "CCU call arguments (including signal) must belong to the same communication domain";
         domain = it->second;
@@ -461,20 +444,10 @@ class HostBindings : public IRVisitor {
       CHECK_SPAN(domain && domain->devices_.size() == static_cast<size_t>(use.ranks), call->span_)
           << "CCU collective Host domain size must match target rank count " << use.ranks;
       CheckMembers(device, domain, call->span_);
-      for (auto rank : device.ranks) {
-        auto& sequence = sequences[domain.get()][rank];
-        Request request{domain.get(), sequence.size()};
-        successors.try_emplace(request);
-        if (auto prior = previous.find(rank); prior != previous.end()) {
-          successors[prior->second].insert(request);
-        }
-        previous[rank] = request;
-        sequence.push_back(use.protocol);
-      }
+      used_domains.insert(domain.get());
       RegistrationKey key{domain.get(), call->op_->name_, use.definition, device.constant};
-      required.insert(key);
-      if (verify_) continue;
-      auto [it, inserted] = registrations.try_emplace(key);
+      if (!required.insert(key).second || verify_) continue;
+      auto [it, inserted] = registrations_.try_emplace(key);
       if (inserted) {
         CHECK_SPAN(!late_allocations_.count(allocation.get()), call->span_)
             << "CCU registrations must precede the first task submission; allocation is too late";
@@ -492,8 +465,9 @@ class HostBindings : public IRVisitor {
         auto registration = std::make_shared<AssignStmt>(reg, invoke, call->span_);
         after_alloc[allocation.get()].push_back(registration);
       }
-      if (emitted.insert(it->second.get()).second) bindings.push_back(it->second);
+      handles.push_back(it->second);
     }
+    if (!verify_) bindings[call.get()][device.constant] = std::move(handles);
     CHECK_SPAN(!verify_ || provided == required, call->span_)
         << "CCU bindings must match the required callable, domain and definition on the same device";
   }
@@ -501,6 +475,7 @@ class HostBindings : public IRVisitor {
   ProgramPtr program_;
   const Uses& uses_;
   bool verify_;
+  std::map<RegistrationKey, VarPtr> registrations_;
   std::map<const Var*, RegistrationKey> live_registrations_;
   std::map<const CommDomainScopeStmt*, std::vector<const Var*>> scope_registrations_;
   std::unordered_map<const Var*, CommDomainScopeStmtPtr> domains_;
@@ -521,7 +496,7 @@ class Rewrite : public IRMutator {
     auto scope = As<CommDomainScopeStmt>(IRMutator::VisitStmt_(op));
     // Dispatch operands identify their owning domain after URMA/MTE grouping.
     // Only domains participating in a CCU request need the extra workspace.
-    if (!plan_.sequences.count(op.get()) ||
+    if (!plan_.used_domains.count(op.get()) ||
         std::find(scope->engines_.begin(), scope->engines_.end(), "ccu") != scope->engines_.end()) {
       return scope;
     }
@@ -637,23 +612,15 @@ ProgramPtr ProcessCcuBindings(const ProgramPtr& program, bool verify_only) {
     plan.origins.VisitStmt(func->body_);
     for (const auto& [var, value] : plan.origins.defs) plan.names.insert(var->name_hint_);
     plan.VisitStmt(func->body_);
-    for (const auto& [domain, sequences] : plan.sequences) {
-      if (bound.found || verify_only) {
+    if (bound.found || verify_only) {
+      for (const auto* domain : plan.used_domains) {
         CHECK_SPAN(
             std::find(domain->engines_.begin(), domain->engines_.end(), "ccu") != domain->engines_.end(),
             func->span_)
             << "CCU dispatch requires the owning domain to provision a CCU workspace";
       }
-      CHECK_SPAN(sequences.size() == domain->devices_.size(), func->span_)
-          << "CCU collective participation must cover every domain member";
-      const auto& expected = sequences.begin()->second;
-      for (const auto& [rank, sequence] : sequences) {
-        CHECK_SPAN(sequence == expected, func->span_)
-            << "CCU collective order/count must match on every domain member";
-      }
+      continue;
     }
-    plan.CheckOrder(func->span_);
-    if (bound.found || verify_only) continue;
     auto updated = MutableCopy(func);
     updated->body_ = Rewrite(plan).VisitStmt(func->body_);
     result->functions_[gv] = updated;

@@ -238,6 +238,7 @@ class BufferEngineCollector : public IRVisitor {
       if (func->func_type_ == FunctionType::SIMT) continue;
       auto& plan = plans_[func->name_];
       plan.returned_param_indices = return_lineage::ReturnedParamIndices(func, program_);
+      plan.IndexTupleResult(func, program_);
       for (size_t i = 0; i < func->params_.size(); ++i) {
         const auto& param = func->params_[i];
         if (!As<DistributedTensorType>(param->GetType())) continue;

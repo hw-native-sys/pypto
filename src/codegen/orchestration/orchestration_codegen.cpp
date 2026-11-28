@@ -84,8 +84,7 @@ std::vector<CcuModule> CollectCcuModules(const ProgramPtr& program,
   // As with AIV registrations, allocate a callable-local ID on first use.
   // Preserve dispatch order; the same table drives native packaging, wrapper
   // constants and HOST registrations. Shapes may share a native specialization.
-  using Identity = std::pair<std::string, std::map<std::string, std::string>>;
-  std::map<Identity, int> ids;
+  std::map<CcuModuleIdentity, int> ids;
   std::vector<CcuModule> modules;
   std::set<std::string> seen;
   for (const auto& registration : registrations) {
@@ -94,10 +93,9 @@ std::vector<CcuModule> CollectCcuModules(const ProgramPtr& program,
     auto call = CcuWrapperCall(func, program);
     if (!call) continue;
     auto definition = program->GetFunction(call->op_->name_);
-    auto variables = GetBuiltinTemplateVariables(definition);
-    const auto template_dir = definition->GetAttr<std::string>(kAttrBuiltinTemplateDir);
-    auto [it, inserted] =
-        ids.try_emplace(Identity{template_dir, variables}, static_cast<int>(modules.size()));
+    auto identity = GetCcuModuleIdentity(definition);
+    auto& [template_dir, variables] = identity;
+    auto [it, inserted] = ids.try_emplace(identity, static_cast<int>(modules.size()));
     if (!inserted) {
       modules[it->second].wrappers.push_back(func->name_);
       continue;

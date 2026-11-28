@@ -21,6 +21,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -41,6 +42,7 @@
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/ccu_collective_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto::ir {
@@ -134,27 +136,29 @@ class CcuFinder : public IRVisitor {
 
 // CCU allgather requires static positive packed ND views with no partial
 // valid region. Dtype and rank restrictions are checked by its lowering.
-std::string ValidateView(const DistributedTensorTypePtr& type, const Span& span) {
+std::string ValidateView(const DistributedTensorTypePtr& type, const std::vector<ExprPtr>& strides,
+                         const Span& span) {
   CHECK_SPAN(type && !type->shape_.empty(), span) << "CCU collective requires a nonempty static shape";
   std::string key;
   int64_t stride = 1;
   const auto& view = type->tensor_view_;
   CHECK_SPAN(!view || view->layout == TensorLayout::ND, span)
       << "CCU collective requires contiguous ND views";
-  CHECK_SPAN(!view || view->stride.empty() || view->stride.size() == type->shape_.size(), span)
+  CHECK_SPAN(strides.empty() || strides.size() == type->shape_.size(), span)
       << "CCU collective requires full contiguous strides";
   CHECK_SPAN(!view || view->valid_shape.empty() || view->valid_shape.size() == type->shape_.size(), span)
       << "CCU collective requires a full valid view";
   for (size_t i = type->shape_.size(); i-- > 0;) {
     auto extent = As<ConstInt>(type->shape_[i]);
     CHECK_SPAN(extent && extent->value_ > 0, span) << "CCU collective requires static positive dimensions";
-    if (view && !view->stride.empty()) {
-      auto actual = As<ConstInt>(view->stride[i]);
-      CHECK_SPAN(actual && actual->value_ == stride, span) << "CCU collective requires contiguous ND strides";
+    if (!strides.empty() && extent->value_ > 1) {
+      auto actual = As<ConstInt>(strides[i]);
+      CHECK_SPAN(!actual || actual->value_ == stride, span)
+          << "CCU collective requires contiguous ND strides";
     }
     if (view && !view->valid_shape.empty()) {
       auto valid = As<ConstInt>(view->valid_shape[i]);
-      CHECK_SPAN(valid && valid->value_ == extent->value_, span)
+      CHECK_SPAN(!valid || valid->value_ == extent->value_, span)
           << "CCU collective requires a full valid view";
     }
     CHECK_SPAN(extent->value_ <= std::numeric_limits<int64_t>::max() / stride, span)
@@ -171,19 +175,58 @@ class CcuLowerer : public IRMutator {
  public:
   CcuLowerer(Names* names, std::map<std::string, FunctionPtr>* kernels) : names_(names), kernels_(kernels) {}
 
-  StmtPtr Lower(const StmtPtr& body) {
-    auto lowered = VisitStmt(body);
+  StmtPtr Lower(const FunctionPtr& func) {
+    for (const auto& param : func->params_) {
+      if (auto type = As<DistributedTensorType>(param->GetType())) {
+        strides_[param.get()] = tensor_view_semantics::BuildRowMajorStrides(type->shape_);
+      }
+    }
+    auto lowered = VisitStmt(func->body_);
     allocations_.push_back(lowered);
-    return SeqStmts::Flatten(std::move(allocations_), body->span_);
+    return SeqStmts::Flatten(std::move(allocations_), func->body_->span_);
   }
 
  protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto stmt = IRMutator::VisitStmt_(op);
+    if (IsA<DistributedTensorType>(op->var_->GetType())) {
+      strides_[op->var_.get()] = KnownStrides(op->value_);
+    }
+    return stmt;
+  }
+
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto call = As<Call>(IRMutator::VisitExpr_(op));
     return IsCcuAllGather(call) ? LowerAllGather(call) : call;
   }
 
  private:
+  // A rank-preserving slice inherits the physical strides of its source even
+  // when its deduced result type carries only the new shape. An opaque result
+  // without stride metadata is the caller's layout contract.
+  std::vector<ExprPtr> KnownStrides(const ExprPtr& value) const {
+    auto type = As<DistributedTensorType>(value->GetType());
+    if (!type) return {};
+    if (type->tensor_view_ && !type->tensor_view_->stride.empty()) return type->tensor_view_->stride;
+    auto call = As<Call>(value);
+    if (auto var = AsVarLike(value)) {
+      auto it = strides_.find(var.get());
+      return it != strides_.end() ? it->second : std::vector<ExprPtr>{};
+    }
+    if (IsOp(call, "tensor.slice")) {
+      auto parent = As<DistributedTensorType>(call->args_[0]->GetType());
+      auto window = As<TupleType>(call->args_[1]->GetType());
+      if (parent && window && window->types_.size() == parent->shape_.size() &&
+          parent->shape_.size() == type->shape_.size()) {
+        return KnownStrides(call->args_[0]);
+      }
+      return {};
+    }
+    if (IsCcuAllGather(call)) return KnownStrides(call->args_[1]);
+    if (!IsOp(call, "pld.tensor.window")) return {};
+    return tensor_view_semantics::BuildRowMajorStrides(type->shape_);
+  }
+
   VarPtr Order(const std::string& key, const Span& span) {
     auto [token, inserted] = tokens_.try_emplace(key);
     if (inserted) {
@@ -202,9 +245,9 @@ class CcuLowerer : public IRMutator {
     auto target = As<DistributedTensorType>(call->args_[1]->GetType());
     auto signal = As<DistributedTensorType>(call->args_[2]->GetType());
     CHECK_SPAN(input, span) << "CCU allgather input must be a DistributedTensor window";
-    ValidateView(input, span);
-    auto shape_key = ValidateView(target, span);
-    ValidateView(signal, span);
+    ValidateView(input, KnownStrides(call->args_[0]), span);
+    auto shape_key = ValidateView(target, KnownStrides(call->args_[1]), span);
+    ValidateView(signal, KnownStrides(call->args_[2]), span);
     CHECK_SPAN(input->dtype_ == DataType::BF16, span) << "CCU allgather supports only BF16";
     const int64_t nranks = As<ConstInt>(target->shape_[0])->value_;
     CHECK_SPAN(nranks >= 2 && nranks <= kMaxCcuRanks, span)
@@ -264,9 +307,7 @@ class CcuLowerer : public IRMutator {
           std::vector<TypePtr>{params[1]->GetType()}, body, span, FunctionType::AIV, std::nullopt,
           std::nullopt,
           std::vector<std::pair<std::string, std::any>>{
-              {kAttrBuiltinTemplateDir, std::string(kCcuAllGatherTemplate)},
-              {kAttrRequireContiguousOperands, true},
-              {kAttrBufferIrSelected, false}});
+              {kAttrBuiltinTemplateDir, std::string(kCcuAllGatherTemplate)}, {kAttrBufferIrSelected, false}});
     }
     return std::make_shared<Call>(
         std::make_shared<GlobalVar>(name),
@@ -280,6 +321,7 @@ class CcuLowerer : public IRMutator {
   // No remote access, Host parameter, communication window or ctx is needed.
   Names* names_;
   std::map<std::string, VarPtr> tokens_;
+  std::unordered_map<const Var*, std::vector<ExprPtr>> strides_;
   std::vector<StmtPtr> allocations_;
   std::map<std::string, FunctionPtr>* kernels_;
 };
@@ -310,7 +352,7 @@ ProgramPtr LowerCcuCollectives(const ProgramPtr& program) {
     auto updated = MutableCopy(func);
     if (chips.count(func->name_)) {
       CcuLowerer lowerer(&names, &kernels);
-      updated->body_ = lowerer.Lower(func->body_);
+      updated->body_ = lowerer.Lower(func);
     }
     result->functions_[gvar] = updated;
   }

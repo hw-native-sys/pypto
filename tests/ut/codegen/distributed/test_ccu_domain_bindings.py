@@ -230,17 +230,15 @@ class Shared:
     assert len(list((tmp_path / "next_levels/chip/ccu").glob("module_*.cpp"))) == 1
 
 
-@pytest.mark.parametrize(
-    ("options", "message"),
-    [
-        ({"bad_signal": True}, "same communication domain"),
-        ({"missing_rank": True}, "participation must cover"),
-        ({"cyclic_order": True}, "cross-domain wait cycle"),
-    ],
-)
-def test_domain_binding_diagnostics(tmp_path, options, message):
-    with pytest.raises((ValueError, RuntimeError, Error), match=message):
-        _compile(overlapping_domains(**options), tmp_path)
+def test_ccu_operands_require_one_domain(tmp_path):
+    with pytest.raises((ValueError, RuntimeError, Error), match="same communication domain"):
+        _compile(overlapping_domains(bad_signal=True), tmp_path)
+
+
+@pytest.mark.parametrize("option", ["missing_rank", "cyclic_order"])
+def test_domain_binding_is_independent_of_peer_control_flow(tmp_path, option):
+    _compile(overlapping_domains(**{option: True}), tmp_path)
+    _assert_local_bindings((tmp_path / "orchestration/host_orch.py").read_text())
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
@@ -424,7 +422,7 @@ def test_binding_sequence_has_no_positional_identity(ascend_backend):
     ir.assert_structural_equal(reordered, passes.materialize_comm_domain_scopes()(reordered))
 
 
-def _rank_loop_program(*, submit=False, two_callables=False, repeat_callable=False):
+def _rank_loop_program(*, submit=False, two_callables=False, repeat_callable=False, fixed_workers=False):
     dispatch = (
         "dst, task = pl.submit(self.chip, src, dst, sig, device=r)"
         if submit
@@ -437,6 +435,15 @@ def _rank_loop_program(*, submit=False, two_callables=False, repeat_callable=Fal
         if two_callables
         else ""
     )
+    loop = f"""
+        for r in pl.range(2):
+            src = pld.window(src_buf, [1, 64], dtype=pl.BF16)
+            dst = pld.window(dst_buf, [2, 64], dtype=pl.BF16)
+            sig = pld.window(sig_buf, [2, 1], dtype=pl.INT32)
+            {dispatch}{other}
+"""
+    if fixed_workers:
+        loop = loop.replace("device=r", "device=0") + loop.replace("device=r", "device=1")
     source = f"""
 @pl.program
 class RankLoop:
@@ -461,11 +468,7 @@ class RankLoop:
         src_buf = pld.alloc_window_buffer(128)
         dst_buf = pld.alloc_window_buffer(256)
         sig_buf = pld.alloc_window_buffer(8)
-        for r in pl.range(2):
-            src = pld.window(src_buf, [1, 64], dtype=pl.BF16)
-            dst = pld.window(dst_buf, [2, 64], dtype=pl.BF16)
-            sig = pld.window(sig_buf, [2, 1], dtype=pl.INT32)
-            {dispatch}{other}
+{loop}
 """
     if repeat_callable:
         source = source.replace("self.other(", "self.chip(")
@@ -484,8 +487,8 @@ def test_rank_loop_is_preserved_and_registrations_precede_tasks(tmp_path, submit
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
-@pytest.mark.parametrize("shared", [False, True])
-def test_each_dispatch_uses_its_callable_local_definition_ids(tmp_path, ascend_backend, shared):
+@pytest.mark.parametrize(("shared", "same_module"), [(False, False), (True, False), (True, True)])
+def test_each_dispatch_uses_its_callable_local_definition_ids(tmp_path, ascend_backend, shared, same_module):
     # Independent submissions may bind different definitions to ID 0, or the
     # same definition to different IDs. No registration crosses the calls.
     program = passes.lower_l2_tensor_collectives()(
@@ -496,7 +499,8 @@ def test_each_dispatch_uses_its_callable_local_definition_ids(tmp_path, ascend_b
     wrapper = next(f for f in functions.values() if f.func_type == ir.FunctionType.AIV)
     span = program.span
     attrs = dict(definition.attrs)
-    attrs["builtin_template_vars"] = "dtype_cpp=bfloat16_t,fixture_variant=a,nranks_cpp=2"
+    if not same_module:
+        attrs["builtin_template_vars"] = "dtype_cpp=bfloat16_t,fixture_variant=a,nranks_cpp=2"
     native = ir.Function(
         "other_native",
         list(zip(definition.params, definition.param_directions, strict=True)),
@@ -541,16 +545,16 @@ def test_each_dispatch_uses_its_callable_local_definition_ids(tmp_path, ascend_b
     _compile(program, tmp_path)
     host = (tmp_path / "orchestration/host_orch.py").read_text()
     _assert_local_bindings(host)
-    assert host.count(".get_or_register_ccu(") == (6 if shared else 4)
+    assert host.count(".get_or_register_ccu(") == (6 if shared and not same_module else 4)
     assert host.rindex(".get_or_register_ccu(") < host.index("_submit_chip(")
     for rank in range(2):
         assert f'callables["chip"], ccu_id=0, worker={rank})' in host
         assert f'callables["other"], ccu_id=0, worker={rank})' in host
-        if shared:
+        if shared and not same_module:
             assert f'callables["other"], ccu_id=1, worker={rank})' in host
     if shared:
-        # The very same native symbol has ID 0 in chip and ID 1 in other.
-        for name, expected in (("chip", 0), ("other", 1)):
+        # The second callable reuses ID 0 only for an identical specialization.
+        for name, expected in (("chip", 0), ("other", 0 if same_module else 1)):
             source = (tmp_path / f"next_levels/{name}/kernels/aiv/{wrapper.name}.cpp").read_text()
             assert f"constexpr uint32_t ccu_id = {expected};" in source
 
@@ -601,16 +605,99 @@ def test_registration_cannot_be_interleaved_with_rank_submissions(ascend_backend
 
 
 @pytest.mark.parametrize("same_callable", [False, True])
-def test_each_call_gets_separate_registrations(tmp_path, same_callable):
+def test_registration_is_reused_only_for_the_same_callable(tmp_path, same_callable):
     _compile(_rank_loop_program(two_callables=True, repeat_callable=same_callable), tmp_path)
     source = (tmp_path / "orchestration/host_orch.py").read_text()
-    assert source.count(".get_or_register_ccu(") == 4
+    assert source.count(".get_or_register_ccu(") == (2 if same_callable else 4)
     assert source.count("ccu_bindings=[") == 2
     assert source.rindex(".get_or_register_ccu(") < source.index("_submit_chip(")
     _assert_local_bindings(source)
     for chip in ("chip",) if same_callable else ("chip", "other"):
         wrapper = next((tmp_path / "next_levels" / chip / "kernels/aiv").glob("*bf16_p2*.cpp"))
         assert "constexpr uint32_t ccu_id = 0;" in wrapper.read_text()
+
+
+def test_loop_revisiting_a_constant_worker_uses_one_handle(tmp_path):
+    _compile(_rank_loop_program(fixed_workers=True), tmp_path)
+    host = (tmp_path / "orchestration/host_orch.py").read_text()
+    assert host.count(".get_or_register_ccu(") == 2
+    calls = [
+        node
+        for node in ast.walk(ast.parse(host))
+        if isinstance(node, ast.keyword) and node.arg == "ccu_bindings"
+    ]
+    assert len(calls) == 2
+    assert all(isinstance(kw.value, ast.List) and len(kw.value.elts) == 1 for kw in calls)
+
+
+@pytest.mark.parametrize("element", [0, 1])
+def test_ccu_target_from_single_tuple_result(tmp_path, element):
+    window_type = "pld.DistributedTensor[[2, 64], pl.BF16]"
+    program = pl.parse_program(f"""
+@pl.program
+class Case:
+    @pl.function(type=pl.FunctionType.InCore)
+    def pair(self, other: {window_type}, target: {window_type}) -> pl.Tuple[{window_type}, {window_type}]:
+        packed = (other, target)
+        return packed
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip(self, src: pld.DistributedTensor[[1, 64], pl.BF16], dst: pl.InOut[{window_type}],
+             sig: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]], other: {window_type}) -> {window_type}:
+        packed = self.pair(other, dst)
+        selected = packed[{element}]
+        dst = pld.tensor.allgather(src, selected, sig, engine="ccu")
+        return dst
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self):
+        ps = pld.alloc_window_buffer(128)
+        pa = pld.alloc_window_buffer(256)
+        pb = pld.alloc_window_buffer(256)
+        pf = pld.alloc_window_buffer(8)
+        for r in pl.range(2):
+            src = pld.window(ps, [1, 64], dtype=pl.BF16)
+            dst = pld.window(pa, [2, 64], dtype=pl.BF16)
+            sig = pld.window(pf, [2, 1], dtype=pl.INT32)
+            other = pld.window(pb, [2, 64], dtype=pl.BF16)
+            self.chip(src, dst, sig, other, device=r)
+""")
+    _compile(program, tmp_path)
+    host = (tmp_path / "orchestration/host_orch.py").read_text()
+    assert host.count(".get_or_register_ccu(") == 2
+    [orch] = (tmp_path / "next_levels/chip/orchestration").glob("*.cpp")
+    task = orch.read_text().split(".add_input(ext_src);")[-1]
+    target = ("other", "dst")[element]
+    assert f".add_inout(ext_{target});" in task
+    assert f".add_scalar({target}_ctx);" in task
+
+
+def test_unused_ccu_callable_allows_unrelated_conditional_allocation(tmp_path):
+    program = pl.parse_program("""
+@pl.program
+class Conditional:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def ordinary(self, x: pld.DistributedTensor[[1, 64], pl.BF16]) -> pld.DistributedTensor[[1, 64], pl.BF16]:
+        return x
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def unused_ccu(self, src: pld.DistributedTensor[[1, 64], pl.BF16],
+                   dst: pl.InOut[pld.DistributedTensor[[2, 64], pl.BF16]],
+                   sig: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]]):
+        dst = pld.tensor.allgather(src, dst, sig, engine="ccu")
+        return dst
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host(self, enabled: pl.Scalar[pl.INT32]):
+        if enabled > 0:
+            p = pld.alloc_window_buffer(128)
+            x = pld.window(p, [1, 64], dtype=pl.BF16)
+            self.ordinary(x, device=0)
+""")
+    _compile(program, tmp_path)
+    host = (tmp_path / "orchestration/host_orch.py").read_text()
+    assert 'callables["ordinary"]' in host
+    assert ".get_or_register_ccu(" not in host
 
 
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)

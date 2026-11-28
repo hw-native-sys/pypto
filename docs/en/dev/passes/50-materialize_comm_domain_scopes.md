@@ -354,10 +354,10 @@ single engine entry. See [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-al
 ### Explicit CCU bindings
 
 After domain construction, CCU uses are resolved against the existing allocation
-slots. Each CHIP call receives independent registrations; the op names that callable.
+slots. Calls on the same worker reuse a registration for the same domain, CHIP callable and native CCU module.
 The pass inserts `pld.system.register_ccu(allocation, callee=..., chip_callee=...)` and
 HOST dispatch `ccu_bindings` SSA references. Each registration carries the
 dispatch device and returns a local handle. All registrations precede the first
 task submission; rank loops retain their bodies and select handles at dispatch.
 Bindings must match the consumer device. It does not merge overlapping member sets. See [CCU lowering](44-lower_l2_tensor_collectives.md#ccu-allgather) for
-provenance, participant checks and the codegen-only runtime boundary.
+provenance, caller responsibilities and the codegen-only runtime boundary.

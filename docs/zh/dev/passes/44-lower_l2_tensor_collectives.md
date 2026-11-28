@@ -238,7 +238,8 @@ payload 窗口不同，复用同一个 InOut signal 也能建立此依赖。
 `engine="ccu"` 将 Ascend950 CHIP BF16 allgather 降低为 AIV wrapper 和
 `FunctionType.CCU` native builtin 声明。支持输入窗口 `[1, N]`、目标 `[NR, N]`
 和 INT32 signal `[NR, 1]`，要求完整连续 ND 视图、静态正 shape、2–64 rank，
-以及 CHIP 中的直线调用序列。input 和 target 必须不同。
+以及 CHIP 中的直线调用序列。input 和 target 必须不同。编译器检查已知的视图步长。
+步长未知时，由调用方保证行主序连续。
 
 共享 AIV wrapper 的参数为 `(input, target, signal, order)`，三个用户窗口保留
 DistributedTensor 类型。函数体以有副作用的语句调用真实 CCU callee，并返回 target 别名。
@@ -257,7 +258,7 @@ InOut 调度效果，即使 native allgather 不打包它。方向和依赖先�
 沿 SSA 别名、Tensor 视图和函数返回参数别名，在每个 HOST dispatch 解析窗口。
 同一次请求的所有窗口（包括 signal）必须同域；一个 CHIP 的不同请求可以使用不同域。
 
-每个被使用的 `(device, domain, definition)` 组合，在代表 allocation 之后、
+每个被使用的 `(device, domain, CHIP callable, 原生 CCU 模块)` 组合，在代表 allocation 之后、
 所属域内插入 HOST 内部操作：
 
 ```text
@@ -275,13 +276,13 @@ for rank in range(2):
 `device` 必填，每次注册返回该 worker 的本地 handle。所有可能首次创建的注册必须先于
 本轮第一次任务提交，即使 HOST 有多个 rank 提交循环。窗口创建与 rank 循环保留，
 仅在提交处按 rank 选择对应 handle。若 allocation 在首次提交之后才可用，则拒绝新增
-CCU 注册。每个 CHIP 调用生成独立的注册 SSA 值，即使调用同一个 callable；仅合并单次
-提交内的重复需求，底层注册缓存交给 simpler。handle 不得逃出所属域。
+CCU 注册。同一域中，使用同一 CHIP callable、原生 CCU 模块和 worker 的提交复用一个句柄。
+只有参与 CCU 的窗口需要无条件分配。
 
-注册具有资源/失败效果，DCE 保留它。handle 是 dispatch attr 中的 SSA 引用，不是 CHIP
-算法参数。每个域检查静态参与覆盖与 collective 协议顺序/次数，协议兼容的各 rank 本地
-定义符号不必相同。支持最多 64 个 rank 的正次数静态循环及可静态判定的 rank 选择分支；
-其他条件/重复提交、动态 rank 选择、嵌套设备调用或控制流内 allocation 仍不支持。
+注册具有资源和失败副作用，DCE 会保留它。句柄作为 dispatch 属性中的 SSA 值传递。
+调用方保证各 rank 参与相容的 collective，调用顺序、数据宽度和目标窗口槽位一致。
+支持最多 64 个 rank 的正次数静态循环及可静态判定的 rank 选择分支。
+其他条件/重复提交、动态 rank 选择、嵌套设备调用或控制流内的 CCU 窗口分配仍不支持。
 
 HOST Python 生成 `domain.get_or_register_ccu(callables[name], ccu_id=N, worker=rank)`，
 并向同一 rank 的 `_submit_chip` 传递 `ccu_bindings=[local_registration, ...]`。
@@ -290,7 +291,6 @@ register 通过 `chip_callee` 显式指定消费它的 callable。CCU 编号与 
 在每个 callable 内按首次使用顺序分配。CHIP codegen 只生成一份注册表，打包与 wrapper
 常量使用该表，HOST codegen 直接读取同一结果。相同定义在不同 callable 中可以编号不同，
 各自注册。不同提交可在同一域/编号处使用不同定义，单次提交不能在那里绑定冲突注册。
-编译器不跨 CHIP 调用共享注册。
 
 ### Native 源码契约与验证边界
 

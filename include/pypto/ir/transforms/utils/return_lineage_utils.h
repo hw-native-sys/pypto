@@ -18,6 +18,7 @@
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/type.h"
@@ -76,7 +77,11 @@ std::optional<size_t> ReturnedParamIndexAt(const FunctionPtr& func, const Progra
 ///         one entry per return position (nullopt = not a param writeback).
 std::vector<std::optional<size_t>> ReturnedParamIndices(const FunctionPtr& func, const ProgramPtr& program);
 
-/// Strict HOST-only map for the elements of one returned tuple value.
+[[nodiscard]] inline bool HasSingleTupleReturn(const FunctionPtr& func) {
+  return func && func->return_types_.size() == 1 && IsA<TupleType>(func->return_types_.front());
+}
+
+/// Map the elements of one returned tuple value to parameters using strict return tracing.
 /// The ordinary return map continues to treat the tuple as one result.
 std::vector<std::optional<size_t>> ReturnedTupleElementParamIndices(const FunctionPtr& func,
                                                                     const ProgramPtr& program);

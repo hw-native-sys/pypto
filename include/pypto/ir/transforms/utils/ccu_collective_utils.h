@@ -49,6 +49,12 @@ inline std::map<std::string, std::string> GetBuiltinTemplateVariables(const Func
   return variables;
 }
 
+using CcuModuleIdentity = std::pair<std::string, std::map<std::string, std::string>>;
+
+inline CcuModuleIdentity GetCcuModuleIdentity(const FunctionPtr& definition) {
+  return {definition->GetAttr<std::string>(kAttrBuiltinTemplateDir), GetBuiltinTemplateVariables(definition)};
+}
+
 // Resolve the actual CCU callee from the wrapper body, never a parallel attr.
 inline CallPtr CcuWrapperCall(const FunctionPtr& func, const ProgramPtr& program) {
   class Finder : public IRVisitor {

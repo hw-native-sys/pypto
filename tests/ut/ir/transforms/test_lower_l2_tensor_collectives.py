@@ -1043,6 +1043,28 @@ def test_ccu_allgather_capability_diagnostics(ascend_backend, options, message):
         passes.lower_l2_tensor_collectives()(_ccu_allgather_program(**options))
 
 
+@pytest.mark.parametrize("ascend_backend", [BackendType.Ascend950], indirect=True)
+@pytest.mark.parametrize("pitch", ["64", "128", "n"])
+def test_ccu_slice_checks_only_known_row_stride(ascend_backend, pitch):
+    program = pl.parse_program(f"""
+@pl.program
+class Sliced:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip(self, n: pl.Scalar[pl.INDEX], data: pld.DistributedTensor[[1, 64], pl.BF16],
+             backing: pl.InOut[pld.DistributedTensor[[2, {pitch}], pl.BF16]],
+             signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]]):
+        target = pl.slice(backing, [2, 64], [0, 0])
+        target = pld.tensor.allgather(data, target, signal, engine="ccu")
+        return target
+""")
+    if pitch == "128":
+        with pytest.raises(ValueError, match="contiguous ND strides"):
+            passes.lower_l2_tensor_collectives()(program)
+    else:
+        after = passes.lower_l2_tensor_collectives()(program)
+        assert any(f.func_type == ir.FunctionType.CCU for f in after.functions.values())
+
+
 @pytest.mark.parametrize("ascend_backend", [BackendType.Ascend910], indirect=True)
 def test_ccu_allgather_unsupported_backend(ascend_backend):
     with pytest.raises(ValueError, match="unsupported by this backend"):

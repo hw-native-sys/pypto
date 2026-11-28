@@ -106,7 +106,7 @@ class LocalNameCollector : public IRVisitor {
          (func->role_.has_value() && *func->role_ == Role::Orchestrator);
 }
 
-[[nodiscard]] FunctionCtxPlan BuildFunctionCtxPlan(const FunctionPtr& func) {
+[[nodiscard]] FunctionCtxPlan BuildFunctionCtxPlan(const FunctionPtr& func, const ProgramPtr& program) {
   FunctionCtxPlan plan;
   if (!func) return plan;
   // SIMT helpers borrow only the rank-local GM pointer. Their verified scalar
@@ -114,6 +114,7 @@ class LocalNameCollector : public IRVisitor {
   // and SimtLaunchStmt does not carry the runtime kernel's CommCtx ABI.
   if (func->func_type_ == FunctionType::SIMT) return plan;
   plan.returned_param_indices = return_lineage::ExplicitReturnedParamIndices(func);
+  plan.IndexTupleResult(func, program);
   std::unordered_set<std::string> used_names;
   for (const auto& param : func->params_) {
     used_names.insert(param->name_hint_);
@@ -454,7 +455,7 @@ class MaterializeDistTensorCtxMutator : public IRMutator {
   std::unordered_map<std::string, FunctionCtxPlan> plans;
   for (const auto& [gvar, func] : program->functions_) {
     if (!HasDistTensorParam(func)) continue;
-    auto plan = BuildFunctionCtxPlan(func);
+    auto plan = BuildFunctionCtxPlan(func, program);
     if (!plan.dist_param_indices.empty()) plans.emplace(func->name_, std::move(plan));
   }
   if (plans.empty()) return program;
