@@ -122,7 +122,7 @@ The tables use the following exact dtype sets:
 | `S` | INT8, INT16, INT32 |
 | `I16_32` | INT16, UINT16, INT32, UINT32 |
 | `T` | FP16, BF16, FP32, INT8, UINT8, INT16, UINT16, INT32, UINT32 |
-| `C` | FP16, FP32, INT32, UINT32 |
+| `C` | FP16, FP32, INT32, UINT8, UINT16, UINT32 |
 
 `+` denotes set union. BOOL is used only for masks; INDEX is used for offsets
 and active-lane counts. No table entry implies support for other dtypes.

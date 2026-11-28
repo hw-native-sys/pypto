@@ -110,7 +110,7 @@ lane 广播。DSL 数值字面量会归一化为要求的 scalar dtype；整数�
 | `S` | INT8、INT16、INT32 |
 | `I16_32` | INT16、UINT16、INT32、UINT32 |
 | `T` | FP16、BF16、FP32、INT8、UINT8、INT16、UINT16、INT32、UINT32 |
-| `C` | FP16、FP32、INT32、UINT32 |
+| `C` | FP16、FP32、INT32、UINT8、UINT16、UINT32 |
 
 `+` 表示集合并集。BOOL 仅用于掩码；INDEX 用于 offset 和 active lane 数。
 API 表未列出的 dtype 均不代表已支持。

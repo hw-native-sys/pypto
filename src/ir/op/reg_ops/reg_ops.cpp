@@ -274,6 +274,10 @@ TypePtr Convert(const Args& a, const Kwargs& k) {
 }
 bool Integer(DataType dtype) { return dtype.IsInt() && dtype.GetBit() <= 32 && dtype.GetBit() >= 8; }
 bool Float(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::FP32; }
+bool SupportsCompare(DataType dtype) {
+  return Float(dtype) || dtype == DataType::INT32 || dtype == DataType::UINT32 || dtype == DataType::UINT8 ||
+         dtype == DataType::UINT16;
+}
 
 RegTypePtr Vec(const ExprPtr& expr) {
   auto type = Register(expr, RegKind::VecReg);
@@ -333,8 +337,7 @@ TypePtr ScalarOperation(const Args& args, const Kwargs& kwargs, const std::strin
   auto mask = Mask(args[2], x);
   Pmode(kwargs);
   if (name != "compares") return x;
-  CHECK(Float(x->GetDType()) || x->GetDType() == DataType::INT32 || x->GetDType() == DataType::UINT32)
-      << "Unsupported compares dtype";
+  CHECK(SupportsCompare(x->GetDType())) << "Unsupported compares dtype";
   auto predicate = GetRequiredKwarg<std::string>(kwargs, "predicate", "reg.compares");
   CHECK(predicate == "eq" || predicate == "ne" || predicate == "lt" || predicate == "le" ||
         predicate == "gt" || predicate == "ge")
@@ -708,9 +711,7 @@ REGISTER_OP("reg.compare")
       Match(x, Register(a[1], RegKind::VecReg));
       auto m = Register(a[2], RegKind::MaskReg);
       CHECK(m->GetShape() == x->GetShape()) << "Mask lane mismatch";
-      CHECK(x->GetDType() == DataType::FP16 || x->GetDType() == DataType::FP32 ||
-            x->GetDType() == DataType::INT32 || x->GetDType() == DataType::UINT32)
-          << "Unsupported compare dtype";
+      CHECK(SupportsCompare(x->GetDType())) << "Unsupported compare dtype";
       auto p = GetRequiredKwarg<std::string>(k, "predicate", "reg.compare");
       CHECK(p == "eq" || p == "ne" || p == "lt" || p == "le" || p == "gt" || p == "ge")
           << "Invalid compare predicate";
