@@ -587,6 +587,32 @@ def test_steady_state_requires_per_forward_horizon():
         passes.auto_layout(nz_inputs=["w"], reusable_tensors=["w"], expected_uses=2, steady_state=True)
 
 
+@pytest.mark.parametrize(("cols", "uses", "layout"), [(16, 1, "NZ"), (32, 1, "ND"), (32, 100, "NZ")])
+def test_finite_input_packing_cost_matches_byte_order(tmp_path, ascend_backend, cols, uses, layout):
+    torch = pytest.importorskip("torch")
+    functions = f"""
+@pl.function(type=pl.FunctionType.InCore)
+def mm(self, a: pl.Tensor[[64,128], pl.BF16], w: pl.Tensor[[128,{cols}], pl.BF16],
+       out: pl.Out[pl.Tensor[[64,{cols}], pl.FP32]]) -> pl.Tensor[[64,{cols}], pl.FP32]:
+    ta = pl.load(a, [0,0], [64,128], target_memory=pl.Mem.Mat)
+    tw = pl.load(w, [0,0], [128,{cols}], target_memory=pl.Mem.Mat)
+    return pl.store(pl.matmul(ta, tw), [0,0], out)
+
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, a: pl.Tensor[[64,128], pl.BF16], w: pl.Tensor[[128,{cols}], pl.BF16],
+         out: pl.Out[pl.Tensor[[64,{cols}], pl.FP32]]) -> pl.Tensor[[64,{cols}], pl.FP32]:
+    return self.mm(a, w, out)
+"""
+    _compile(tmp_path, functions, input_layout_policy=ir.InputLayoutPolicy(("w",), ("w",), uses))
+    meta = json.loads((tmp_path / "compiled_meta.json").read_text())
+    assert [p["layout"] for p in meta["lowered_params"]] == ["ND", layout, "ND"]
+    bits = torch.arange(128 * cols, dtype=torch.int16).reshape(128, cols)
+    prepared = ir.CompiledProgram.from_dir(tmp_path).prepare_inputs({"w": bits.view(torch.bfloat16)})["w"]
+    expected = torch.cat([block.reshape(-1) for block in bits.split(16, dim=1)]) if layout == "NZ" else bits
+    assert torch.equal(prepared.view(torch.int16), expected.reshape_as(bits))
+    assert (prepared.data_ptr() == bits.data_ptr()) == (layout == "ND" or cols == 16)
+
+
 @pytest.mark.parametrize(("steady_state", "layout"), [(False, "ND"), (True, "NZ")])
 def test_steady_state_waives_only_reusable_input_packing(tmp_path, ascend_backend, steady_state, layout):
     _compile(

@@ -270,19 +270,45 @@ void TestCostModelHardwareEquations() {
   Require(!al::IsNzCompatibleShape(vec_bool.shape, DataType::BOOL), "BOOL must not be NZ-compatible");
 }
 
+void TestSingleBlockInputPacking() {
+  const auto nd = al::LayoutSpec::ND();
+  const auto nz = al::LayoutSpec::NZ();
+  al::LayoutProblemInstance instance;
+  auto input = MakeValue("w");
+  input.dtype = DataType::FP32;
+  input.shape = {2, 3, 128, 8};
+  input.is_named_nz_input = true;
+  RequireNear(instance.EstimateConversionCost(input, nd, nz), 0.0, 0.0,
+              "One C0 per row preserves byte order across rank and layer dimensions");
+  input.is_named_nz_input = false;
+  Require(instance.EstimateConversionCost(input, nd, nz) > 0.0,
+          "Only loader-permitted inputs get the exemption");
+  input.is_named_nz_input = true;
+  instance.custom_conversion_costs[input.name][{nd, nz}] = 5.0;
+  RequireNear(instance.EstimateConversionCost(input, nd, nz), 5.0, 0.0,
+              "A measured finite preparation cost overrides the estimate");
+}
+
 void TestSteadyStateInputPacking() {
   const auto nd = al::LayoutSpec::ND();
   const auto nz = al::LayoutSpec::NZ();
   al::LayoutProblemInstance instance;
   instance.forbid_unmaterializable_gm_conversions = true;
   auto resident = MakeValue("resident", std::nullopt, MemorySpace::DDR, true);
+  resident.shape = {16, 32};  // Two FP16 C0 blocks require an actual reorder.
   resident.is_named_nz_input = true;
   auto transient = MakeValue("transient");
+  transient.shape = resident.shape;
   transient.is_named_nz_input = true;
   instance.AddValue(resident);
   instance.AddValue(transient);
-  instance.AddValue(MakeValue("unoffered", std::nullopt, MemorySpace::DDR, true));
-  instance.AddValue(MakeValue("out", "use", MemorySpace::DDR, false, true));
+  auto unoffered = resident;
+  unoffered.name = "unoffered";
+  unoffered.is_named_nz_input = false;
+  instance.AddValue(unoffered);
+  auto out = MakeValue("out", "use", MemorySpace::DDR, false, true);
+  out.shape = resident.shape;
+  instance.AddValue(out);
   instance.operations = {MakeOp("use", {"resident", "transient", "unoffered"}, "out",
                                 {{{nd, nd, nd}, nd, 20.0},
                                  {{nz, nd, nd}, nd, 10.0},
@@ -1673,6 +1699,7 @@ void TestIfJoinAndClassFCrossLoopForbidden() {
 int main() {
   try {
     TestCostModelHardwareEquations();
+    TestSingleBlockInputPacking();
     TestSteadyStateInputPacking();
     TestTreewidthStatsChainDiamondAndMultiComponent();
     TestSharedConversionBarrierAndOracle();

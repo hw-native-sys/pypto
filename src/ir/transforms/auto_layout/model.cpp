@@ -630,10 +630,12 @@ double LayoutProblemInstance::EstimateConversionCost(const ValueNode& val_node, 
     return 0.0;
   }
   if (val_node.dtype.IsPackedFp4()) return cost_model.vec_unsupported_conversion_cycles;
-  if (cost_model.steady_state && val_node.is_named_nz_input && val_node.is_reusable_weight &&
-      val_node.memory_space == MemorySpace::DDR && !val_node.producer_op_id && !val_node.is_external_output &&
-      src_layout == val_node.current_layout && src_layout == LayoutSpec::ND() &&
-      dst_layout == LayoutSpec::NZ() && ContainsLayout(val_node.admissible_layouts, dst_layout)) {
+  const bool loader_pack = val_node.is_named_nz_input && val_node.memory_space == MemorySpace::DDR &&
+                           !val_node.producer_op_id && !val_node.is_external_output &&
+                           src_layout == val_node.current_layout && src_layout == LayoutSpec::ND() &&
+                           dst_layout == LayoutSpec::NZ() &&
+                           ContainsLayout(val_node.admissible_layouts, dst_layout);
+  if (loader_pack && cost_model.steady_state && val_node.is_reusable_weight) {
     return 0.0;
   }
   auto val_it = custom_conversion_costs.find(val_node.name);
@@ -655,6 +657,13 @@ double LayoutProblemInstance::EstimateConversionCost(const ValueNode& val_node, 
       val_node.producer_op_id.has_value() &&
       !(val_node.is_external_output && dst_layout == val_node.current_layout)) {
     return cost_model.vec_unsupported_conversion_cycles;
+  }
+  if (loader_pack && val_node.shape.size() >= 2) {
+    // With one C0 column block, NZ blocking only splits the row axis of each
+    // dense matrix. The loader can view the same bytes, including in a bank.
+    const auto rows = val_node.shape[val_node.shape.size() - 2];
+    const auto c0 = TryC0Elements(val_node.dtype);
+    if (c0 && val_node.shape.back() == *c0 && rows > 0 && rows % 16 == 0) return 0.0;
   }
   return cost_model.EstimateConversionCost(val_node, src_layout, dst_layout);
 }

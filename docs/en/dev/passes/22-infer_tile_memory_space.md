@@ -317,8 +317,10 @@ The objective scores one forward and excludes the one-time ND-to-NZ packing cost
 eligible inputs named in both tuples. Recurring loads, computation, stores and layout
 conversions keep their normal costs, including loop and dispatch multiplicities. The same
 layout eligibility and external ABI rules apply. Leave `expected_uses` at `1` with
-`steady_state=True`. The default finite objective includes the pack and scores
-`expected_uses` forwards.
+`steady_state=True`. The default finite objective scores `expected_uses` forwards
+and charges for packing when it reorders the input bytes. For an eligible dense
+input with exactly one 32-byte C0 block per row, ND and NZ have the same byte
+order in every matrix. Selecting NZ then adds zero packing cycles, even for one use.
 
 On a single-device HOST entry, the policy may also select ND or NZ for a dense,
 read-only `[M, N]` weight passed whole to the device. The loader uploads one
