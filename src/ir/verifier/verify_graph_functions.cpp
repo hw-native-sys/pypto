@@ -143,19 +143,40 @@ class GraphReferenceChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
     auto callee = LookupGraph(op->op_);
-    if (!callee) return;
+    if (!callee) {
+      if (op->HasAttr(kAttrCalendarHash)) {
+        diagnostics_.emplace_back(
+            DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
+            "Call to non-Graph target '" + (op->op_ ? op->op_->name_ : "<null>") + "' in '" + caller_->name_ +
+                "' carries calendar_hash; calendar_hash is only valid on FunctionType.Graph calls/submits.",
+            op->span_);
+      }
+      return;
+    }
     CheckCaller(callee, op->span_);
     CheckLaunchArity(callee, op->args_.size(), op->span_);
     CheckDirections(callee, op->GetArgDirections(), op->span_);
+    CheckCalendarHash(callee, op);
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
     IRVisitor::VisitExpr_(op);
     auto callee = LookupGraph(op->op_);
-    if (!callee) return;
+    if (!callee) {
+      if (op->HasAttr(kAttrCalendarHash)) {
+        diagnostics_.emplace_back(
+            DiagnosticSeverity::Error, "GraphBoundaryLegalized", 0,
+            "Submit to non-Graph target '" + (op->op_ ? op->op_->name_ : "<null>") + "' in '" +
+                caller_->name_ +
+                "' carries calendar_hash; calendar_hash is only valid on FunctionType.Graph calls/submits.",
+            op->span_);
+      }
+      return;
+    }
     CheckCaller(callee, op->span_);
     CheckLaunchArity(callee, op->args_.size(), op->span_);
     CheckDirections(callee, op->GetArgDirections(), op->span_);
+    CheckCalendarHash(callee, op);
 
     // Graph replay expands a recorded sub-DAG, not one SPMD kernel launch.
     if (op->core_num_.has_value() || op->sync_start_) {
@@ -172,6 +193,14 @@ class GraphReferenceChecker : public IRVisitor {
   }
 
  private:
+  template <typename CallT>
+  void CheckCalendarHash(const FunctionPtr& callee, const std::shared_ptr<const CallT>& op) const {
+    if (!op->HasAttr(kAttrCalendarHash)) return;
+    auto expr = op->template GetAttr<ExprPtr>(kAttrCalendarHash, nullptr);
+    if (!IsValidCalendarHashExpr(expr)) {
+      Report(callee, op->span_, "has invalid calendar_hash; expected an integer scalar expression.");
+    }
+  }
   [[nodiscard]] FunctionPtr LookupGraph(const OpPtr& callee_op) const {
     auto gvar = As<GlobalVar>(callee_op);
     if (!gvar || !program_) return nullptr;

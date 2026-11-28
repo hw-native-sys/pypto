@@ -1277,17 +1277,29 @@ class GraphCallSiteChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);
     auto callee = LookupGraph(op->op_);
-    if (!callee) return;
+    if (!callee) {
+      CHECK_SPAN(!op->HasAttr(kAttrCalendarHash), op->span_)
+          << "Call to non-Graph target '" << (op->op_ ? op->op_->name_ : "<null>")
+          << "' carries calendar_hash. calendar_hash is only valid on FunctionType.Graph calls/submits.";
+      return;
+    }
     CheckArity(op->args_, callee, op->span_);
     CheckDirections(op->GetArgDirections(), callee, op->span_);
+    CheckCalendarHash(op, callee);
   }
 
   void VisitExpr_(const SubmitPtr& op) override {
     IRVisitor::VisitExpr_(op);
     auto callee = LookupGraph(op->op_);
-    if (!callee) return;
+    if (!callee) {
+      CHECK_SPAN(!op->HasAttr(kAttrCalendarHash), op->span_)
+          << "Submit to non-Graph target '" << (op->op_ ? op->op_->name_ : "<null>")
+          << "' carries calendar_hash. calendar_hash is only valid on FunctionType.Graph calls/submits.";
+      return;
+    }
     CheckArity(op->args_, callee, op->span_);
     CheckDirections(op->GetArgDirections(), callee, op->span_);
+    CheckCalendarHash(op, callee);
 
     // Explicit predecessors order the outer shell. SPMD metadata instead
     // changes a kernel launch and has no meaning for this composite Graph.
@@ -1303,6 +1315,14 @@ class GraphCallSiteChecker : public IRVisitor {
   }
 
  private:
+  template <typename CallT>
+  void CheckCalendarHash(const std::shared_ptr<const CallT>& op, const FunctionPtr& callee) const {
+    if (!op->HasAttr(kAttrCalendarHash)) return;
+    auto expr = op->template GetAttr<ExprPtr>(kAttrCalendarHash, nullptr);
+    CHECK_SPAN(IsValidCalendarHashExpr(expr), op->span_)
+        << "Graph function '" << callee->name_ << "' called from '" << caller_->name_
+        << "' has invalid calendar_hash; expected an integer scalar expression.";
+  }
   [[nodiscard]] FunctionPtr LookupGraph(const OpPtr& callee_op) const {
     auto gvar = As<GlobalVar>(callee_op);
     if (!gvar || !program_) return nullptr;
@@ -1754,7 +1774,12 @@ class ReturnOnlyPhiRewriter : public IRMutator {
       break;
     }
   }
-  if (!has_graph) return program;
+  if (!has_graph) {
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func && func->body_) GraphCallSiteChecker(func, program).VisitStmt(func->body_);
+    }
+    return program;
+  }
 
   program = CanonicalizeReturnOnlyGraphPhis(program);
 
@@ -1869,7 +1894,6 @@ class ReturnOnlyPhiRewriter : public IRMutator {
           << "Graph function '" << func->name_ << "' launches " << counter.count()
           << " tasks, over the runtime's per-graph limit of " << kMaxGraphNodes
           << ". Split the region into several graphs.";
-      continue;
     }
     GraphCallSiteChecker call_checker(func, result);
     call_checker.VisitStmt(func->body_);

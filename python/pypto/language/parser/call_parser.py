@@ -252,6 +252,7 @@ class CallParser:
         deps/dumps-on-a-plain-call mistakes.
         """
         allowed_kwargs = {"attrs"}
+        is_graph_callee = func_obj is None or func_obj.func_type == ir.FunctionType.Graph
         if as_submit:
             allowed_kwargs.add("deps")
             allowed_kwargs.add("dumps")
@@ -260,6 +261,8 @@ class CallParser:
             allowed_kwargs.add("timing_slot")
         if as_spmd:
             allowed_kwargs.update({"core_num", "sync_start"})
+        elif is_graph_callee:
+            allowed_kwargs.add("calendar_hash")
         if func_obj is None or func_obj.role == ir.Role.Orchestrator:
             allowed_kwargs.update({"worker", "device"})
         for kw in keywords:
@@ -283,6 +286,11 @@ class CallParser:
                     "dumps= is only valid on pl.submit(...) / pl.at(...). For a "
                     "plain self.kernel(...) call, declare the dump target with a "
                     "`pl.dump_tag(x)` statement before the call instead."
+                )
+            elif kw.arg == "calendar_hash":
+                hint = (
+                    "calendar_hash= is only valid on pl.graph(...) or non-SPMD "
+                    "calls/submits to a FunctionType.Graph (@pl.jit.graph) function."
                 )
             raise ParserTypeError(
                 f"Function '{method_name}' does not accept keyword argument '{kw.arg}'",
@@ -496,6 +504,7 @@ class CallParser:
         allow_early_resolve = False
         predicate: ir.Expr | None = None
         timing_slot: int | None = None
+        calendar_hash = self.dispatch.record_calendar_hash_attr(method_name, keywords, extra_attrs, span)
         if as_submit:
             allow_early_resolve = self.dispatch.parse_submit_allow_early_resolve_kwarg(method_name, keywords)
             predicate = self.dispatch.parse_submit_predicate_kwarg(method_name, keywords)
@@ -509,6 +518,7 @@ class CallParser:
                 allow_early_resolve=allow_early_resolve,
                 predicate=predicate,
                 timing_slot=timing_slot,
+                calendar_hash=calendar_hash,
                 span=span,
             )
         return_types = func_obj.return_types if func_obj else []
@@ -1077,8 +1087,18 @@ class CallParser:
         # Track the external function
         self.bindings.external_funcs[func_name] = ext_func
 
-        # Reject keyword args and validate argument count before parsing
-        self.reject_keyword_args(func_name, call, span)
+        extra_attrs: dict[str, Any] = {}
+        if ext_func.func_type == ir.FunctionType.Graph:
+            for kw in call.keywords:
+                if kw.arg != "calendar_hash":
+                    raise ParserSyntaxError(
+                        f"Function '{func_name}' does not accept keyword argument '{kw.arg or '**kwargs'}'",
+                        span=span,
+                        hint="Pass arguments positionally except for calendar_hash",
+                    )
+            self.dispatch.record_calendar_hash_attr(func_name, call.keywords, extra_attrs, span)
+        else:
+            self.reject_keyword_args(func_name, call, span)
         self.validate_call_arg_count(func_name, ext_func, len(call.args), span)
 
         args = [self.callbacks.expression(arg) for arg in call.args]
@@ -1094,7 +1114,7 @@ class CallParser:
             is_inline=bool(return_types) and ext_func.func_type == ir.FunctionType.Inline,
         )
         return_types = self.inline_argument_return_types(ext_func, args, return_types)
-        return self.make_call_with_return_type(gvar, args, return_types, span)
+        return self.make_call_with_return_type(gvar, args, return_types, span, extra_attrs=extra_attrs)
 
     @staticmethod
     def is_docstring(stmt: ast.stmt) -> bool:

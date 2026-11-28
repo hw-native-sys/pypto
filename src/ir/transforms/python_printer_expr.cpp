@@ -564,6 +564,20 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
         break;
       }
 
+      // Surface ``attrs["calendar_hash"]`` on Graph calls as a
+      // ``calendar_hash=<expr>`` kwarg so it round-trips cleanly.
+      for (const auto& [k, v] : op->attrs_) {
+        if (k != kAttrCalendarHash) continue;
+        if (const auto* p = std::any_cast<ExprPtr>(&v)) {
+          if (*p) {
+            stream_ << (need_kwarg_comma ? ", " : "") << "calendar_hash=";
+            VisitExpr(*p);
+            need_kwarg_comma = true;
+          }
+        }
+        break;
+      }
+
       // Machine-only ``attrs={...}`` dict for IR metadata that has no user-facing
       // call kwarg. Two keys keep a bespoke emitter for clarity / arg-order
       // stability: ``dump_vars`` (selective dump, seeded by ``pl.dump_tag`` /
@@ -571,7 +585,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       // other attr — ``arg_direction_overrides``, ``dummy_task``, any future
       // key — is rendered generically by ``PrintAttrValue`` into the same dict
       // (the round-trip safety net), so nothing is silently dropped. The sugar
-      // key already surfaced above (``worker`` -> ``worker=``) is skipped
+      // keys already surfaced above (``worker`` / ``calendar_hash``) are skipped
       // here. The parser recovers the bespoke keys via dedicated extractors
       // and the rest via ``_parse_attr_value``.
       auto call_arg_directions = op->GetArgDirections();
@@ -580,7 +594,7 @@ void IRPythonPrinter::PrintCall(const CallPtr& op) {
       std::vector<const std::pair<std::string, std::any>*> generic_attrs;
       for (const auto& kv : op->attrs_) {
         const std::string& k = kv.first;
-        if (k == kAttrWorker) continue;                               // emitted as worker=
+        if (k == kAttrWorker || k == kAttrCalendarHash) continue;     // emitted as worker=/calendar_hash=
         if (k == kAttrDumpVars || k == kAttrArgDirections) continue;  // bespoke emitters below
         generic_attrs.push_back(&kv);
       }
@@ -1282,18 +1296,29 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
     stream_ << ")";
   }
 
+  for (const auto& [k, v] : op->attrs_) {
+    if (k != kAttrCalendarHash) continue;
+    if (const auto* p = std::any_cast<ExprPtr>(&v)) {
+      if (*p) {
+        stream_ << ", calendar_hash=";
+        VisitExpr(*p);
+      }
+    }
+    break;
+  }
+
   // Surface the machine-only ``attrs={...}`` dict the same way Call does:
   // ``arg_directions`` keeps a bespoke emitter; every other attr (e.g.
   // ``arg_direction_overrides``) is rendered generically by ``PrintAttrValue``
-  // so nothing is silently dropped. ``dump_vars`` is skipped here — it is
-  // surfaced above as the ``dumps=`` kwarg on the submit surface.
+  // so nothing is silently dropped. ``dump_vars`` and ``calendar_hash`` are
+  // skipped here — they are surfaced above as kwargs on the submit surface.
   auto submit_arg_directions = op->GetArgDirections();
   const bool has_dirs = !submit_arg_directions.empty();
   std::vector<const std::pair<std::string, std::any>*> generic_attrs;
   for (const auto& kv : op->attrs_) {
     const std::string& k = kv.first;
-    if (k == kAttrDumpVars) continue;       // emitted as dumps=
-    if (k == kAttrArgDirections) continue;  // bespoke emitter below
+    if (k == kAttrDumpVars || k == kAttrCalendarHash) continue;  // emitted as dumps=/calendar_hash=
+    if (k == kAttrArgDirections) continue;                       // bespoke emitter below
     generic_attrs.push_back(&kv);
   }
   if (has_dirs || !generic_attrs.empty()) {

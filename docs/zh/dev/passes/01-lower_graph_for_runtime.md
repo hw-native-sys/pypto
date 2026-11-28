@@ -13,7 +13,8 @@
 SSA 转换、任务依赖分析和内存规划处理展开后的编排。片段内的循环、分支、kernel 调用和
 显式任务依赖保留在 IR 中。生成的编排在每次执行时逐个提交任务。
 
-Graph 边界的张量 dump 标记沿用 Inline 的传递机制。TMR 编译会拒绝以 Graph 函数为
+Graph 边界的张量 dump 标记沿用 Inline 的传递机制。TMR 展开 Graph 调用或作用域时会
+丢弃可选的 `calendar_hash` PGO 分桶提示。TMR 编译会拒绝以 Graph 函数为
 目标的显式 `Submit`。Graph 调用或作用域上的其他元数据同样触发诊断，其中包括 Graph
 作用域的外层依赖和捕获的完成 TaskId。这些依赖和任务号引用的外层调度边界会在 TMR
 降级时消除。

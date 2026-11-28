@@ -448,6 +448,14 @@ bool IRPythonPrinter::PrintScopePredicateAttr(const ScopeStmtPtr& op) {
   return true;
 }
 
+bool IRPythonPrinter::PrintScopeCalendarHashAttr(const ScopeStmtPtr& op) {
+  auto cal_hash = op->GetAttr<ExprPtr>(kAttrCalendarHash, nullptr);
+  if (!cal_hash) return false;
+  stream_ << ", calendar_hash=";
+  VisitExpr(cal_hash);
+  return true;
+}
+
 bool IRPythonPrinter::PrintScopeWindowizeAttr(const ScopeStmtPtr& op) {
   if (!op->GetAttr<bool>("windowize", false)) return false;
   stream_ << ", windowize=True";
@@ -586,6 +594,7 @@ void IRPythonPrinter::VisitStmt_(const GraphScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".graph(\"" << op->name_hint_ << "\"";
   PrintScopeDepsAttr(op);
   PrintScopeDumpAttr(op);
+  PrintScopeCalendarHashAttr(op);
   stream_ << ")";
   PrintScopeTaskIdVarSuffix(op);
   stream_ << ":\n";

@@ -819,10 +819,18 @@ class GraphContext:
     a ``GraphScopeStmt``.
     """
 
-    def __init__(self, name: str, *, deps: list[Any] | None = None, dumps: list[Any] | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        deps: list[Any] | None = None,
+        dumps: list[Any] | None = None,
+        calendar_hash: int | Scalar | _ir.Expr | None = None,
+    ) -> None:
         self.name = name
         self.deps = deps
         self.dumps = dumps
+        self.calendar_hash = calendar_hash
 
     def __enter__(self) -> Any:
         """The DSL parser binds an optional outer completion TaskId capture."""
@@ -833,7 +841,13 @@ class GraphContext:
         pass
 
 
-def graph(name: str, *, deps: list[Any] | None = None, dumps: list[Any] | None = None) -> GraphContext:
+def graph(
+    name: str,
+    *,
+    deps: list[Any] | None = None,
+    dumps: list[Any] | None = None,
+    calendar_hash: int | Scalar | _ir.Expr | None = None,
+) -> GraphContext:
     """Mark an orchestration region for runtime-specific Graph lowering.
 
     Under ``RuntimeKind.HOST_BUILD_GRAPH``, ``OutlineGraphScopes`` extracts the
@@ -854,6 +868,12 @@ def graph(name: str, *, deps: list[Any] | None = None, dumps: list[Any] | None =
         dumps: Optional list literal of outer-scope tensor names for selective
             tensor dumps. The marks apply to the outer Graph task on HBG and
             follow the consuming dispatches inside the region on TMR.
+        calendar_hash: Optional integer scalar expression specifying an explicit
+            A5 Graph Calendar PGO bucket ID (including ``0``). Groups Graph
+            invocations with similar execution costs in the Worker-local
+            Calendar cache while keeping Definition identity and per-run
+            argument binding independent. Ignored on runtimes without A5
+            Calendar PGO (including TMR, where the region is inlined).
 
     On HBG, ``with pl.graph(..., deps=[ready]) as done:`` binds ``done`` to
     completion of the entire Graph, including its first recording. TMR rejects
@@ -873,7 +893,7 @@ def graph(name: str, *, deps: list[Any] | None = None, dumps: list[Any] | None =
         ...         h = attention(x, wq, h)
         ...         x = mlp(h, w1, x)
     """
-    return GraphContext(name, deps=deps, dumps=dumps)
+    return GraphContext(name, deps=deps, dumps=dumps, calendar_hash=calendar_hash)
 
 
 class SpmdContext:

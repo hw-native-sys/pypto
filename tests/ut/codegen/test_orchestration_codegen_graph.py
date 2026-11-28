@@ -33,6 +33,7 @@ from unittest import mock
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+import torch
 from _orchestration_codegen_common import (
     _assert_orchestration_compiles,
     _generate_orch_code,
@@ -43,7 +44,9 @@ from pypto import backend
 from pypto.backend import BackendType, pto_backend
 from pypto.ir.compile import compile as ir_compile
 from pypto.ir.compiled_program import CompiledProgram
+from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import codegen, passes
+from pypto.runtime import RunConfig
 
 # ``kernel_config.py`` is only written when ptoas is not skipped, but these tests
 # are about the emitted orchestration and manifest, not kernel compilation. Stub
@@ -1631,6 +1634,233 @@ def test_tmr_graph_expansion_preserves_control_flow(tmp_path, monkeypatch):
     assert re.search(r"if \(\(?0 < i\w*\)", orch), orch
     assert orch.count("rt_submit_aiv_task(") == 1, orch
     _assert_orchestration_compiles(source, runtime_name="tensormap_and_ringbuffer")
+
+
+@pytest.mark.parametrize("arch", ["a2a3", "a5"])
+def test_graph_calendar_hash_all_surfaces_emit_and_compile(tmp_path, monkeypatch, arch):
+    """Direct Graph call, Graph submit, and pl.graph scope all pass GraphSubmitOptions."""
+
+    @pl.program
+    class BucketedGraphs:
+        @pl.function(type=pl.FunctionType.InCore)
+        def increment(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            t = pl.load(c, [0, 0], [128, 128])
+            return pl.store(pl.add(t, 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(c, [0, 0], [128, 128])
+                pl.store(pl.add(t, 1.0), [0, 0], c)
+            return c
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], seq_len: pl.Scalar[pl.INT64]
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            # Bucket variable is consumed ONLY by calendar_hash — DCE must keep it alive.
+            bucket = seq_len // 128
+            c = self.layer(c, calendar_hash=bucket)
+            with pl.graph("scope_bucket", calendar_hash=0):
+                c = self.increment(c)
+            with pl.manual_scope():
+                c, seed = pl.submit(self.increment, c)
+                c, g_done = pl.submit(self.layer, c, deps=[seed], calendar_hash=bucket + 1)
+                with pl.graph("scope_submit_bucket", deps=[g_done], calendar_hash=bucket) as done:
+                    c, _inner = pl.submit(self.increment, c)
+                c, _tail = pl.submit(self.increment, c, deps=[done])
+            return c
+
+    # Print -> reparse round-trip preserves calendar_hash on Call, Submit, and GraphScopeStmt.
+    printed = BucketedGraphs.as_python()
+    assert "calendar_hash=bucket" in printed
+    assert "calendar_hash=0" in printed
+    assert "calendar_hash=bucket + 1" in printed
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        ir_compile(
+            BucketedGraphs,
+            skip_ptoas=False,
+            backend_type=BackendType.Ascend910 if arch == "a2a3" else BackendType.Ascend950,
+            output_dir=str(tmp_path),
+            dump_passes=False,
+        )
+    source = tmp_path / "orchestration" / "main.cpp"
+    _assert_orchestration_compiles(source, arch=arch)
+    entry = _entry_body(source.read_text())
+    assert entry.count("simpler::hbg::GraphSubmitOptions{static_cast<uint64_t>(") == 4, entry
+    assert "rt_submit_graph(&pypto_graph_layer, " in entry
+    assert "rt_submit_graph(&pypto_graph_scope_bucket, " in entry
+    assert "rt_submit_graph(&pypto_graph_scope_submit_bucket, " in entry
+
+
+def test_graph_calendar_hash_inline_helper(tmp_path, monkeypatch):
+    @pl.program
+    class InlineBuckets:
+        @pl.function(type=pl.FunctionType.Inline)
+        def bucket(self, n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+            return n // 128
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def inc(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            t = pl.load(c, [0, 0], [128, 128])
+            return pl.store(pl.add(t, 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+            return self.inc(c)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], n: pl.Scalar[pl.INT64]
+        ) -> pl.Tensor[[128, 128], pl.FP32]:
+            with pl.graph("outer", calendar_hash=self.bucket(n)):
+                c = self.inc(c)
+            if n > 0:
+                with pl.graph("conditional", calendar_hash=self.bucket(n)):
+                    c = self.inc(c)
+            c = self.layer(c, calendar_hash=self.bucket(n))
+            with pl.manual_scope():
+                c, _done = pl.submit(self.layer, c, calendar_hash=self.bucket(n))
+            return c
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT)
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        ir_compile(
+            InlineBuckets, backend_type=BackendType.Ascend950, output_dir=str(tmp_path), dump_passes=False
+        )
+    source = tmp_path / "orchestration" / "main.cpp"
+    _assert_orchestration_compiles(source, arch="a5")
+    entry = _entry_body(source.read_text())
+    dispatches = re.findall(
+        r"rt_submit_graph\(&pypto_graph_(\w+), [^;\n]*?"
+        r"simpler::hbg::GraphSubmitOptions\{static_cast<uint64_t>\((\w+)\)\}",
+        entry,
+    )
+    assert [name for name, _ in dispatches] == ["outer", "conditional", "layer", "layer"], entry
+    bucket_vars = set(re.findall(r"int64_t (\w+) = \(n / 128\);", entry))
+    assert all(value in bucket_vars for _, value in dispatches), entry
+
+
+def test_graph_calendar_hash_jit_surfaces_compile(tmp_path, monkeypatch):
+    """@pl.jit supports calendar_hash on @pl.jit.graph calls, pl.submit, and pl.graph."""
+
+    @pl.jit.incore
+    def inc(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+        t = pl.load(c, [0, 0], [128, 128])
+        return pl.store(pl.add(t, 1.0), [0, 0], c)
+
+    @pl.jit.graph
+    def graph_layer(c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]]) -> pl.Tensor[[128, 128], pl.FP32]:
+        return inc(c)
+
+    @pl.jit
+    def entry(
+        c: pl.InOut[pl.Tensor[[128, 128], pl.FP32]], seq_len: pl.Scalar[pl.INT64]
+    ) -> pl.Tensor[[128, 128], pl.FP32]:
+        bucket = seq_len // 128
+        c = graph_layer(c, calendar_hash=bucket)
+        with pl.graph("inline_bucket", calendar_hash=bucket + 1):
+            c = inc(c)
+        with pl.manual_scope():
+            c, seed = pl.submit(inc, c)
+            c, _done = pl.submit(graph_layer, c, deps=[seed], calendar_hash=0)
+        return c
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT)
+    x = torch.zeros((128, 128), dtype=torch.float32)
+    cfg = RunConfig(
+        arch=BackendType.Ascend950,
+        save_kernels=True,
+        save_kernels_dir=str(tmp_path),
+        dump_passes=False,
+    )
+    with passes.PassContext([], runtime=passes.RuntimeKind.HOST_BUILD_GRAPH):
+        compiled = entry.compile(x, 256, config=cfg)
+    source = Path(compiled.output_dir) / "orchestration" / "entry.cpp"
+    _assert_orchestration_compiles(source, arch="a5")
+    body = _entry_body(source.read_text())
+    assert body.count("simpler::hbg::GraphSubmitOptions{static_cast<uint64_t>(") == 3, body
+
+
+def test_graph_calendar_hash_tmr_drops_hint_and_inlines(tmp_path, monkeypatch):
+    """TMR drops calendar_hash cleanly when expanding pl.graph and Graph calls."""
+
+    @pl.program
+    class PortableBucketed:
+        @pl.function(type=pl.FunctionType.InCore)
+        def inc(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return pl.store(pl.add(pl.load(c, [0, 0], [16, 16]), 1.0), [0, 0], c)
+
+        @pl.function(type=pl.FunctionType.Graph)
+        def layer(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+            return self.inc(c)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]], bucket: pl.Scalar[pl.INT64]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            c = self.layer(c, calendar_hash=bucket)
+            with pl.graph("region", calendar_hash=0):
+                c = self.inc(c)
+            return c
+
+    monkeypatch.setattr(pto_backend, "_compile_pto_module", lambda *_a, **_kw: _STUB_PTOAS_OUTPUT)
+    with passes.PassContext([], runtime=passes.RuntimeKind.TENSORMAP_AND_RINGBUFFER):
+        ir_compile(PortableBucketed, output_dir=str(tmp_path), dump_passes=False)
+    source = tmp_path / "orchestration" / "main.cpp"
+    orch = source.read_text()
+    assert "rt_submit_graph" not in orch
+    assert "GraphSubmitOptions" not in orch
+    assert orch.count("rt_submit_aiv_task(") == 2, orch
+    _assert_orchestration_compiles(source, runtime_name="tensormap_and_ringbuffer")
+
+
+def test_calendar_hash_rejected_on_non_graph_calls():
+    """Parser rejects calendar_hash on non-Graph calls, submits, and spmd_submit."""
+
+    with pytest.raises(ParserTypeError, match=r"does not accept keyword argument 'calendar_hash'"):
+
+        @pl.program
+        class BadDirect:
+            @pl.function(type=pl.FunctionType.InCore)
+            def inc(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                return pl.store(pl.add(pl.load(c, [0, 0], [16, 16]), 1.0), [0, 0], c)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                return self.inc(c, calendar_hash=0)
+
+    with pytest.raises(ParserTypeError, match=r"does not accept keyword argument 'calendar_hash'"):
+
+        @pl.program
+        class BadSubmit:
+            @pl.function(type=pl.FunctionType.InCore)
+            def inc(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                return pl.store(pl.add(pl.load(c, [0, 0], [16, 16]), 1.0), [0, 0], c)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                with pl.manual_scope():
+                    c, _tid = pl.submit(self.inc, c, calendar_hash=0)
+                return c
+
+    with pytest.raises(ParserTypeError, match=r"does not accept keyword argument 'calendar_hash'"):
+
+        @pl.program
+        class BadSpmdSubmit:
+            @pl.function(type=pl.FunctionType.Graph)
+            def layer(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    pl.store(pl.add(pl.load(c, [0, 0], [16, 16]), 1.0), [0, 0], c)
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, c: pl.InOut[pl.Tensor[[16, 16], pl.FP32]]) -> pl.Tensor[[16, 16], pl.FP32]:
+                with pl.manual_scope():
+                    c, _tid = pl.spmd_submit(self.layer, c, core_num=2, calendar_hash=0)
+                return c
 
 
 if __name__ == "__main__":

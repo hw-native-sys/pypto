@@ -1199,6 +1199,9 @@ void OrchestrationStmtCodegen::GenerateFunctionCallCode(const CallPtr& call, con
     return;
   }
 
+  CHECK_SPAN(!call->HasAttr(kAttrCalendarHash), call->span_)
+      << "calendar_hash is only valid on FunctionType.Graph dispatches, not '" << callee_name << "'";
+
   CoreType core_type = InferFunctionCoreType(callee_func);
 
   auto params = BuildTaskParams(call, callee_func);
@@ -1254,8 +1257,16 @@ void OrchestrationStmtCodegen::GenerateGraphCallCode(const CallPtr& call, const 
     EmitIndentedLine(config_var + ".check_bindings(" + task_var + ");");
   }
   EmitIndentedLine(config_var + ".boundary = pypto_graph_boundary_layout(" + task_var + ");");
+  std::string options_arg;
+  if (auto calendar_hash = call->GetAttr<ExprPtr>(kAttrCalendarHash, nullptr)) {
+    CHECK_SPAN(IsValidCalendarHashExpr(calendar_hash), call->span_)
+        << "Graph function '" << callee_func->name_
+        << "' has invalid calendar_hash; expected an integer scalar expression.";
+    options_arg = ", simpler::hbg::GraphSubmitOptions{static_cast<uint64_t>(" +
+                  GenerateExprString(calendar_hash) + ")}";
+  }
   const std::string submit = "rt_submit_graph(&" + GraphFunctionSymbol(callee_func->name_) + ", " + task_var +
-                             ", " + config_var + ")";
+                             ", " + config_var + options_arg + ")";
   if (ShouldCaptureTaskOutputs(call, capture_plain_task_id)) {
     // Graph boundaries use caller-owned tensors only. Normalize their shell
     // completion into the existing zero-output handle so submit aliases and

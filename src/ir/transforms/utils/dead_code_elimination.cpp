@@ -11,7 +11,6 @@
 
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 
-#include <any>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -273,26 +272,9 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
       // ``with pl.spmd(n):``) that can reference scalar Vars; we collect
       // those refs too so a scalar assigned only for the block count is
       // not deleted.
-      auto add_var = [&](const VarPtr& v) {
-        if (v) live.insert(v.get());
-      };
       for (const auto& [k, v] : scope_stmt->attrs_) {
-        if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars || k == kAttrDumpVars) {
-          if (const auto* edges = std::any_cast<std::vector<VarPtr>>(&v)) {
-            for (const auto& e : *edges) add_var(e);
-          }
-        } else if (k == kAttrTaskIdVar) {
-          if (const auto* var = std::any_cast<VarPtr>(&v)) add_var(*var);
-        } else if (k == kAttrPredicate) {
-          // ``with pl.spmd(..., predicate=(t[i] > 0)):`` — an Expr, so collect
-          // every Var it references (the operand tensor and its indices)
-          // rather than remapping a single Var. DCE runs at pass 5, well
-          // before OutlineSpmdScopes moves this onto Submit::predicate_, so
-          // the attr is live IR here: without this the operand's feeding
-          // assignment looks dead and its removal leaves a dangling reference
-          // — the same failure mode as issue #1456 above.
-          if (const auto* pred = std::any_cast<ExprPtr>(&v)) collect_expr_refs(*pred);
-        }
+        (void)k;
+        ForEachAttrExpr(v, collect_expr_refs);
       }
       if (auto spmd = std::dynamic_pointer_cast<const SpmdScopeStmt>(scope_stmt)) {
         collect_expr_refs(spmd->core_num_);

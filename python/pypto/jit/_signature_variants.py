@@ -234,6 +234,7 @@ def build_contexts(
                         namespace,
                         local_names,
                         orchestrator=dep._func_type == "orchestration",
+                        graph=dep._func_type == "graph",
                     )
                     if signatures[dep_id][0]
                     else {}
